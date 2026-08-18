@@ -33,6 +33,24 @@ function tempConfig(): HenryConfig {
   return config;
 }
 
+/**
+ * The FRAMEWORK ships neutral: no owner's job titles and no owner's city baked into the
+ * defaults. Titles come from HENRY_JOB_SCOUT_TITLES or `jobs alerts-sync`; an unconfigured
+ * scout skips with a reason (below) instead of searching somebody else's targets.
+ */
+test("shipped defaults carry no owner-specific scout targets", () => {
+  const keys = ["HENRY_JOB_SCOUT_TITLES", "LAVU_JOB_SCOUT_TITLES", "HENRY_JOB_SCOUT_LOCATION", "LAVU_JOB_SCOUT_LOCATION"];
+  const saved = keys.map((key) => [key, process.env[key]] as const);
+  for (const key of keys) delete process.env[key];
+  try {
+    const config = loadConfig(fs.mkdtempSync(path.join(os.tmpdir(), "henry-scout-defaults-")));
+    assert.deepEqual(config.jobScoutTitles, [], "no titles are baked in");
+    assert.equal(config.jobScoutLocation, "Remote", "a neutral location, not the author's city");
+  } finally {
+    for (const [key, value] of saved) if (value !== undefined) process.env[key] = value;
+  }
+});
+
 async function activityFor(config: HenryConfig): Promise<ActivityLog> {
   const activity = new ActivityLog(config.activityPath);
   await activity.init();

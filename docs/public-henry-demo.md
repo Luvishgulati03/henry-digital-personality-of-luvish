@@ -31,7 +31,7 @@ Notes:
 - The UI carries an honest line: "demo twin on a free-tier model — the real Henry
   runs Claude + Codex locally on an 8GB M1 Air."
 - Later upgrades that stay cheap: Anthropic Haiku ($5 credit ≈ ~1–2k conversations),
-  custom domain reuse (worker routes under luvishgulati.com, still $0).
+  custom domain reuse (worker routes under the portfolio's own domain, still $0).
 
 ## Safety rails (non-negotiable)
 

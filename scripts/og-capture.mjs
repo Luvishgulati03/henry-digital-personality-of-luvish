@@ -1,16 +1,30 @@
-// Portfolio capture + acceptance audit.
-// Uses the Playwright already installed in ~/dev/henry — nothing is installed in portfolio/.
-//   node scripts/og-capture.mjs            → og.png + screenshots + audit
-//   node scripts/og-capture.mjs --audit    → audit only
+// Portfolio capture + acceptance audit — nothing about a particular portfolio is baked in.
+// Uses the Playwright already installed in this repo — nothing is installed in the portfolio.
+//   PORTFOLIO_URL=~/dev/portfolio node scripts/og-capture.mjs            → og.png + screenshots + audit
+//   PORTFOLIO_URL=~/dev/portfolio node scripts/og-capture.mjs --audit    → audit only
+// Optional, for the link checks: PORTFOLIO_EMAIL=you@example.com asserts THAT mailto (unset:
+// asserts only that some mailto link exists); PORTFOLIO_RESUME_FILE=Your_Resume.pdf likewise
+// for the résumé download link.
 import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import os from 'node:os';
 import path from 'node:path';
 
-const PORTFOLIO = '/Users/luvishgulati/dev/portfolio';
-const PAGE = pathToFileURL(path.join(PORTFOLIO, 'index.html')).href;
+const target = process.env.PORTFOLIO_URL;
+if (!target) {
+  console.error('Usage: PORTFOLIO_URL=<portfolio directory or file:// URL to index.html> node scripts/og-capture.mjs [--audit]');
+  process.exit(1);
+}
+// og.png and the shots are written NEXT TO the page, so the target resolves to a local directory.
+const PORTFOLIO = target.startsWith('file://')
+  ? path.dirname(fileURLToPath(target))
+  : path.resolve(target.startsWith('~') ? path.join(os.homedir(), target.slice(1)) : target);
+const PAGE = target.startsWith('file://') ? target : pathToFileURL(path.join(PORTFOLIO, 'index.html')).href;
 const CARD = pathToFileURL(path.join(PORTFOLIO, 'assets', 'og-card.html')).href;
 const SHOTS = path.join(PORTFOLIO, 'shots');
+const EXPECTED_EMAIL = process.env.PORTFOLIO_EMAIL;
+const EXPECTED_RESUME = process.env.PORTFOLIO_RESUME_FILE;
 const auditOnly = process.argv.includes('--audit');
 
 const results = [];
@@ -158,8 +172,10 @@ if (process.env.INSPECT) {
   const anchors = await p.evaluate(() => [...document.querySelectorAll('a[href^="#"]')]
     .map(a => a.getAttribute('href')).filter(h => h.length > 1 && !document.querySelector(h)));
   ok('5a. all in-page anchors resolve', anchors.length === 0, anchors.join(', '));
-  ok('5b. mailto present', links.some(l => l.href === 'mailto:Gulatiluvish@gmail.com'));
-  ok('5c. resume download link present', links.some(l => l.dl && l.href.includes('Luvish_Gulati_Resume.pdf')));
+  ok(`5b. mailto present${EXPECTED_EMAIL ? ` (${EXPECTED_EMAIL})` : ''}`,
+    links.some(l => (EXPECTED_EMAIL ? l.href === `mailto:${EXPECTED_EMAIL}` : l.href.startsWith('mailto:'))));
+  ok(`5c. resume download link present${EXPECTED_RESUME ? ` (${EXPECTED_RESUME})` : ''}`,
+    links.some(l => l.dl && (EXPECTED_RESUME ? l.href.includes(EXPECTED_RESUME) : true)));
   console.log('\n   external hrefs:');
   [...new Set(links.filter(l => /^https?:/.test(l.href)).map(l => l.href))].forEach(h => console.log('   • ' + h));
   console.log('');

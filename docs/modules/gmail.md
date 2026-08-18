@@ -109,7 +109,7 @@ Env keys (`.env`, all read by `src/config.ts`):
 GMAIL_CREDENTIALS_PATH=./data/gmail-credentials.json   # default shown
 GMAIL_TOKEN_PATH=./data/gmail-token.json                # default shown
 GMAIL_REDIRECT_URI=http://127.0.0.1:43821/oauth2callback # default shown
-DAD_EMAIL=                                              # optional, for recognizing the owner's own address
+HENRY_OWNER_EMAIL=                                      # optional, for recognizing the owner's own address (legacy: DAD_EMAIL)
 ```
 
 One-time external setup (Google Cloud OAuth desktop credentials):

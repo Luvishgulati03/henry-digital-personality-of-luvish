@@ -1,11 +1,27 @@
-// Portfolio screenshot capture. Run from the henry repo root (Playwright lives here):
-//   cd ~/dev/henry && node scripts/portfolio-shots.mjs
-// Writes 1440x900 desktop + 390x844 mobile, dark + light, hero + full, at 2x DPR.
+// Portfolio screenshot capture — nothing about a particular portfolio is baked in.
+// Run from the henry repo root (Playwright lives here):
+//   PORTFOLIO_URL=~/dev/portfolio node scripts/portfolio-shots.mjs
+// Writes 1440x900 desktop + 390x844 mobile, dark + light, hero + full, at 2x DPR into
+// <portfolio>/shots (override with PORTFOLIO_SHOTS_DIR).
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import os from "node:os";
+import path from "node:path";
 
-const PAGE = "file:///Users/luvishgulati/dev/portfolio/index.html";
-const OUT = "/Users/luvishgulati/dev/portfolio/shots";
+const target = process.env.PORTFOLIO_URL;
+if (!target) {
+  console.error("Usage: PORTFOLIO_URL=<portfolio directory, file:// URL, or https:// URL> node scripts/portfolio-shots.mjs");
+  process.exit(1);
+}
+const remote = /^https?:\/\//i.test(target);
+const dir = remote
+  ? undefined
+  : target.startsWith("file://")
+    ? path.dirname(fileURLToPath(target))
+    : path.resolve(target.startsWith("~") ? path.join(os.homedir(), target.slice(1)) : target);
+const PAGE = remote || target.startsWith("file://") ? target : pathToFileURL(path.join(dir, "index.html")).href;
+const OUT = process.env.PORTFOLIO_SHOTS_DIR || path.join(dir ?? process.cwd(), "shots");
 mkdirSync(OUT, { recursive: true });
 
 const VIEWPORTS = {

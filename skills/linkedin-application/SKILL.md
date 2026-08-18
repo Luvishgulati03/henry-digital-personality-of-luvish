@@ -48,8 +48,9 @@ your job is making that manual apply take under a minute and land expertly.
 - **Salary / CTC expectations**: from application-profile if present; else
   `[Luvish: fill — confirm range]` plus the safe phrasing: "flexible for the right
   role; currently at <X>, targeting <range> based on the scope described".
-- **Portfolio / links fields**: https://luvishgulati.com first, then the Henry
-  repo, then LinkedIn. The portfolio IS the differentiator — always include it.
+- **Portfolio / links fields**: the portfolio URL from `application-profile.md`
+  (add a `Portfolio:` line there if it has none) first, then the Henry repo, then
+  LinkedIn. The portfolio IS the differentiator — always include it.
 - **Open text / "anything else?"**: 2-3 lines max: one differentiator sentence
   (builder who ships end to end, agent runs his own job pipeline), the portfolio
   link, and availability. Never leave it blank, never write an essay.

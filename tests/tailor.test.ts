@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseResume, numberGuard, skillsUnchanged, renderResumeHtml, bulletShapesMatch } from "../src/jobs/tailor.ts";
+import { parseResume, numberGuard, skillsUnchanged, renderResumeHtml, bulletShapesMatch, linkifyContact, resumeFileName } from "../src/jobs/tailor.ts";
 
 const FIXTURE = `# JANE BUILDER
 
@@ -78,6 +78,35 @@ test("renderResumeHtml escapes content and keeps template structure", () => {
   assert.match(html, /class="name">JANE BUILDER/);
   assert.match(html, /Key Projects/);
   assert.doesNotMatch(html, /<fast>/);
+});
+
+test("the contact line is linkified from the RESUME'S data — no address or profile is baked into the framework", () => {
+  const html = renderResumeHtml(parseResume(FIXTURE));
+  // The fixture's own address becomes the mailto — and it is the ONLY one in the document.
+  assert.match(html, /<a href="mailto:jane@example\.com">jane@example\.com<\/a>/);
+  assert.deepEqual(html.match(/mailto:[^"]+/g), ["mailto:jane@example.com"]);
+  // No linkedin.com/in/... URL in the contact line → the word stays PLAIN TEXT rather than
+  // pointing at somebody else's profile.
+  assert.doesNotMatch(html, /linkedin\.com/i);
+  assert.match(html, /<span class="sep">\|<\/span> LinkedIn/);
+});
+
+test("linkifyContact links LinkedIn only to a profile URL the contact line actually carries", () => {
+  const withUrl = linkifyContact("jane@example.com | linkedin.com/in/jane-builder | LinkedIn");
+  assert.match(withUrl, /<a href="https:\/\/linkedin\.com\/in\/jane-builder">linkedin\.com\/in\/jane-builder<\/a>/);
+  assert.match(withUrl, /<a href="https:\/\/linkedin\.com\/in\/jane-builder">LinkedIn<\/a>/);
+  const httpsUrl = linkifyContact("https://www.linkedin.com/in/sam-dev-99 | LinkedIn");
+  assert.match(httpsUrl, /<a href="https:\/\/www\.linkedin\.com\/in\/sam-dev-99">LinkedIn<\/a>/, "an already-absolute URL is used as-is");
+  assert.equal(linkifyContact("Some City | LinkedIn"), "Some City | LinkedIn", "no URL, no link");
+  // Escaping still happens before linkification — markup in the contact line can never inject.
+  assert.match(linkifyContact("<b>x</b> | jane@example.com"), /^&lt;b&gt;x&lt;\/b&gt; \| <a href="mailto:jane@example\.com">/);
+});
+
+test("resumeFileName derives the PDF name from the resume's own name, not a baked-in one", () => {
+  assert.equal(resumeFileName("JANE BUILDER", "Acme Corp"), "Jane_Builder_Resume_acme_corp.pdf");
+  assert.equal(resumeFileName("Jean-Luc Picard", "Beta Ltd"), "Jean_Luc_Picard_Resume_beta_ltd.pdf");
+  assert.equal(resumeFileName("", "Acme Corp"), "Resume_acme_corp.pdf", "a nameless resume still gets a usable filename");
+  assert.equal(resumeFileName(parseResume(FIXTURE).name, "the company"), "Jane_Builder_Resume_the_company.pdf");
 });
 
 test("every font-size in the template scales with --fit — a fixed-size element would make the shrink ladder under-deliver", () => {

@@ -12,7 +12,9 @@ dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 dotenv.config();
 
 const DEFAULT_SCREENSHOT_CATEGORIES = ["work", "design-reference", "receipts", "memes", "documents", "code", "_unsorted"];
-const DEFAULT_JOB_SCOUT_TITLES = ["AI Product Manager", "Associate Product Manager", "Product Engineer"];
+// No titles are baked in: an unconfigured scout skips with a reason (src/jobs/scout.ts) until
+// HENRY_JOB_SCOUT_TITLES is set or `jobs alerts-sync` learns them from the owner's job-alert mail.
+const DEFAULT_JOB_SCOUT_TITLES: string[] = [];
 
 export interface HenryConfig {
   rootDir: string;
@@ -34,7 +36,8 @@ export interface HenryConfig {
   codexModel?: string;
   claudeModel?: string;
   requireOutboundApproval: boolean;
-  dadEmail?: string;
+  /** The owner's own email address (HENRY_OWNER_EMAIL; legacy DAD_EMAIL still honoured). */
+  ownerEmail?: string;
   gmailCredentialsPath: string;
   gmailTokenPath: string;
   gmailRedirectUri: string;
@@ -78,9 +81,9 @@ export interface HenryConfig {
   /** Human-readable ledger Luvish actually reads — regenerated from `jobTrackerPath` after every update. */
   jobTrackerMarkdownPath: string;
   draftRepliesDir: string;
-  /** Morning job-scout role titles (HENRY_JOB_SCOUT_TITLES, comma-separated). */
+  /** Morning job-scout role titles (HENRY_JOB_SCOUT_TITLES, comma-separated; empty until configured). */
   jobScoutTitles: string[];
-  /** Job-scout search location (HENRY_JOB_SCOUT_LOCATION). */
+  /** Job-scout search location (HENRY_JOB_SCOUT_LOCATION, default "Remote"). */
   jobScoutLocation: string;
   /** Scout dedupe + once-per-day meta (data/scout.db, WAL) — same idioms as standupDbPath. */
   scoutDbPath: string;
@@ -165,7 +168,7 @@ export function loadConfig(rootDir = defaultRoot): HenryConfig {
     codexModel: env("CODEX_MODEL") || undefined,
     claudeModel: env("CLAUDE_MODEL") || undefined,
     requireOutboundApproval: bool(env("REQUIRE_OUTBOUND_APPROVAL"), true),
-    dadEmail: process.env.DAD_EMAIL || undefined,
+    ownerEmail: env("OWNER_EMAIL") || process.env.DAD_EMAIL || undefined,
     gmailCredentialsPath: resolveFromRoot(rootDir, process.env.GMAIL_CREDENTIALS_PATH, "data/gmail-credentials.json"),
     gmailTokenPath: resolveFromRoot(rootDir, process.env.GMAIL_TOKEN_PATH, "data/gmail-token.json"),
     gmailRedirectUri: process.env.GMAIL_REDIRECT_URI || "http://127.0.0.1:43821/oauth2callback",
@@ -200,7 +203,7 @@ export function loadConfig(rootDir = defaultRoot): HenryConfig {
     jobTrackerMarkdownPath: path.join(dataDir, "job-tracker.md"),
     draftRepliesDir: path.join(dataDir, "drafts"),
     jobScoutTitles: parseJobScoutTitles(env("JOB_SCOUT_TITLES")),
-    jobScoutLocation: env("JOB_SCOUT_LOCATION") || "Bengaluru",
+    jobScoutLocation: env("JOB_SCOUT_LOCATION") || "Remote",
     scoutDbPath: path.join(dataDir, "scout.db"),
     scoutProfilePath: path.join(dataDir, "scout-profile.json"),
     scoutDir: path.join(dataDir, "scout"),

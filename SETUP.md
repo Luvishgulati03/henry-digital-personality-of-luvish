@@ -113,7 +113,7 @@ matters, in order:
 | `HENRY_JOB_PROFILE_PATH`, `HENRY_RESUME_SOURCE_PATH` | OPTIONAL | Only for the jobs/resume pipeline; they point at personal files that are gitignored. |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | OPTIONAL | Daily tech tweet. All four together or none — a partial set is treated as no keys and tweets stage instead of posting. |
 | `OPENAI_API_KEY` | OPTIONAL | Not needed. Embeddings run locally and free (`bge-small-en-v1.5`, on-device). |
-| `DAD_EMAIL` | OPTIONAL | Lets Henry recognise the operator's own address. |
+| `HENRY_OWNER_EMAIL` | OPTIONAL | Lets Henry recognise the owner's own address. (The legacy `DAD_EMAIL` spelling still works.) |
 
 **Verify:** `test -f .env && echo ok`
 

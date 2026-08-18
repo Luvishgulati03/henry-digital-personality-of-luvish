@@ -126,6 +126,28 @@ function inline(text: string): string {
   return esc(text).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
 }
 
+const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g;
+const LINKEDIN_URL_PATTERN = /(?:https?:\/\/)?(?:[a-z0-9-]+\.)*linkedin\.com\/in\/[A-Za-z0-9._%-]+\/?/i;
+
+/**
+ * Contact-line links come from the RESUME'S OWN DATA — no owner identity is baked into the
+ * framework. Every email address in the line becomes a `mailto:`; a `linkedin.com/in/...` URL
+ * becomes a link and lends its href to a separate "LinkedIn" label. With no such URL in the
+ * contact line the word stays PLAIN TEXT — a link to someone else's profile is worse than none.
+ */
+export function linkifyContact(contact: string): string {
+  const safe = esc(contact);
+  const profileUrl = safe.match(LINKEDIN_URL_PATTERN)?.[0];
+  let html = safe.replace(EMAIL_PATTERN, (email) => `<a href="mailto:${email}">${email}</a>`);
+  if (profileUrl) {
+    const href = /^https?:/i.test(profileUrl) ? profileUrl : `https://${profileUrl}`;
+    html = html.replace(profileUrl, () => `<a href="${href}">${profileUrl}</a>`);
+    // A standalone "LinkedIn" label (never the URL text — it is followed by ".com") links to the same profile.
+    html = html.replace(/(?<![\w./>-])LinkedIn(?![\w.])/i, (label) => `<a href="${href}">${label}</a>`);
+  }
+  return html;
+}
+
 /**
  * Fixed template replicating Luvish's real resume PDF (Word-blue, Letter). Content-only slots.
  * `fit` is a uniform shrink factor (1 = native metrics) driving the --fit CSS var: font and
@@ -133,9 +155,7 @@ function inline(text: string): string {
  * lines needed to honor the ONE-PAGE guarantee.
  */
 export function renderResumeHtml(d: ResumeData, fit = 1): string {
-  const contactHtml = esc(d.contact)
-    .replace(/Gulatiluvish@gmail\.com/i, '<a href="mailto:Gulatiluvish@gmail.com">Gulatiluvish@gmail.com</a>')
-    .replace(/\bLinkedIn\b/, '<a href="https://www.linkedin.com/in/luvish-gulati-282a84184">LinkedIn</a>')
+  const contactHtml = linkifyContact(d.contact)
     .split("|").map((s) => s.trim()).join(' <span class="sep">|</span> ');
   const expHtml = d.experience.map((e) => `
     <div class="entry">
@@ -187,6 +207,21 @@ export function renderResumeHtml(d: ResumeData, fit = 1): string {
 
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "application";
+}
+
+/**
+ * `Jane_Builder_Resume_Acme.pdf`, derived from the resume's OWN name — the framework carries no
+ * operator's name. A nameless (or unslugifiable) resume falls back to `Resume_<company>.pdf`.
+ */
+export function resumeFileName(name: string, company: string): string {
+  const person = name
+    .split(/[\s-]+/)
+    .map((part) => part.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter(Boolean)
+    .map((part) => part[0].toUpperCase() + part.slice(1).toLowerCase())
+    .join("_")
+    .slice(0, 60);
+  return `${person ? `${person}_` : ""}Resume_${slugify(company).replace(/-/g, "_")}.pdf`;
 }
 
 function extractJson(text: string): unknown {
@@ -280,7 +315,7 @@ export class TailoredApplicationService {
     await fs.writeFile(path.join(dir, "jd.txt"), jd + "\n", "utf8");
     await fs.writeFile(path.join(dir, "changes.md"), [`# Tailoring notes — ${role} at ${company}`, "", ...changes.map((c) => `- ${c}`), ""].join("\n"), "utf8");
 
-    const resumePdf = path.join(dir, `Luvish_Gulati_Resume_${slugify(company).replace(/-/g, "_")}.pdf`);
+    const resumePdf = path.join(dir, resumeFileName(tailored.name, company));
     // ONE-PAGE GUARANTEE, enforced not hoped-for: measure at the PDF's REAL content
     // width (8.5in - 1.1in margins = 7.4in = 710px at CSS 96dpi — a wide viewport
     // under-counts line wraps) → invisible micro-shrink (≤10%, fonts and rhythm scale
