@@ -1,0 +1,111 @@
+[
+  {
+    "id": "nightly-engram-dream",
+    "name": "Nightly Engram dream",
+    "cron": "0 2 * * *",
+    "kind": "memory.dream",
+    "enabled": true
+  },
+  {
+    "id": "gmail-inbox-poll",
+    "name": "Gmail inbox poll",
+    "cron": "*/15 * * * *",
+    "kind": "gmail.inbox",
+    "enabled": false
+  },
+  {
+    "id": "knowledge-distill-nightly",
+    "name": "Strategy-card distillation (manual/full-run mode \u2014 Luvish's laptop sleeps at night)",
+    "cron": "0 2 * * *",
+    "kind": "knowledge.distill",
+    "enabled": false,
+    "batchLimit": 25
+  },
+  {
+    "id": "job-mail-watch",
+    "name": "Job-application inbox watch (5 random checks/day plan)",
+    "cron": "*/30 * * * *",
+    "kind": "mail.watch",
+    "enabled": true
+  },
+  {
+    "id": "job-digest-afternoon",
+    "name": "Job index to Telegram (counts only, afternoon)",
+    "cron": "0 14 * * *",
+    "kind": "mail.digest",
+    "enabled": true
+  },
+  {
+    "id": "job-digest-night",
+    "name": "Job index to Telegram (counts only, night)",
+    "cron": "30 21 * * *",
+    "kind": "mail.digest",
+    "enabled": true
+  },
+  {
+    "id": "standup-prompt",
+    "name": "Standup ask posted to the team group (weekday mornings; no-op until the group is configured)",
+    "cron": "30 9 * * 1-5",
+    "kind": "standup.prompt",
+    "enabled": true
+  },
+  {
+    "id": "standup-scan",
+    "name": "Standup collect+scan+nudge window",
+    "cron": "*/15 10-11 * * 1-5",
+    "kind": "standup.scan",
+    "enabled": true
+  },
+  {
+    "id": "standup-summary",
+    "name": "Standup summary to Luvish (noon)",
+    "cron": "0 12 * * 1-5",
+    "kind": "standup.summary",
+    "enabled": true
+  },
+  {
+    "id": "standup-prompt-evening",
+    "name": "Evening progress ask posted to the team group",
+    "cron": "30 19 * * 1-5",
+    "kind": "standup.prompt",
+    "session": "evening",
+    "enabled": true
+  },
+  {
+    "id": "standup-scan-evening",
+    "name": "Evening progress collect+scan+nudge window",
+    "cron": "*/15 20-21 * * 1-5",
+    "kind": "standup.scan",
+    "session": "evening",
+    "enabled": true
+  },
+  {
+    "id": "standup-summary-evening",
+    "name": "Evening progress summary to Luvish (22:00, judged against the morning plan)",
+    "cron": "0 22 * * 1-5",
+    "kind": "standup.summary",
+    "session": "evening",
+    "enabled": true
+  },
+  {
+    "id": "portfolio-stats-daily",
+    "name": "Portfolio: refresh Henry stats + deploy (rails: never ships unreviewed work)",
+    "cron": "0 21 * * *",
+    "kind": "portfolio.stats",
+    "enabled": true
+  },
+  {
+    "id": "job-scout-morning",
+    "name": "Morning job scout (LinkedIn+X search → scored shortlist; never applies — Easy Apply stays human)",
+    "cron": "0 9 * * 1-5",
+    "kind": "jobs.scout",
+    "enabled": true
+  },
+  {
+    "id": "daily-tech-tweet",
+    "name": "Daily tech tweet (heartbeat across the afternoon; the service posts at one random minute inside it — no-op while social.tweets.enabled is off)",
+    "cron": "*/20 13-17 * * *",
+    "kind": "social.tweet",
+    "enabled": true
+  }
+]

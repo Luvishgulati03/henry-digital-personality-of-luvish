@@ -1,0 +1,36 @@
+{
+  "name": "henry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Henry — a terminal-first personal engineering agent orchestrated by Luna.",
+  "type": "module",
+  "bin": {
+    "henry": "./bin/henry.mjs"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts repl",
+    "start": "tsx src/cli.ts repl",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --import ./tests/isolate.mjs --test tests/**/*.test.ts",
+    "dashboard": "tsx src/cli.ts dashboard",
+    "schedule": "tsx src/cli.ts schedule daemon",
+    "build": "tsc --outDir dist --declaration --noEmit false"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "better-sqlite3": "12.11.1",
+    "croner": "^9.0.0",
+    "dotenv": "^16.4.7",
+    "engram-memory": "github:anmolm-growthx/engram-memory#70453fd",
+    "googleapis": "^144.0.0",
+    "mongodb": "^7.5.0",
+    "pdf-parse": "^1.1.1",
+    "playwright": "^1.62.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}
