@@ -91,3 +91,7 @@ never address anyone else.
 `build-your-pm-brain.md` · `docs/architecture.md` · `docs/modules/` (per-module
 agent-facing docs). Personal data (soul, memory, corpus, `data/`) is gitignored —
 the framework ships, your life doesn't.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Luvish Gulati.

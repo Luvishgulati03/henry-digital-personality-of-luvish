@@ -1,6 +1,7 @@
 {
   "name": "henry",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Henry — a terminal-first personal engineering agent orchestrated by Luna.",
   "type": "module",
