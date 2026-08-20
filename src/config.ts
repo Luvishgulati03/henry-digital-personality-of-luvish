@@ -66,8 +66,19 @@ export interface HenryConfig {
   telegramChatId?: string;
   /** The team standup group — the ONLY chat the standup poller reads and the group sender writes. */
   telegramStandupChatId?: string;
-  /** Luvish's portfolio repo (GitHub Pages) — the portfolio.stats workflow refreshes + deploys it. */
-  portfolioDir: string;
+  /**
+   * The owner's portfolio repo checkout (HENRY_PORTFOLIO_DIR) — the portfolio.stats workflow
+   * refreshes + deploys it. No path is baked in: unset means the capability is off (the agent
+   * prompt drops the portfolio instructions and the workflow skips with a reason).
+   */
+  portfolioDir?: string;
+  /** Public URL that portfolio repo publishes to (HENRY_PORTFOLIO_SITE) — display only, never fetched. */
+  portfolioSite?: string;
+  /**
+   * GitHub account whose contribution graph the portfolio stats refresh reads (HENRY_GITHUB_LOGIN).
+   * Unset means the workflow skips rather than querying somebody else's account.
+   */
+  githubLogin?: string;
   /** PM MODE: Henry operates as a project manager (PMBOK-grounded decisions with rationale). Persisted in settings.json. */
   pmMode: boolean;
   standupDbPath: string;
@@ -149,6 +160,9 @@ export function loadConfig(rootDir = defaultRoot): HenryConfig {
   const named = rootDir !== defaultRoot;
   const dataDir = resolveFromRoot(rootDir, named ? undefined : env("DATA_DIR"), "data");
   const memoryDir = resolveFromRoot(rootDir, named ? undefined : env("MEMORY_DIR"), "memory");
+  // No portfolio path is baked in — an unset variable stays undefined so callers can tell
+  // "not configured" from "configured to somewhere", rather than inheriting the author's tree.
+  const portfolioDir = env("PORTFOLIO_DIR");
   return {
     rootDir,
     dataDir,
@@ -193,8 +207,10 @@ export function loadConfig(rootDir = defaultRoot): HenryConfig {
     telegramBotToken: env("TELEGRAM_BOT_TOKEN") || undefined,
     telegramChatId: env("TELEGRAM_CHAT_ID") || undefined,
     telegramStandupChatId: env("TELEGRAM_STANDUP_CHAT_ID") || undefined,
-  portfolioDir: path.resolve(expandHome(env("PORTFOLIO_DIR") || "~/dev/portfolio")),
-  pmMode: false,
+    portfolioDir: portfolioDir ? path.resolve(expandHome(portfolioDir)) : undefined,
+    portfolioSite: env("PORTFOLIO_SITE") || undefined,
+    githubLogin: env("GITHUB_LOGIN") || undefined,
+    pmMode: false,
     standupDbPath: path.join(dataDir, "standups.db"),
     standupsDir: path.join(dataDir, "standups"),
     mailwatchPath: path.join(dataDir, "mailwatch.json"),

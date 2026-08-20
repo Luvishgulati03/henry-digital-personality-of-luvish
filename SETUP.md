@@ -114,6 +114,7 @@ matters, in order:
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | OPTIONAL | Daily tech tweet. All four together or none — a partial set is treated as no keys and tweets stage instead of posting. |
 | `OPENAI_API_KEY` | OPTIONAL | Not needed. Embeddings run locally and free (`bge-small-en-v1.5`, on-device). |
 | `HENRY_OWNER_EMAIL` | OPTIONAL | Lets Henry recognise the owner's own address. (The legacy `DAD_EMAIL` spelling still works.) |
+| `HENRY_PORTFOLIO_DIR`, `HENRY_PORTFOLIO_SITE`, `HENRY_GITHUB_LOGIN` | OPTIONAL | Only for the portfolio module: the local checkout of a separate GitHub Pages repo Henry may edit, its public URL (display only, never fetched), and the GitHub account whose contribution graph the daily stats refresh reads. Nothing is baked in — with `HENRY_PORTFOLIO_DIR` unset Henry's prompt carries no portfolio instructions, and with `HENRY_GITHUB_LOGIN` unset the `portfolio.stats` workflow skips with a reason instead of querying an account. |
 
 **Verify:** `test -f .env && echo ok`
 

@@ -234,9 +234,16 @@ export class WorkflowScheduler {
    * → skip; (2) local main already ahead of origin means UNSHIPPED page changes are
    * awaiting Luvish's go → skip, because this workflow must never be what first
    * publishes a redesign. Only when the sole diff is its own stats commit does it push.
+   *
+   * Nothing about the owner is baked in: both the repo (HENRY_PORTFOLIO_DIR) and the GitHub
+   * account whose contribution graph is refreshed (HENRY_GITHUB_LOGIN) are configuration, and
+   * an unset one skips the run with a reason rather than touching somebody else's repo/account.
    */
   private async runPortfolioStats(): Promise<unknown> {
     const dir = this.config.portfolioDir;
+    if (!dir) return { skipped: true, reason: "HENRY_PORTFOLIO_DIR is not set — no portfolio repo configured" };
+    const login = this.config.githubLogin;
+    if (!login) return { skipped: true, reason: "HENRY_GITHUB_LOGIN is not set — no GitHub account to read contribution stats for" };
     const script = path.join(dir, "scripts", "build-stats.mjs");
     if (!(await fs.access(script).then(() => true, () => false))) {
       return { skipped: true, reason: `portfolio scripts not found at ${dir}` };
@@ -258,8 +265,10 @@ export class WorkflowScheduler {
     // yesterday's bake) and re-bake the static markup, so Luvish's commits appear
     // on the site within a day without the page ever making a runtime request.
     try {
+      // JSON.stringify supplies the GraphQL string literal's quoting/escaping, so a login
+      // carrying a quote cannot rewrite the query.
       const graph = await run("gh", ["api", "graphql", "-f",
-        'query=query { user(login: "Luvishgulati03") { contributionsCollection { contributionCalendar { totalContributions weeks { contributionDays { contributionCount date } } } } } }',
+        `query=query { user(login: ${JSON.stringify(login)}) { contributionsCollection { contributionCalendar { totalContributions weeks { contributionDays { contributionCount date } } } } } }`,
       ], { timeout: 60_000 });
       // Temp-then-promote (audit 2026-08-09 B-M24): writing the JSON before a bake
       // that then fails would commit data disagreeing with the HTML.

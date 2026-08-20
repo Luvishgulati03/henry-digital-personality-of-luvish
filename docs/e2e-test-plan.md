@@ -1,6 +1,6 @@
 # Henry end-to-end test plan
 
-This is the executable validation plan for Henry. Tests must run against the isolated repository at `/Users/luvishgulati/Desktop/junior's repo/luvish jr/` and must never send an external message accidentally.
+This is the executable validation plan for Henry. Tests must run against an isolated checkout of this repository — never a live deployment — and must never send an external message accidentally.
 
 ## Test environments
 
