@@ -62,15 +62,19 @@ export class PlaywrightXFrontEnd implements XFrontEnd {
       const page = context.pages()[0] || await context.newPage();
       await page.goto("https://x.com/compose/post", { waitUntil: "domcontentloaded", timeout: 45_000 });
       // X is an SPA: domcontentloaded happens before the composer is hydrated.
-      // X keeps a hidden composer mounted alongside the visible one on this route.
-      const composer = page.locator(`${X_COMPOSER_SELECTOR}:visible`);
+      // X keeps an inline composer and a modal composer mounted on this route. The
+      // modal is the compose target opened by /compose/post; scope every irreversible
+      // control to it so the underlying timeline cannot create a second match.
+      const dialog = page.locator('[role="dialog"]').first();
+      const root = await dialog.count() ? dialog : page;
+      const composer = root.locator(`${X_COMPOSER_SELECTOR}:visible`);
       await composer.first().waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
       if (await composer.count() !== 1 || !(await composer.first().isVisible().catch(() => false))) {
         throw new Error("X composer unavailable — sign in with `henry tweet browser login` and close that window before posting");
       }
       await composer.fill(text);
       // One exact, known irreversible target. Never fall back to labels or generic buttons.
-      const button = page.locator(X_POST_BUTTON_SELECTOR);
+      const button = root.locator(X_POST_BUTTON_SELECTOR);
       await button.first().waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
       if (await button.count() !== 1 || !(await button.first().isVisible().catch(() => false))) {
         throw new Error("Could not identify exactly one visible X Post button; no post was made");
