@@ -19,6 +19,19 @@ test("stagedTweetText extracts only the body", () => {
   assert.throws(() => stagedTweetText("# missing"));
 });
 
+test("stageText creates an exact-text approval without changing the draft file", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "henry-x-direct-"));
+  const config = loadConfig(root);
+  const activity = new ActivityLog(config.activityPath); await activity.init();
+  const approvals = new ApprovalStore(config.approvalsPath); await approvals.init();
+  const service = new XBrowserPostService(config, activity, approvals, { login: async () => undefined, post: async () => ({ url: "" }) });
+  const result = await service.stageText("  bengaluru weather>  ");
+  assert.equal(result.text, "bengaluru weather>");
+  const item = await approvals.get(result.approvalId);
+  assert.equal(item?.body, "bengaluru weather>");
+  assert.equal(item?.status, "pending");
+});
+
 test("X browser flow stages before it can post and uses the approved exact text", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "henry-x-browser-"));
   const config = loadConfig(root);
@@ -35,4 +48,14 @@ test("X browser flow stages before it can post and uses the approved exact text"
   const item = await approvals.claimForExecution(staged.approvalId);
   assert.match(await service.submitApproved(item), /Posted to X/);
   assert.deepEqual(sent, ["ship it, cautiously"]);
+});
+
+test("approval stores refresh drafts created by another process", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "henry-approval-refresh-"));
+  const filePath = path.join(root, "approvals.json");
+  const dashboard = new ApprovalStore(filePath);
+  const cli = new ApprovalStore(filePath);
+  await dashboard.init();
+  const created = await cli.create({ kind: "social.x-post", title: "Post to X", body: "hello", payload: { text: "hello" } });
+  assert.equal((await dashboard.list())[0]?.id, created.id);
 });

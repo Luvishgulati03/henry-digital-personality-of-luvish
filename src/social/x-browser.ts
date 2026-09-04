@@ -107,12 +107,20 @@ export class XBrowserPostService {
   async stage(date?: string): Promise<{ approvalId: string; text: string; stagedPath: string }> {
     const stagedPath = this.stagedPath(date);
     const text = stagedTweetText(await fs.readFile(stagedPath, "utf8"));
+    const result = await this.stageText(text, stagedPath);
+    return { ...result, stagedPath };
+  }
+
+  /** Stage an explicitly supplied tweet without mutating the daily draft file. */
+  async stageText(text: string, stagedPath?: string): Promise<{ approvalId: string; text: string; stagedPath?: string }> {
+    const normalized = text.trim();
+    if (!normalized || normalized.length > 280) throw new Error("Tweet is empty or exceeds 280 characters");
     const approval = await this.approvals.create({
-      kind: "social.x-post", title: "Post staged tweet to X", body: text,
-      payload: { text, stagedPath },
+      kind: "social.x-post", title: "Post approved tweet to X", body: normalized,
+      payload: { text: normalized, ...(stagedPath ? { stagedPath } : {}) },
     });
-    await this.activity.record("social.drafted", `X browser post awaiting approval: ${text.slice(0, 120)}`, { approvalId: approval.id, stagedPath });
-    return { approvalId: approval.id, text, stagedPath };
+    await this.activity.record("social.drafted", `X browser post awaiting approval: ${normalized.slice(0, 120)}`, { approvalId: approval.id, ...(stagedPath ? { stagedPath } : {}) });
+    return { approvalId: approval.id, text: normalized, ...(stagedPath ? { stagedPath } : {}) };
   }
 
   async submitApproved(item: ApprovalItem): Promise<string> {
