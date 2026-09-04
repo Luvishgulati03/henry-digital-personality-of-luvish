@@ -12,6 +12,7 @@ test("X browser targets the hydrated composer and current/fallback post button i
   assert.equal(X_COMPOSER_SELECTOR, '[data-testid="tweetTextarea_0"]');
   assert.match(X_POST_BUTTON_SELECTOR, /tweetButtonInline/);
   assert.match(X_POST_BUTTON_SELECTOR, /tweetButton/);
+  assert.match(X_POST_BUTTON_SELECTOR, /:visible/);
 });
 
 test("stagedTweetText extracts only the body", () => {

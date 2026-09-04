@@ -15,8 +15,8 @@ export interface XFrontEnd {
 /** X has used both button test ids over time; prefer the current inline compose id. */
 export const X_COMPOSER_SELECTOR = '[data-testid="tweetTextarea_0"]';
 export const X_POST_BUTTON_SELECTOR = [
-  '[data-testid="tweetButtonInline"]',
-  '[data-testid="tweetButton"]',
+  '[data-testid="tweetButtonInline"]:visible',
+  '[data-testid="tweetButton"]:visible',
 ].join(',');
 
 function profileLockError(error: unknown): Error {
@@ -62,7 +62,8 @@ export class PlaywrightXFrontEnd implements XFrontEnd {
       const page = context.pages()[0] || await context.newPage();
       await page.goto("https://x.com/compose/post", { waitUntil: "domcontentloaded", timeout: 45_000 });
       // X is an SPA: domcontentloaded happens before the composer is hydrated.
-      const composer = page.locator(X_COMPOSER_SELECTOR);
+      // X keeps a hidden composer mounted alongside the visible one on this route.
+      const composer = page.locator(`${X_COMPOSER_SELECTOR}:visible`);
       await composer.first().waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
       if (await composer.count() !== 1 || !(await composer.first().isVisible().catch(() => false))) {
         throw new Error("X composer unavailable — sign in with `henry tweet browser login` and close that window before posting");
