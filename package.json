@@ -12,7 +12,7 @@
     "dev": "tsx src/cli.ts repl",
     "start": "tsx src/cli.ts repl",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --import ./tests/isolate.mjs --test tests/**/*.test.ts",
+    "test": "tsx --import ./tests/isolate.mjs --test-concurrency=1 --test tests/**/*.test.ts",
     "dashboard": "tsx src/cli.ts dashboard",
     "schedule": "tsx src/cli.ts schedule daemon",
     "build": "tsc --outDir dist --declaration --noEmit false"
