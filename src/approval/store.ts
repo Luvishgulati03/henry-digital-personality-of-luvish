@@ -6,6 +6,7 @@ import type { ApprovalItem } from "../types.ts";
 export class ApprovalStore {
   private items: ApprovalItem[] = [];
   private loaded = false;
+  private lastLoadedMtimeMs = -1;
   private mutationChain = Promise.resolve();
 
   constructor(private readonly filePath: string) {}
@@ -13,17 +14,42 @@ export class ApprovalStore {
   async init(): Promise<void> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
     await fs.chmod(path.dirname(this.filePath), 0o700).catch(() => undefined);
-    try { this.items = JSON.parse(await fs.readFile(this.filePath, "utf8")) as ApprovalItem[]; }
-    catch { this.items = []; }
+    await this.reload();
     await fs.chmod(this.filePath, 0o600).catch(() => undefined);
     this.loaded = true;
   }
 
   private async ensure(): Promise<void> { if (!this.loaded) await this.init(); }
 
+  /**
+   * The REPL/CLI and the dashboard are separate Node processes but share one
+   * approval file. Refresh reads so a long-running dashboard sees drafts made
+   * by a CLI command instead of displaying a stale, empty queue.
+   */
+  private async reload(): Promise<void> {
+    try {
+      const stat = await fs.stat(this.filePath);
+      this.items = JSON.parse(await fs.readFile(this.filePath, "utf8")) as ApprovalItem[];
+      this.lastLoadedMtimeMs = stat.mtimeMs;
+    } catch {
+      this.items = [];
+      this.lastLoadedMtimeMs = -1;
+    }
+  }
+
+  private async refreshIfChanged(): Promise<void> {
+    await this.ensure();
+    try {
+      if ((await fs.stat(this.filePath)).mtimeMs > this.lastLoadedMtimeMs) await this.reload();
+    } catch {
+      if (this.lastLoadedMtimeMs !== -1) await this.reload();
+    }
+  }
+
   private async save(): Promise<void> {
     await fs.writeFile(this.filePath, `${JSON.stringify(this.items, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await fs.chmod(this.filePath, 0o600).catch(() => undefined);
+    this.lastLoadedMtimeMs = (await fs.stat(this.filePath)).mtimeMs;
   }
 
   private async mutate<T>(operation: () => Promise<T>): Promise<T> {
@@ -31,7 +57,10 @@ export class ApprovalStore {
     let release!: () => void;
     this.mutationChain = new Promise<void>((resolve) => { release = resolve; });
     await previous;
-    try { return await operation(); } finally { release(); }
+    try {
+      await this.refreshIfChanged();
+      return await operation();
+    } finally { release(); }
   }
 
   async create(input: Omit<ApprovalItem, "id" | "createdAt" | "updatedAt" | "status">): Promise<ApprovalItem> {
@@ -46,12 +75,12 @@ export class ApprovalStore {
   }
 
   async list(status?: ApprovalItem["status"]): Promise<ApprovalItem[]> {
-    await this.ensure();
+    await this.refreshIfChanged();
     return this.items.filter((item) => !status || item.status === status).slice().reverse();
   }
 
   async get(id: string): Promise<ApprovalItem | undefined> {
-    await this.ensure();
+    await this.refreshIfChanged();
     return this.items.find((item) => item.id === id);
   }
 

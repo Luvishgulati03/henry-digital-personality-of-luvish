@@ -10,6 +10,7 @@ import { parseAt, parseIn, type ReminderKind } from "./reminders/service.ts";
 import { startReminderTicker, type ReminderTickerHandle } from "./reminders/ticker.ts";
 import { sendTelegram } from "./notify/telegram.ts";
 import { createInputQueue } from "./repl/input-queue.ts";
+import { executeExplicitApproval } from "./approval/explicit.ts";
 import { trackerSummary } from "./mailwatch/tracker.ts";
 import { dim } from "./tui/ansi.ts";
 import { createRenderer, renderMarkdown } from "./tui/markdown.ts";
@@ -156,6 +157,12 @@ async function repl(
   let quitting = false;
 
   async function runAgentTurn(value: string, label?: string): Promise<void> {
+    const approvalResult = await executeExplicitApproval(runtime, value);
+    if (approvalResult !== undefined) {
+      if (label) console.log(dim(label));
+      printAgentText(approvalResult);
+      return;
+    }
     // Streaming display (latency plan #1/#6): print provider text as it
     // arrives; the spinner shows elapsed seconds until the first token lands.
     const started = Date.now();

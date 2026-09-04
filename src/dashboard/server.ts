@@ -10,6 +10,7 @@ import { KnowledgeBase } from "../knowledge/store.ts";
 import { sampleResources } from "./resources.ts";
 import { sharedAdmissionController } from "../orchestration/admission.ts";
 import { domainPolicy, setDomainEnabled } from "../knowledge/gate.ts";
+import { executeExplicitApproval } from "../approval/explicit.ts";
 import type { HenryRuntime } from "../runtime.ts";
 import type { ActivityEvent, ProviderName } from "../types.ts";
 
@@ -662,6 +663,13 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
           "connection": "keep-alive",
         });
         try {
+          const approvalResult = await executeExplicitApproval(runtime, prompt);
+          if (approvalResult !== undefined) {
+            await appendChatMessages(runtime, [{ role: "henry", text: approvalResult, at: new Date().toISOString() }], { ifGeneration: generation });
+            sseWrite(response, "done", { response: approvalResult, provider: "local", durationMs: 0 });
+            response.end();
+            return;
+          }
           // Same surface-session model as the REPL, its own surface: provider-side
           // context persists across web messages until "New chat" resets it.
           const result = await runtime.agent.run(prompt, {
