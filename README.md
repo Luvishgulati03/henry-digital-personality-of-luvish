@@ -75,7 +75,14 @@ henry knowledge add <path> --domain project-management
 henry memory search "what did we decide about deploys?"
 henry approve list && henry approve send <approval-id>
 henry schedule daemon           # or: schedule install (launchd)
+henry pr review 123 --repo owner/repository
+henry pr merge 123 --repo owner/repository --check "npm test" --verify "npm run build"
 ```
+
+PR review runs six engineering passes. PR merges are pinned to the reviewed commit,
+approval-gated, and followed by the supplied verification command. If verification
+fails, Henry stages a separate approval for a GitHub revert PR. See
+[docs/modules/pr-review.md](docs/modules/pr-review.md).
 
 ## The safety boundary
 

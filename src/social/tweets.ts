@@ -251,8 +251,7 @@ const BANNED_TERMS = [
   // punching down
   "idiot", "idiots", "stupid", "moron", "morons", "dumbass", "retard", "retarded", "loser", "losers",
   "pathetic", "incompetent", "worthless", "ugly", "cripple", "crippled",
-  // Luvish's employers are never tweet material (soul.md)
-  "growthx",
+  // Employers are never tweet material (soul.md)
 ];
 
 const BANNED_PATTERN = new RegExp(`(?:^|[^a-z0-9])(?:${BANNED_TERMS.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![a-z0-9])`, "i");

@@ -29,6 +29,9 @@ data/job-tracker.json
 data/eval/last-run.json
 data/reminder-ticker.lock
 
+# The canonical portfolio checkout is linked here for Henry to inspect/edit, but remains its own repo.
+/portfolio
+
 # --- personal boundary (framework repo carries NO operator data) ---
 data/
 memory/

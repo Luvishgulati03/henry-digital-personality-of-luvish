@@ -85,9 +85,9 @@ npm install
 
 **Expect:** a clean install, no `ERR!` lines.
 
-**Note:** `engram-memory` (the memory engine) resolves to
-`github:anmolm-growthx/engram-memory#<sha>`, so npm shells out to `git`
-and needs network access to github.com. If install stops there, see
+**Note:** `engram-memory` (the memory engine) is pinned to an upstream Git
+repository, so npm shells out to `git` and needs network access to github.com.
+If install stops there, see
 [§3](#3-troubleshooting).
 
 ### Step 3 — Create `.env`
@@ -363,12 +363,10 @@ matched your platform, so it tried to compile. macOS:
 `xcode-select --install`, then `rm -rf node_modules && npm install`.
 Linux: install `build-essential` and `python3`.
 
-**`npm install` fails on `engram-memory`.** It installs from GitHub
-(`github:anmolm-growthx/engram-memory#<sha>`), so npm needs `git` on PATH
-and network access to github.com. Check with
-`git ls-remote https://github.com/anmolm-growthx/engram-memory` — if that
-fails, so will the install, and it is an access/network problem rather
-than a Henry problem.
+**`npm install` fails on `engram-memory`.** It installs from a pinned GitHub
+repository, so npm needs `git` on PATH and network access to github.com. If
+the pinned repository is unavailable, installation will fail before Henry
+starts. This is an access/network problem rather than a Henry runtime problem.
 
 **`Port 7337 is already in use` / `EADDRINUSE`.** Another Henry (a REPL,
 a dashboard, or the schedule daemon) already holds it — they all serve

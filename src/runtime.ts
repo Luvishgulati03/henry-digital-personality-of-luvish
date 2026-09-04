@@ -264,6 +264,8 @@ export class HenryRuntime {
     try {
       const result = item.kind === "gmail.send" ? await this.gmail.sendApproved(item)
         : item.kind === "job.application" ? await this.jobs.submitApproved(item)
+        : item.kind === "github.merge" ? await this.reviewer.mergeApproved(item)
+        : item.kind === "github.rollback" ? await this.reviewer.rollbackApproved(item)
         : await this.reviewer.postApproved(item);
       await this.approvals.setStatus(id, "executed", result);
       return result;
