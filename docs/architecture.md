@@ -217,3 +217,12 @@ build it from scratch:
   outbound-capable MCP tools bypass the approval gate above.
 - [`docs/modules/telegram.md`](modules/telegram.md) — fire-and-forget
   Telegram delivery layered on top of the console/macOS-notification path.
+
+## Hot-path caching
+
+`src/cache.ts` provides the first cache layer: a bounded in-process TTL/LRU
+cache with request coalescing. It accelerates repeated Engram and knowledge
+retrieval calls without changing SQLite/Engram's role as the source of truth.
+The `CacheBackend` interface is intentionally small so a Redis adapter can be
+added for multi-process or hosted deployments later. Local Henry defaults to
+memory-only caching; Redis is not required.
