@@ -24,6 +24,9 @@ export type ActivityKind =
   | "workflow.failed"
   | "gmail.read"
   | "pr.reviewed"
+  | "pr.merged"
+  | "pr.verified"
+  | "pr.rollback-staged"
   | "job.discovered"
   | "job.prepared"
   | "job.filled"
@@ -72,7 +75,7 @@ export interface ApprovalItem {
   id: string;
   createdAt: string;
   updatedAt: string;
-  kind: "gmail.send" | "github.review" | "message.send" | "job.application";
+  kind: "gmail.send" | "github.review" | "github.merge" | "github.rollback" | "message.send" | "job.application";
   status: "pending" | "approved" | "executing" | "executed" | "rejected" | "failed";
   title: string;
   recipient?: string;
@@ -117,4 +120,25 @@ export interface ReviewReport {
   provider: ProviderName;
   approvalId?: string;
   headSha?: string;
+}
+
+export interface ProjectCheckResult {
+  command: string;
+  cwd: string;
+  passed: boolean;
+  exitCode: number | null;
+  output: string;
+}
+
+export interface PullRequestMergePlan {
+  repository: string;
+  pullRequest: number;
+  title: string;
+  headSha: string;
+  baseBranch?: string;
+  cwd: string;
+  mergeMethod: "merge" | "squash" | "rebase";
+  checkCommand: string;
+  verifyCommand: string;
+  check: ProjectCheckResult;
 }

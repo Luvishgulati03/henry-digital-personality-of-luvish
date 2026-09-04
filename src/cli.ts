@@ -560,6 +560,22 @@ async function main(): Promise<void> {
           message: result.drafted.length ? `Drafted ${result.drafted.length} replies — review in Gmail drafts` : "No replies needed",
         });
       } else throw new Error("Usage: henry gmail auth|inbox|draft|reply|draftreplies");
+    } else if (command === "pr") {
+      const sub = args[1] || "review";
+      const target = args[2];
+      if (!target) throw new Error("Usage: henry pr review|merge <pr-number-or-url> [--cwd path] [--repo owner/name]");
+      const cwdArg = option("--cwd");
+      const repoArg = option("--repo");
+      const cwd = cwdArg || (repoArg?.startsWith("/") ? repoArg : runtime.config.rootDir);
+      const repo = repoArg?.startsWith("/") ? undefined : repoArg;
+      if (sub === "review") print(await runtime.reviewer.review(target, path.resolve(cwd), repo));
+      else if (sub === "merge") {
+        const result = await runtime.reviewer.prepareMerge(
+          target, path.resolve(cwd), repo, option("--check") || "npm test", option("--verify") || option("--check") || "npm test",
+          (option("--method") || "squash") as "merge" | "squash" | "rebase",
+        );
+        print({ ...result, next: `Review the plan, then: henry approve approve ${result.approvalId} && henry approve send ${result.approvalId}` });
+      } else throw new Error("Usage: henry pr review|merge <pr-number-or-url> [--cwd path] [--repo owner/name]");
     } else if (command === "review") {
       const target = args[1];
       if (!target) throw new Error("Usage: henry review <pr-number-or-url> [--cwd path] [--repo owner/name]");

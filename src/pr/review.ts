@@ -6,7 +6,7 @@ import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import type { ApprovalStore } from "../approval/store.ts";
 import type { ProviderRunner } from "../providers/runner.ts";
-import type { ApprovalItem, ReviewFinding, ReviewReport } from "../types.ts";
+import type { ApprovalItem, ProjectCheckResult, PullRequestMergePlan, ReviewFinding, ReviewReport } from "../types.ts";
 import { runCommand } from "../util/command.ts";
 import { assertOutboundExecutionClaim } from "../guardrails.ts";
 
@@ -21,6 +21,24 @@ interface PullRequestContext {
   repository?: { nameWithOwner?: string };
   comments?: unknown[];
   reviews?: unknown[];
+  state?: string;
+  isDraft?: boolean;
+  mergeStateStatus?: string;
+  baseRefName?: string;
+}
+
+/** Parse a deliberately shell-free command so PR checks cannot execute arbitrary shell syntax. */
+export function parseCheckCommand(command: string): string[] {
+  const trimmed = command.trim();
+  if (!trimmed) throw new Error("Check command cannot be empty");
+  if (/[;&|<>`$()]/.test(trimmed)) throw new Error("Check commands must be executable + arguments, without shell operators");
+  const parts = trimmed.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((part) => part.replace(/^(['"])(.*)\1$/, "$2")) || [];
+  if (!parts.length) throw new Error("Check command cannot be empty");
+  return parts;
+}
+
+function checkResult(command: string, cwd: string, result: { exitCode: number | null; stdout: string; stderr: string }): ProjectCheckResult {
+  return { command, cwd, passed: result.exitCode === 0, exitCode: result.exitCode, output: `${result.stdout}${result.stderr}`.trim().slice(-12_000) };
 }
 
 function parseJson<T>(value: string): T {
@@ -68,14 +86,23 @@ export class PullRequestReviewer {
     private readonly runner: ProviderRunner,
   ) {}
 
-  async review(target: string, cwd: string, repo?: string): Promise<ReviewReport> {
+  async runCheck(cwd: string, command: string): Promise<ProjectCheckResult> {
+    const [executable, ...args] = parseCheckCommand(command);
+    return checkResult(command, cwd, await runCommand(executable, args, cwd));
+  }
+
+  private async pullRequestContext(target: string, cwd: string, repo?: string): Promise<{ context: PullRequestContext; repository: string; targetArgs: string[] }> {
     const targetArgs = repo ? ["--repo", repo, target] : [target];
-    const contextResult = await runCommand("gh", ["pr", "view", ...targetArgs, "--json", "number,title,body,url,headRefOid,repository,comments,reviews"], cwd);
-    if (contextResult.exitCode !== 0) throw new Error(contextResult.stderr || "gh pr view failed");
-    const context = parseJson<PullRequestContext>(contextResult.stdout);
+    const result = await runCommand("gh", ["pr", "view", ...targetArgs, "--json", "number,title,body,url,headRefOid,repository,comments,reviews,state,isDraft,mergeStateStatus,baseRefName"], cwd);
+    if (result.exitCode !== 0) throw new Error(result.stderr || "gh pr view failed");
+    const context = parseJson<PullRequestContext>(result.stdout);
+    return { context, repository: repo || context.repository?.nameWithOwner || "unknown/unknown", targetArgs };
+  }
+
+  async review(target: string, cwd: string, repo?: string): Promise<ReviewReport> {
+    const { context, repository, targetArgs } = await this.pullRequestContext(target, cwd, repo);
     const diffResult = await runCommand("gh", ["pr", "diff", ...targetArgs], cwd);
     if (diffResult.exitCode !== 0) throw new Error(diffResult.stderr || "gh pr diff failed");
-    const repository = repo || context.repository?.nameWithOwner || "unknown/unknown";
     const prior = JSON.stringify({ comments: context.comments || [], reviews: context.reviews || [] }).slice(0, 30_000);
     const prompt = [
       "You are Henry's persistent GitHub PR reviewer. Read the entire diff before deciding.",
@@ -110,6 +137,69 @@ export class PullRequestReviewer {
     await fs.writeFile(path.join(reviewDir, `${report.id}.json`), `${JSON.stringify(report, null, 2)}\n`, "utf8");
     await this.activity.record("pr.reviewed", `Reviewed ${repository}#${context.number}`, { reportId: report.id, approvalId: approval.id, verdict, findings: report.findings.length }, { provider: report.provider });
     return report;
+  }
+
+  /** Run local checks and stage an exact-commit merge for separate approval. */
+  async prepareMerge(target: string, cwd: string, repo: string | undefined, checkCommand = "npm test", verifyCommand = checkCommand, mergeMethod: PullRequestMergePlan["mergeMethod"] = "squash"): Promise<{ plan: PullRequestMergePlan; approvalId: string }> {
+    if (!["merge", "squash", "rebase"].includes(mergeMethod)) throw new Error(`Unsupported merge method: ${mergeMethod}`);
+    const { context, repository } = await this.pullRequestContext(target, cwd, repo);
+    if (context.state && context.state !== "OPEN") throw new Error(`PR is not open (state: ${context.state})`);
+    if (context.isDraft) throw new Error("Draft PRs cannot be merged by Henry");
+    if (context.mergeStateStatus === "DIRTY") throw new Error("PR has merge conflicts; resolve them in a local checkout with `henry task`, rerun checks, and review the updated PR");
+    if (!context.headRefOid) throw new Error("PR has no head commit SHA; refusing to stage an unpinned merge");
+    const check = await this.runCheck(cwd, checkCommand);
+    if (!check.passed) throw new Error(`Pre-merge check failed: ${checkCommand}\n${check.output}`);
+    const plan: PullRequestMergePlan = {
+      repository, pullRequest: context.number, title: context.title, headSha: context.headRefOid,
+      baseBranch: context.baseRefName, cwd: path.resolve(cwd), mergeMethod, checkCommand, verifyCommand, check,
+    };
+    const approval = await this.approvals.create({
+      kind: "github.merge",
+      title: `Merge PR: ${repository}#${context.number}`,
+      body: `Merge ${context.title} at reviewed commit ${context.headRefOid} using ${mergeMethod}.\n\nPre-merge check passed: ${checkCommand}\nPost-merge verification: ${verifyCommand}\n\nThis action is staged. Approve it explicitly before execution.`,
+      payload: { plan, planHash: createHash("sha256").update(JSON.stringify(plan)).digest("hex") },
+    });
+    await this.activity.record("approval.created", `Merge staged for ${repository}#${context.number}`, { approvalId: approval.id, headSha: context.headRefOid, checkCommand });
+    return { plan, approvalId: approval.id };
+  }
+
+  async mergeApproved(item: ApprovalItem): Promise<string> {
+    if (item.kind !== "github.merge") throw new Error(`Not a GitHub merge approval: ${item.id}`);
+    assertOutboundExecutionClaim(item);
+    const payload = item.payload as { plan: PullRequestMergePlan; planHash?: string };
+    const plan = payload.plan;
+    if (!plan || payload.planHash !== createHash("sha256").update(JSON.stringify(plan)).digest("hex")) throw new Error("Staged PR merge changed after approval; prepare it again");
+    const current = await runCommand("gh", ["pr", "view", String(plan.pullRequest), "--repo", plan.repository, "--json", "state,isDraft,headRefOid"], this.config.rootDir);
+    if (current.exitCode !== 0) throw new Error(current.stderr || "Could not revalidate PR before merge");
+    const state = parseJson<{ state?: string; isDraft?: boolean; headRefOid?: string }>(current.stdout);
+    if (state.state !== "OPEN" || state.isDraft) throw new Error("PR is no longer open or is now a draft");
+    if (state.headRefOid !== plan.headSha) throw new Error(`PR changed after review: staged ${plan.headSha}, current ${state.headRefOid || "unknown"}`);
+    const methodFlag = plan.mergeMethod === "merge" ? "--merge" : plan.mergeMethod === "rebase" ? "--rebase" : "--squash";
+    const merged = await runCommand("gh", ["pr", "merge", String(plan.pullRequest), "--repo", plan.repository, methodFlag, "--match-head-commit", plan.headSha], this.config.rootDir);
+    if (merged.exitCode !== 0) throw new Error(merged.stderr || "GitHub PR merge failed");
+    await this.activity.record("pr.merged", `Merged ${plan.repository}#${plan.pullRequest}`, { repository: plan.repository, pullRequest: plan.pullRequest, headSha: plan.headSha });
+    const verification = await this.runCheck(plan.cwd, plan.verifyCommand);
+    if (verification.passed) {
+      await this.activity.record("pr.verified", `Post-merge verification passed for ${plan.repository}#${plan.pullRequest}`, { command: plan.verifyCommand });
+      return `Merged ${plan.repository}#${plan.pullRequest}; post-merge verification passed (${plan.verifyCommand}).`;
+    }
+    const rollback = await this.approvals.create({
+      kind: "github.rollback",
+      title: `Rollback merged PR: ${plan.repository}#${plan.pullRequest}`,
+      body: `Post-merge verification failed for ${plan.repository}#${plan.pullRequest}.\n\nCommand: ${verification.command}\nOutput:\n${verification.output}\n\nApprove this separate action to create a GitHub revert PR. Henry never silently reverses production changes.`,
+      payload: { repository: plan.repository, pullRequest: plan.pullRequest, reason: verification.output, cwd: plan.cwd },
+    });
+    await this.activity.record("pr.rollback-staged", `Rollback staged after failed verification for ${plan.repository}#${plan.pullRequest}`, { approvalId: rollback.id, command: verification.command });
+    return `Merged ${plan.repository}#${plan.pullRequest}, but verification failed. Rollback approval staged: ${rollback.id}`;
+  }
+
+  async rollbackApproved(item: ApprovalItem): Promise<string> {
+    if (item.kind !== "github.rollback") throw new Error(`Not a GitHub rollback approval: ${item.id}`);
+    assertOutboundExecutionClaim(item);
+    const payload = item.payload as { repository: string; pullRequest: number };
+    const result = await runCommand("gh", ["pr", "revert", String(payload.pullRequest), "--repo", payload.repository], this.config.rootDir);
+    if (result.exitCode !== 0) throw new Error(result.stderr || "GitHub PR revert failed");
+    return result.stdout.trim() || `Revert PR created for ${payload.repository}#${payload.pullRequest}`;
   }
 
   async postApproved(item: ApprovalItem): Promise<string> {

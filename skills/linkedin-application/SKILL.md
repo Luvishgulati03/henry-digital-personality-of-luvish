@@ -37,13 +37,13 @@ your job is making that manual apply take under a minute and land expertly.
   period, start date): one word or one line, from application-profile facts.
 - **"Why this company / this role?"**: three beats in 60-110 words — (1) a specific
   hook about THEIR product/problem taken from the JD itself, no invented news;
-  (2) the bridge: his most relevant proof (Henry, the GrowthX notifications work,
+  (2) the bridge: his most relevant proof (Henry, notification workflows,
   the PM-to-engineer arc — whichever genuinely matches); (3) forward value: the
   first thing he'd want to own. No flattery padding, no "esteemed organization".
 - **"Describe your experience with X"**: compressed STAR — claim, one concrete
   artifact, one verifiable detail, tie-back using their phrasing. 3-5 sentences.
   Strongest artifacts: Henry (memory engine, RAG, approval-gated automation),
-  GrowthX notifications end-to-end, the device-level E2E harness, PMBOK-grounded
+  notification workflows end-to-end, the device-level E2E harness, PMBOK-grounded
   PM mode, the three Pink Unicorn products.
 - **Salary / CTC expectations**: from application-profile if present; else
   `[Luvish: fill — confirm range]` plus the safe phrasing: "flexible for the right
