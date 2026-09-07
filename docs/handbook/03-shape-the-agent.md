@@ -34,6 +34,25 @@ The shipped examples name this repository's original operator. A fork should
 replace those local persona files with the new user's own terms, while keeping
 the outbound approval rule intact.
 
+Before the first personal conversation, replace every example value for:
+
+- agent name and how it addresses you;
+- your preferred tone, decision style, and interruption policy;
+- what deserves durable memory and what must never be retained;
+- which local folders and accounts are in scope;
+- channel rules for terminal, dashboard, Telegram, email, and social actions;
+- the non-negotiable rule that drafting, approval, and execution are separate.
+
+Confirm the private files cannot be committed:
+
+```bash
+git check-ignore soul.md personality.md .env data memory knowledge
+git status --short
+```
+
+Do not copy secrets, tokens, resume data, private memories, or a proprietary
+knowledge corpus into a public fork.
+
 ## Learn
 
 Persona files are injected into provider calls, so they should be short and
@@ -53,4 +72,3 @@ Memory preferences:
 ---
 
 Previous: [Stage 2: IDEATION](02-install-and-verify.md) | Next: [Stage 4: BUILDING](04-choose-the-provider.md)
-

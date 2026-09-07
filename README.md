@@ -6,6 +6,10 @@
 > (Claude *or* Codex — you only need the one you have), and the smoke
 > tests. A ten-line human quick path and the real troubleshooting list
 > are in the same file.
+>
+> **Want to understand and customize it? → [Henry Handbook](docs/handbook/README.md).**
+> It takes you from a blank clone to your own persona, first working run,
+> private knowledge base, Telegram surface, automation, and custom module.
 
 Henry is a terminal-first personal agent framework: one brain (Claude/Codex CLIs +
 a local memory engine) behind **three chat surfaces** — terminal REPL, a streaming
@@ -58,7 +62,8 @@ example templates, and verifies each step. By hand:
 ```bash
 npm install
 cp .env.example .env        # then soul.example.md → soul.md, personality.example.md → personality.md
-npm run typecheck && npx tsx --test tests/*.test.ts
+npm run typecheck && npm test
+npm link                    # installs the global `henry` command
 npx tsx src/cli.ts repl
 ```
 

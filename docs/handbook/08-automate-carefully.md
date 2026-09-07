@@ -2,6 +2,30 @@
 
 Goal: fix known Henry setup/runtime failures with source-backed remedies only.
 
+## `henry: command not found`
+
+From the repository root, either install the local global link or use the
+checked-in entrypoint directly:
+
+```bash
+npm link
+henry status
+# equivalent without linking:
+node bin/henry.mjs status
+```
+
+## Tests Pass But Henry Cannot Answer
+
+The test suite does not authenticate subscription CLIs. Verify the selected
+provider and its login independently:
+
+```bash
+henry provider
+codex login status
+# or: claude auth status
+henry ask "Reply with: provider connected"
+```
+
 ## Provider Auth Expired
 
 Symptom: the provider says it is not logged in, asks for login, or Henry reports
@@ -82,6 +106,42 @@ window and retry. Henry clears stale Chromium files named `SingletonLock`,
 `SingletonCookie`, and `SingletonSocket` before launching a persistent context,
 but it should not fight a live browser using the same profile.
 
+## Dashboard Port Already In Use
+
+If port `7337` is occupied, stop the older Henry dashboard/REPL process or pick
+a different loopback port in `.env`:
+
+```bash
+HENRY_HOST=127.0.0.1
+HENRY_PORT=7338
+```
+
+Restart Henry after changing `.env`.
+
+## Telegram Or Gmail Is Not Connected
+
+```bash
+henry telegram status
+henry telegram test
+henry gmail doctor
+```
+
+Telegram reports missing token/chat configuration. Gmail doctor checks local
+credentials, token refresh, scopes, and redirect URI without sending mail or
+printing secrets. Follow its next-step output, then restart long-lived Henry
+processes after changing `.env`.
+
+## Scheduler Installation Fails
+
+```bash
+henry schedule status
+henry schedule install            # regenerate reviewable files only
+```
+
+launchd is macOS-only and user-level. Cron installation preserves unrelated
+entries inside a separately marked Henry block. Use the matching
+`henry schedule uninstall --launchd|--cron` command before changing strategies.
+
 ## Ollama Is Missing Or Misconfigured
 
 Symptom: optional local model helpers return no enrichment.
@@ -122,4 +182,3 @@ the marker after re-embedding.
 ---
 
 Previous: [Stage 7: Daily Demo Path](07-build-knowledge.md) | Next: [Stage 9: Extend And Review Safely](09-extend-safely.md)
-

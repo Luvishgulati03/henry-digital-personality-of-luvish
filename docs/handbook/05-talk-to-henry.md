@@ -56,6 +56,19 @@ Knowledge is a separate, source-attributed corpus for reusable domain material.
 It does not decay and is injected only when the prompt routes to a relevant
 domain or when explicitly queried.
 
+Examples:
+
+- “Prefer concise morning updates” is personal memory.
+- A product-management book or engineering playbook is knowledge.
+- A one-off secret or access token belongs in neither store.
+
+Durable source material lives under the gitignored `memory/` and `knowledge/`
+directories. Rebuildable indexes and operational state live under `data/`,
+including Engram and knowledge SQLite databases. Treat all three locations as
+sensitive local data. Before indexing a file, confirm you have the right to
+store it and understand that extracted text and embeddings remain on disk until
+you deliberately remove/rebuild that local store.
+
 ## Record
 
 ```md
@@ -70,4 +83,3 @@ Store chosen and why:
 ---
 
 Previous: [Stage 4: BUILDING](04-choose-the-provider.md) | Next: [Stage 6: Grow Through Surfaces, Schedules, And Approval](06-use-memory.md)
-

@@ -22,12 +22,51 @@ henry dashboard
 henry status
 ```
 
+`henry dashboard` occupies its terminal and prints the loopback URL, normally
+`http://127.0.0.1:7337`. Keep `HENRY_HOST=127.0.0.1`; do not expose approval
+controls or a full-access provider on an unauthenticated network interface.
+
+Connect your private Telegram DM only if you want phone access:
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) using `/newbot`.
+2. Message the bot once and obtain the chat id as described in
+   [the Telegram module guide](../modules/telegram.md).
+3. Set `HENRY_TELEGRAM_BOT_TOKEN` and `HENRY_TELEGRAM_CHAT_ID` in `.env`.
+4. Verify and enable the bridge:
+
+```bash
+henry telegram test
+henry telegram status
+henry telegram on
+henry repl
+```
+
+The configured DM is allowlisted. Operator mode is optional and still cannot
+approve, push, merge, deploy, post, send mail, or bypass destructive-command
+rails:
+
+```bash
+henry telegram operator on
+henry telegram operator off
+```
+
 Inspect schedules and workflows:
 
 ```bash
 henry schedule list
 henry workflow list
 henry schedule install
+```
+
+Bare `schedule install` only generates reviewable files. Actual installation is
+explicit and reversible:
+
+```bash
+henry schedule install --launchd   # macOS user LaunchAgent
+henry schedule install --cron      # marked block in the user's crontab
+henry schedule status
+henry schedule uninstall --launchd
+henry schedule uninstall --cron
 ```
 
 Inspect approvals:
@@ -56,7 +95,7 @@ henry approve send <id>
 Scheduling commands exist as:
 
 ```text
-henry schedule list|run <id>|daemon|install
+henry schedule list|run <id>|daemon|install|status|uninstall
 henry workflow list|show <name>|run <name>|logs <name>|daemon
 ```
 
@@ -83,4 +122,3 @@ Execution authority:
 ---
 
 Previous: [Stage 5: Memory Vs Knowledge](05-talk-to-henry.md) | Next: [Stage 7: Daily Demo Path](07-build-knowledge.md)
-

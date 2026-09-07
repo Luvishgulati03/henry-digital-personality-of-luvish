@@ -25,8 +25,11 @@ node -v
 npm -v
 git --version
 npm install
+npm link
 npx tsc --noEmit
 npm test
+henry provider codex
+henry ask "Reply with: Henry is ready"
 ```
 
 Choose one provider CLI and authenticate from the real user's terminal:
@@ -41,6 +44,21 @@ claude auth login
 The auth command syntax above was checked against the installed CLI help:
 `codex login --help` exposes `login status`; `claude auth --help` exposes
 `auth login` and `auth status`.
+
+Choose the provider after authenticating it:
+
+```bash
+henry provider codex       # primary recommended setup
+# or: henry provider claude
+henry provider             # verify the persisted choice
+```
+
+Henry stores that choice in local settings. Model routing may choose a faster
+or deeper tier inside the selected provider, but it does not remove persona,
+memory, knowledge, safety, or task context. The public runner allows provider
+fallback by default when another configured CLI is available. If you have only
+one provider—or require strict provider pinning—set `providers.fallback` to
+`false` in `data/settings.json`. Test both CLI seats before enabling fallback.
 
 ## Handbook Path
 
@@ -58,6 +76,10 @@ Templates:
 
 - [IDEATION.md](IDEATION.md)
 - [BUILDING.md](BUILDING.md)
+
+By the end, you will have a private agent persona, one verified provider, a
+working terminal and dashboard, an optional Telegram connection, your own
+memory/knowledge data, and a completed plan for your first custom module.
 
 ## Source Checks
 
@@ -78,4 +100,3 @@ This handbook was grounded in:
 
 If a command or behavior changes in source, update the handbook after checking
 the new implementation.
-
