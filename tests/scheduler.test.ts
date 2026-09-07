@@ -30,7 +30,9 @@ test("scheduler installation writes reviewable cron and launchd artifacts", asyn
   const cron = await writeCronFile(config, workflows);
   const plist = await writeLaunchdPlist(config, workflows);
   assert.match(await fs.readFile(cron, "utf8"), /dream/);
-  assert.match(await fs.readFile(plist, "utf8"), /com\.henry\.scheduler-1/);
+  // Stable label (not suffixed by enabled-workflow count) — install/uninstall/status all key
+  // off this, and a count-suffixed label would orphan the previously-loaded agent on change.
+  assert.match(await fs.readFile(plist, "utf8"), /com\.henry\.scheduler</);
   assert.match(await fs.readFile(plist, "utf8"), /schedule/);
 });
 

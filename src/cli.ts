@@ -5,7 +5,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { HenryRuntime } from "./runtime.ts";
 import { startDashboard } from "./dashboard/server.ts";
-import { writeCronFile, writeLaunchdPlist } from "./scheduler/install.ts";
+import {
+  writeCronFile, writeLaunchdPlist, installCron, installLaunchd,
+  uninstallCron, uninstallLaunchd, schedulerStatus,
+} from "./scheduler/install.ts";
 import { parseAt, parseIn, type ReminderKind } from "./reminders/service.ts";
 import { startReminderTicker, type ReminderTickerHandle } from "./reminders/ticker.ts";
 import { sendTelegram } from "./notify/telegram.ts";
@@ -639,8 +642,34 @@ async function main(): Promise<void> {
         announceTelegramPump(runtime.startTelegramPump());
         console.log(`Henry scheduler is running (${armed.length} markdown workflow schedules armed). Press Ctrl+C to stop.`);
       }
-      else if (sub === "install") { const definitions = await runtime.scheduler.definitions(); print({ cron: await writeCronFile(runtime.config, definitions), launchd: await writeLaunchdPlist(runtime.config, definitions), note: "Review the generated files before installing them into your user scheduler." }); }
-      else throw new Error("Usage: henry schedule list|run <id>|daemon|install");
+      else if (sub === "install") {
+        const definitions = await runtime.scheduler.definitions();
+        const wantsCron = args.includes("--cron");
+        const wantsLaunchd = args.includes("--launchd");
+        const dryRun = args.includes("--print") || args.includes("--dry-run") || (!wantsCron && !wantsLaunchd);
+        if (dryRun) {
+          print({
+            cron: await writeCronFile(runtime.config, definitions),
+            launchd: await writeLaunchdPlist(runtime.config, definitions),
+            note: "Review the generated files, then run `henry schedule install --cron` and/or `henry schedule install --launchd` to actually install them.",
+          });
+        } else {
+          const result: Record<string, unknown> = {};
+          if (wantsCron) result.cron = await installCron(runtime.config, definitions);
+          if (wantsLaunchd) result.launchd = await installLaunchd(runtime.config, definitions);
+          print(result);
+        }
+      }
+      else if (sub === "uninstall") {
+        const wantsCron = args.includes("--cron");
+        const wantsLaunchd = args.includes("--launchd");
+        const result: Record<string, unknown> = {};
+        if (wantsCron || !wantsLaunchd) result.cron = await uninstallCron(runtime.config);
+        if (wantsLaunchd || !wantsCron) result.launchd = await uninstallLaunchd(runtime.config);
+        print(result);
+      }
+      else if (sub === "status") print(await schedulerStatus(runtime.config));
+      else throw new Error("Usage: henry schedule list|run <id>|daemon|install [--cron] [--launchd] [--print]|uninstall [--cron] [--launchd]|status");
     } else if (command === "workflow") {
       const sub = args[1] || "list";
       if (sub === "list") {
