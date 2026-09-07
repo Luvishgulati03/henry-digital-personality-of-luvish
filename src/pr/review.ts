@@ -9,6 +9,15 @@ import type { ProviderRunner } from "../providers/runner.ts";
 import type { ApprovalItem, ProjectCheckResult, PullRequestMergePlan, ReviewFinding, ReviewReport } from "../types.ts";
 import { runCommand } from "../util/command.ts";
 import { assertOutboundExecutionClaim } from "../guardrails.ts";
+import {
+  buildChangedLineIndex,
+  dedupeFindings,
+  emptyChangedLineIndex,
+  fetchPriorFindings,
+  renderFindingMarker,
+  type CommandExecutor,
+  type PriorFinding,
+} from "./dedup.ts";
 
 const PASSES = ["logic", "safety", "product", "query performance", "consistency", "surface"] as const;
 
@@ -72,7 +81,8 @@ function reviewHash(report: ReviewReport): string {
 }
 
 function renderReport(report: ReviewReport): string {
-  const lines = [`review: ${report.verdict} — ${report.summary}`, `repository: ${report.repository}#${report.pullRequest}`, report.headSha ? `reviewed commit: ${report.headSha}` : "", "", "Passes:", ...Object.entries(report.passes).map(([name, value]) => `- ${name}: ${value}`), "", "Findings:"];
+  const suppression = report.suppressedFindingBreakdown || { identical: 0, reworded: 0 };
+  const lines = [`review: ${report.verdict} — ${report.summary}`, `repository: ${report.repository}#${report.pullRequest}`, report.headSha ? `reviewed commit: ${report.headSha}` : "", "", "Passes:", ...Object.entries(report.passes).map(([name, value]) => `- ${name}: ${value}`), "", `Suppressed findings: ${report.suppressedFindings || 0} (identical: ${suppression.identical}, reworded: ${suppression.reworded})`, "", "Findings:"];
   if (report.findings.length === 0) lines.push("- No inline findings.");
   for (const finding of report.findings) lines.push(`- [${finding.severity}] ${finding.path}:${finding.line} — ${finding.title}\n  ${finding.body}`);
   return lines.filter(Boolean).join("\n");
@@ -84,16 +94,17 @@ export class PullRequestReviewer {
     private readonly activity: ActivityLog,
     private readonly approvals: ApprovalStore,
     private readonly runner: ProviderRunner,
+    private readonly exec: CommandExecutor = runCommand,
   ) {}
 
   async runCheck(cwd: string, command: string): Promise<ProjectCheckResult> {
     const [executable, ...args] = parseCheckCommand(command);
-    return checkResult(command, cwd, await runCommand(executable, args, cwd));
+    return checkResult(command, cwd, await this.exec(executable, args, cwd));
   }
 
   private async pullRequestContext(target: string, cwd: string, repo?: string): Promise<{ context: PullRequestContext; repository: string; targetArgs: string[] }> {
     const targetArgs = repo ? ["--repo", repo, target] : [target];
-    const result = await runCommand("gh", ["pr", "view", ...targetArgs, "--json", "number,title,body,url,headRefOid,repository,comments,reviews,state,isDraft,mergeStateStatus,baseRefName"], cwd);
+    const result = await this.exec("gh", ["pr", "view", ...targetArgs, "--json", "number,title,body,url,headRefOid,repository,comments,reviews,state,isDraft,mergeStateStatus,baseRefName"], cwd);
     if (result.exitCode !== 0) throw new Error(result.stderr || "gh pr view failed");
     const context = parseJson<PullRequestContext>(result.stdout);
     return { context, repository: repo || context.repository?.nameWithOwner || "unknown/unknown", targetArgs };
@@ -101,8 +112,20 @@ export class PullRequestReviewer {
 
   async review(target: string, cwd: string, repo?: string): Promise<ReviewReport> {
     const { context, repository, targetArgs } = await this.pullRequestContext(target, cwd, repo);
-    const diffResult = await runCommand("gh", ["pr", "diff", ...targetArgs], cwd);
+    const diffResult = await this.exec("gh", ["pr", "diff", ...targetArgs], cwd);
     if (diffResult.exitCode !== 0) throw new Error(diffResult.stderr || "gh pr diff failed");
+    let priorFindings: PriorFinding[] = [];
+    let historicalCommentsUnavailable = false;
+    try {
+      priorFindings = await fetchPriorFindings(this.exec, cwd, repository, context.number, this.config.githubLogin);
+    } catch {
+      // Historical comments are optional context. A GitHub read outage must not block a fresh
+      // review; with no priors there is nothing to suppress and therefore the count is zero.
+      historicalCommentsUnavailable = true;
+    }
+    const changedLines = historicalCommentsUnavailable
+      ? emptyChangedLineIndex(true)
+      : await buildChangedLineIndex(this.exec, cwd, repository, priorFindings, context.headRefOid);
     const prior = JSON.stringify({ comments: context.comments || [], reviews: context.reviews || [] }).slice(0, 30_000);
     const prompt = [
       "You are Henry's persistent GitHub PR reviewer. Read the entire diff before deciding.",
@@ -120,11 +143,17 @@ export class PullRequestReviewer {
     if (result.exitCode !== 0) throw new Error(result.error || "PR reviewer failed");
     const model = parseModelJson(result.response);
     const verdict = model.verdict === "blocker" || model.verdict === "approved" ? model.verdict : "changes-requested";
+    const deduped = dedupeFindings(findings(model.findings), priorFindings, changedLines);
+    const suppressedFindingBreakdown = {
+      identical: deduped.suppressed.filter((item) => item.reason === "identical").length,
+      reworded: deduped.suppressed.filter((item) => item.reason === "reworded").length,
+    };
     const report: ReviewReport = {
       id: randomUUID(), repository, pullRequest: context.number, url: context.url,
       verdict, summary: typeof model.summary === "string" ? model.summary : "Review completed.",
-      findings: findings(model.findings), passes: typeof model.passes === "object" && model.passes ? model.passes as Record<string, string> : Object.fromEntries(PASSES.map((pass) => [pass, "Not recorded"])),
+      findings: deduped.kept, passes: typeof model.passes === "object" && model.passes ? model.passes as Record<string, string> : Object.fromEntries(PASSES.map((pass) => [pass, "Not recorded"])),
       generatedAt: new Date().toISOString(), provider: result.provider, headSha: context.headRefOid,
+      suppressedFindings: deduped.suppressed.length, suppressedFindingBreakdown,
     };
     const reviewDir = path.join(this.config.dataDir, "reviews");
     await fs.mkdir(reviewDir, { recursive: true });
@@ -135,7 +164,11 @@ export class PullRequestReviewer {
     });
     report.approvalId = approval.id;
     await fs.writeFile(path.join(reviewDir, `${report.id}.json`), `${JSON.stringify(report, null, 2)}\n`, "utf8");
-    await this.activity.record("pr.reviewed", `Reviewed ${repository}#${context.number}`, { reportId: report.id, approvalId: approval.id, verdict, findings: report.findings.length }, { provider: report.provider });
+    await this.activity.record("pr.reviewed", `Reviewed ${repository}#${context.number}`, {
+      reportId: report.id, approvalId: approval.id, verdict, findings: report.findings.length,
+      suppressedFindings: report.suppressedFindings || 0, suppressedFindingBreakdown,
+      historicalCommentsUnavailable,
+    }, { provider: report.provider });
     return report;
   }
 
@@ -169,13 +202,13 @@ export class PullRequestReviewer {
     const payload = item.payload as { plan: PullRequestMergePlan; planHash?: string };
     const plan = payload.plan;
     if (!plan || payload.planHash !== createHash("sha256").update(JSON.stringify(plan)).digest("hex")) throw new Error("Staged PR merge changed after approval; prepare it again");
-    const current = await runCommand("gh", ["pr", "view", String(plan.pullRequest), "--repo", plan.repository, "--json", "state,isDraft,headRefOid"], this.config.rootDir);
+    const current = await this.exec("gh", ["pr", "view", String(plan.pullRequest), "--repo", plan.repository, "--json", "state,isDraft,headRefOid"], this.config.rootDir);
     if (current.exitCode !== 0) throw new Error(current.stderr || "Could not revalidate PR before merge");
     const state = parseJson<{ state?: string; isDraft?: boolean; headRefOid?: string }>(current.stdout);
     if (state.state !== "OPEN" || state.isDraft) throw new Error("PR is no longer open or is now a draft");
     if (state.headRefOid !== plan.headSha) throw new Error(`PR changed after review: staged ${plan.headSha}, current ${state.headRefOid || "unknown"}`);
     const methodFlag = plan.mergeMethod === "merge" ? "--merge" : plan.mergeMethod === "rebase" ? "--rebase" : "--squash";
-    const merged = await runCommand("gh", ["pr", "merge", String(plan.pullRequest), "--repo", plan.repository, methodFlag, "--match-head-commit", plan.headSha], this.config.rootDir);
+    const merged = await this.exec("gh", ["pr", "merge", String(plan.pullRequest), "--repo", plan.repository, methodFlag, "--match-head-commit", plan.headSha], this.config.rootDir);
     if (merged.exitCode !== 0) throw new Error(merged.stderr || "GitHub PR merge failed");
     await this.activity.record("pr.merged", `Merged ${plan.repository}#${plan.pullRequest}`, { repository: plan.repository, pullRequest: plan.pullRequest, headSha: plan.headSha });
     const verification = await this.runCheck(plan.cwd, plan.verifyCommand);
@@ -197,7 +230,7 @@ export class PullRequestReviewer {
     if (item.kind !== "github.rollback") throw new Error(`Not a GitHub rollback approval: ${item.id}`);
     assertOutboundExecutionClaim(item);
     const payload = item.payload as { repository: string; pullRequest: number };
-    const result = await runCommand("gh", ["pr", "revert", String(payload.pullRequest), "--repo", payload.repository], this.config.rootDir);
+    const result = await this.exec("gh", ["pr", "revert", String(payload.pullRequest), "--repo", payload.repository], this.config.rootDir);
     if (result.exitCode !== 0) throw new Error(result.stderr || "GitHub PR revert failed");
     return result.stdout.trim() || `Revert PR created for ${payload.repository}#${payload.pullRequest}`;
   }
@@ -209,18 +242,19 @@ export class PullRequestReviewer {
     const report = approvalPayload.report;
     if (approvalPayload.reviewHash && approvalPayload.reviewHash !== reviewHash(report)) throw new Error("Staged PR review changed after approval; review it again");
     if (report.headSha && report.repository !== "unknown/unknown") {
-      const current = await runCommand("gh", ["pr", "view", String(report.pullRequest), "--repo", report.repository, "--json", "headRefOid"], this.config.rootDir);
+      const current = await this.exec("gh", ["pr", "view", String(report.pullRequest), "--repo", report.repository, "--json", "headRefOid"], this.config.rootDir);
       if (current.exitCode !== 0) throw new Error(current.stderr || "Could not revalidate PR head SHA");
       const currentSha = (parseJson<{ headRefOid?: string }>(current.stdout)).headRefOid;
       if (currentSha && currentSha !== report.headSha) throw new Error(`PR changed after review: staged ${report.headSha}, current ${currentSha}`);
     }
     const comments = report.findings.map((finding) => ({
       path: finding.path, line: finding.line, side: finding.side || "RIGHT",
-      body: `**${finding.severity} — ${finding.title}**\n\n${finding.body}`,
+      body: `${renderFindingMarker(finding)}\n\n**${finding.severity} — ${finding.title}**\n\n${finding.body}`,
     }));
-    const body = [`review: ${report.verdict} — ${report.summary}`, ``, `${report.findings.filter((item) => item.severity === "blocker").length} blockers, ${report.findings.filter((item) => item.severity === "warning").length} warnings, ${report.findings.filter((item) => item.severity === "nit").length} nits.`, "", "Passes:", ...Object.entries(report.passes).map(([name, value]) => `- ${name}: ${value}`)].join("\n");
+    const suppression = report.suppressedFindingBreakdown || { identical: 0, reworded: 0 };
+    const body = [`review: ${report.verdict} — ${report.summary}`, ``, `${report.findings.filter((item) => item.severity === "blocker").length} blockers, ${report.findings.filter((item) => item.severity === "warning").length} warnings, ${report.findings.filter((item) => item.severity === "nit").length} nits.`, `Suppressed findings: ${report.suppressedFindings || 0} (identical: ${suppression.identical}, reworded: ${suppression.reworded})`, "", "Passes:", ...Object.entries(report.passes).map(([name, value]) => `- ${name}: ${value}`)].join("\n");
     const requestPayload = JSON.stringify({ body, event: "COMMENT", comments });
-    const result = await runCommand("gh", ["api", `repos/${report.repository}/pulls/${report.pullRequest}/reviews`, "--method", "POST", "--input", "-"], this.config.rootDir, requestPayload);
+    const result = await this.exec("gh", ["api", `repos/${report.repository}/pulls/${report.pullRequest}/reviews`, "--method", "POST", "--input", "-"], this.config.rootDir, requestPayload);
     if (result.exitCode !== 0) throw new Error(result.stderr || "GitHub review post failed");
     return result.stdout.trim() || "GitHub review posted";
   }

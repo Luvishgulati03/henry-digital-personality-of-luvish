@@ -118,6 +118,10 @@ export interface ReviewReport {
   passes: Record<string, string>;
   generatedAt: string;
   provider: ProviderName;
+  /** Number of model findings suppressed because Henry already posted them. */
+  suppressedFindings?: number;
+  /** Breakdown of suppressed findings, retained separately for backward compatibility. */
+  suppressedFindingBreakdown?: { identical: number; reworded: number };
   approvalId?: string;
   headSha?: string;
 }
