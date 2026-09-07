@@ -5,7 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { ActivityLog } from "../src/activity.ts";
-import { DraftRepliesService, parseDraftedLine, parseDraftBlocks, type DraftRepliesNotifier } from "../src/gmail-drafts/service.ts";
+import {
+  DraftRepliesService,
+  matchReplySource,
+  normalizeSubjectKey,
+  parseDraftedLine,
+  parseDraftBlocks,
+  type DraftRepliesNotifier,
+} from "../src/gmail-drafts/service.ts";
 import type { ProviderRunner } from "../src/providers/runner.ts";
 import type { RunResult } from "../src/types.ts";
 
@@ -66,6 +73,19 @@ test("parseDraftBlocks extracts full DRAFT_BEGIN/DRAFT_END bodies and ignores ma
   assert.ok(blocks[0].body.includes("[confirm the effective date]"));
 });
 
+test("reply source matching is deterministic and never trusts a model-supplied identifier", () => {
+  assert.equal(normalizeSubjectKey("Re: RE: Contract review"), "contract review");
+  const source = matchReplySource(
+    { to: "Jane Doe <JANE@example.com>", subject: "Re: Contract review" },
+    [
+      { id: "newer", from: "Jane <jane@example.com>", subject: "Different topic" },
+      { id: "matching", from: "Jane <jane@example.com>", subject: "Contract review", messageId: "<parent>" },
+    ],
+  );
+  assert.equal(source?.id, "matching");
+  assert.equal(matchReplySource({ to: "unknown@example.com", subject: "Contract review" }, []), undefined);
+});
+
 test("draftReplies() parses drafts, notifies, records activity, and writes the local markdown file", async () => {
   const { config, activity } = await setup();
   const response = [
@@ -85,6 +105,7 @@ test("draftReplies() parses drafts, notifies, records activity, and writes the l
   assert.equal(result.drafted.length, 1);
   assert.equal(result.drafted[0].to, "jane@acme.com");
   assert.equal(result.skipped, 0);
+  assert.deepEqual(result.staged, []);
   assert.ok(result.localPath.startsWith(config.draftRepliesDir));
 
   assert.equal(messages.length, 1);
@@ -112,6 +133,37 @@ test("draftReplies() counts malformed DRAFTED| lines as skipped without throwing
   const result = await service.draftReplies(5);
   assert.equal(result.drafted.length, 1);
   assert.equal(result.skipped, 1);
+});
+
+test("opt-in reply threading stages matched RFC identity for explicit approval", async () => {
+  const { config, activity } = await setup();
+  const response = [
+    "DRAFT_BEGIN",
+    "To: jane@example.com",
+    "Subject: Re: Contract review",
+    "Body:",
+    "Thanks — I will review it.",
+    "DRAFT_END",
+    "DRAFTED|jane@example.com|Re: Contract review|Thanks — I will review it.",
+  ].join("\n");
+  const stagedInputs: Array<{ to: string; subject: string; body: string; threadId?: string; inReplyTo?: string; references?: string }> = [];
+  const service = new DraftRepliesService(config, activity, fakeRunner(response), undefined, {
+    readSources: async () => [{
+      id: "message-id", threadId: "thread-id", messageId: "<parent@example.com>",
+      references: "<root@example.com>", from: "Jane <jane@example.com>", subject: "Contract review",
+    }],
+    stage: async (input) => { stagedInputs.push(input); return { id: "approval-id" }; },
+  });
+
+  const result = await service.draftReplies(5);
+  assert.deepEqual(result.staged, [{
+    approvalId: "approval-id", to: "jane@example.com", subject: "Re: Contract review",
+    threadId: "thread-id", inReplyTo: "<parent@example.com>", unthreaded: false,
+  }]);
+  assert.deepEqual(stagedInputs, [{
+    to: "jane@example.com", subject: "Re: Contract review", body: "Thanks — I will review it.",
+    threadId: "thread-id", inReplyTo: "<parent@example.com>", references: "<root@example.com>",
+  }]);
 });
 
 test("draftReplies() handles NO_REPLIES_NEEDED with an empty drafted array and no notification", async () => {

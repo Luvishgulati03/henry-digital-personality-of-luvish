@@ -35,6 +35,11 @@ runs, no shell-out to `henry gmail ...` is needed for reading.
   in the same conversational turn, with no CLI round-trip.
 - Henry can also **create drafts** via the MCP tools directly — a draft alone is
   not an outbound action.
+- The built-in `henry gmail draftreplies` workflow is deliberately different: it
+  does **not** call an MCP draft-creation tool. It writes the full replies to a
+  local markdown file and stages each matched reply as a threaded, pending
+  approval item. Nothing is sent until Luvish separately approves and executes
+  that exact item.
 - `src/agent/henry.ts`'s self-capabilities block spells this out to the model
   explicitly (see §2.3's hard rule) — this is the enforcement surface for the MCP
   path, since (per `docs/modules/mcp-tools.md` §3) MCP tool calls happen inside the
@@ -90,16 +95,26 @@ Commands it adds (`src/cli.ts`, `gmail` branch):
 
 ```
 henry gmail auth                                            # one-time OAuth
+henry gmail doctor                                          # read-only OAuth/token diagnosis
 henry gmail inbox [--limit N]                                # read (default 10)
-henry gmail draft --to <email> --subject <s> --body <b> [--thread-id <id>]
+henry gmail draft --to <email> --subject <s> --body <b> [--thread-id <id>] [--in-reply-to <message-id>] [--references <message-ids>]
 henry gmail send  --to <email> --subject <s> --body <b>       # same as draft: still queues, never sends
-henry gmail reply --to <email> --subject <s> --body <b> --thread-id <id>
+henry gmail reply --to <email> --subject <s> --body <b> --thread-id <id> --in-reply-to <message-id> [--references <message-ids>]
+henry gmail draftreplies [--limit N]                          # local drafts + pending threaded approvals; never sends
 ```
 
 `draft`, `send`, and `reply` are aliases for the exact same call
 (`GmailService.queueEmail`) — none of them send anything. All three create a
 pending `gmail.send` approval and print its `approvalId`. The only path to an
 actual send is through the approval gate (§3.3).
+
+For replies, pass the original Gmail `threadId` together with the original RFC
+`Message-ID` as `--in-reply-to`; pass its `References` header through
+`--references` when available. After explicit approval, Henry sends Gmail's
+`threadId` plus RFC `In-Reply-To` and the accumulated `References` headers, so
+both Gmail and other mail clients can place the message in the existing thread.
+The `gmail inbox` output includes `messageId` and `references` to make those
+values available. Header values are sanitized before MIME construction.
 
 ### 3.1 Configure
 
@@ -139,6 +154,11 @@ One-time external setup (Google Cloud OAuth desktop credentials):
   (`henry approve approve <id>`) → send (`henry approve send <id>`, optionally
   scheduled via `henry remind --execute-approval`). Henry never approves on
   its own behalf. The same block also carries the MCP hard rule from §2.3.
+- **Automatic reply drafts**: `gmail draftreplies` reads source messages through
+  the Gmail integration, matches each generated reply to the sender and subject,
+  writes a local review copy, and queues a `gmail.send` approval carrying the
+  Gmail `threadId`, RFC `Message-ID`, and `References`. It does not create a
+  Gmail draft through MCP and it never sends.
 - **Memory / provider runner**: `gmail.ts` itself makes no LLM calls and no
   memory writes — content generation, if any, happens upstream in the agent's
   free-form turn before it calls `gmail draft`.
@@ -150,6 +170,7 @@ One-time external setup (Google Cloud OAuth desktop credentials):
 
 ```bash
 npx tsx src/cli.ts gmail auth                    # completes OAuth, "Henry is connected to Gmail."
+npx tsx src/cli.ts gmail doctor                  # read-only, actionable OAuth diagnostics
 npx tsx src/cli.ts gmail inbox --limit 3          # prints up to 3 InboxMessage objects
 npx tsx src/cli.ts gmail draft --to you@example.com --subject "test" --body "hello"
 # → { message: "Saved locally and queued for Luvish's approval", approvalId: "...", dashboard: "http://127.0.0.1:7337" }
@@ -161,6 +182,11 @@ npx tsx src/cli.ts approve send <approvalId>      # actually sends; prints the G
 Sending before approving must fail: `henry approve send <id>` on a `pending`
 item throws `"Sending is blocked: approval ... is pending"` — confirm this
 before trusting the module.
+
+The doctor reads the credential/token files and, when they are complete, probes
+Google's token refresh endpoint. It never sends a test message and redacts
+secrets from its output. If the files are missing or malformed, it reports the
+exact local remediation and does not attempt a network call.
 
 ### 3.4 Disable
 

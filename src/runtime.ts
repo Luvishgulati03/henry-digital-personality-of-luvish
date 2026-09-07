@@ -97,7 +97,10 @@ export class HenryRuntime {
       (approvalId) => this.executeApproval(approvalId),
     );
     this.mailwatch = new MailWatchService(config, this.activity, this.agent.providerRunner, this.notifyOperator, this.memory);
-    this.draftReplies = new DraftRepliesService(config, this.activity, this.agent.providerRunner, this.notifyOperator);
+    this.draftReplies = new DraftRepliesService(config, this.activity, this.agent.providerRunner, this.notifyOperator, {
+      readSources: (limit) => this.gmail.inbox(limit),
+      stage: (input) => this.gmail.queueEmail(input),
+    });
     this.reviewer = new PullRequestReviewer(config, this.activity, this.approvals, this.agent.providerRunner);
     this.jobs = new JobApplicationService(config, this.activity, this.approvals, this.memory, this.agent.providerRunner);
     this.cover = new CoverLetterService(config, this.activity, this.memory, this.agent.providerRunner, this.jobs);

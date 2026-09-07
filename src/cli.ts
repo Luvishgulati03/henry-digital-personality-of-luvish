@@ -4,6 +4,7 @@ import { stdin as input, stdout as output } from "node:process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { HenryRuntime } from "./runtime.ts";
+import { formatGmailDoctorReport } from "./integrations/gmail.ts";
 import { startDashboard } from "./dashboard/server.ts";
 import {
   writeCronFile, writeLaunchdPlist, installCron, installLaunchd,
@@ -44,29 +45,41 @@ function print(value: unknown): void {
 /**
  * Keeps `henry gmail …` as the explicit integration namespace while also giving the
  * common mail-drafting workflows a short, discoverable `henry draft …` alias. Both
- * paths deliberately land on the same guarded implementations: automatic replies
- * create Gmail drafts only; manual mail is staged in the approval queue.
+ * paths deliberately land on guarded implementations: automatic replies write a local
+ * copy and stage threaded approval items; manual mail is staged in the same queue.
+ * Neither path sends, and `draftreplies` does not create Gmail drafts through MCP.
  */
 async function runGmailCommand(runtime: HenryRuntime, sub: string): Promise<void> {
   if (sub === "auth") { await runtime.gmail.authorize(); console.log("Gmail connected."); }
+  else if (sub === "doctor") console.log(formatGmailDoctorReport(await runtime.gmail.doctor()));
   else if (sub === "inbox") print(await runtime.gmail.inbox(Number(option("--limit") || 10)));
   else if (sub === "send" || sub === "draft" || sub === "reply") {
     const to = option("--to");
     const subject = option("--subject");
     const body = option("--body") || args.slice(2).filter((item) => !item.startsWith("--") && item !== to && item !== subject).join(" ");
     if (!to || !subject || !body) throw new Error("Usage: henry draft mail --to email --subject subject --body body");
-    const item = await runtime.gmail.queueEmail({ to, subject, body, threadId: option("--thread-id") });
+    const item = await runtime.gmail.queueEmail({
+      to, subject, body,
+      threadId: option("--thread-id"),
+      inReplyTo: option("--in-reply-to") || option("--message-id"),
+      references: option("--references"),
+    });
     print({ message: "Saved locally and queued for Luvish's approval", approvalId: item.id, dashboard: `http://${runtime.config.host}:${runtime.config.port}` });
   } else if (sub === "draftreplies") {
     const limit = Number(option("--limit")) || 5;
     const result = await runtime.draftReplies.draftReplies(limit);
     print({
       drafted: result.drafted,
+      staged: result.staged,
       skipped: result.skipped,
       localPath: result.localPath,
-      message: result.drafted.length ? `Drafted ${result.drafted.length} replies — review in Gmail drafts` : "No replies needed",
+      message: result.staged.length
+        ? `Prepared ${result.staged.length} threaded approval item(s); nothing sent. Review the approvals and local draft at ${result.localPath}`
+        : result.drafted.length
+          ? `Wrote ${result.drafted.length} local reply draft(s); no Gmail draft or message was created`
+          : "No replies needed",
     });
-  } else throw new Error("Usage: henry gmail auth|inbox|draft|reply|draftreplies");
+  } else throw new Error("Usage: henry gmail auth|doctor|inbox|draft|reply|draftreplies");
 }
 
 /**

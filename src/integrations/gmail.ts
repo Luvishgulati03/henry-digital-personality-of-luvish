@@ -10,12 +10,22 @@ import type { ActivityLog } from "../activity.ts";
 import type { ApprovalStore } from "../approval/store.ts";
 import type { ApprovalItem } from "../types.ts";
 import { assertOutboundExecutionClaim } from "../guardrails.ts";
+import { buildRawMessage, toBase64Url } from "./gmail-message.ts";
+import { formatGmailDoctorReport, REQUIRED_GMAIL_SCOPES, safeGmailDoctor, type GmailDoctorDeps, type GmailDoctorReport } from "./gmail-doctor.ts";
 
-const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"];
+const SCOPES = REQUIRED_GMAIL_SCOPES;
 
 export interface InboxMessage {
   id: string;
   threadId?: string;
+  /**
+   * The RFC 5322 `Message-ID` header — NOT gmail's own `id`. Every non-Gmail mail client
+   * threads on this via `In-Reply-To`/`References`, so a reply that does not carry it
+   * arrives as a brand-new conversation no matter what `threadId` says.
+   */
+  messageId?: string;
+  /** The message's own `References` chain, so a reply can append to it rather than replace it. */
+  references?: string;
   from: string;
   to: string;
   subject: string;
@@ -23,6 +33,8 @@ export interface InboxMessage {
   snippet: string;
   body: string;
 }
+
+export { formatGmailDoctorReport, type GmailDoctorReport };
 
 function header(message: gmail_v1.Schema$Message, name: string): string {
   return message.payload?.headers?.find((item) => item.name?.toLowerCase() === name.toLowerCase())?.value || "";
@@ -43,10 +55,6 @@ function textPart(payload?: gmail_v1.Schema$MessagePart): string {
   return payload.body?.data ? decodeBody(payload.body.data) : "";
 }
 
-function asBase64Url(value: string): string {
-  return Buffer.from(value).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
 export class GmailService {
   private client?: gmail_v1.Gmail;
 
@@ -54,6 +62,8 @@ export class GmailService {
     private readonly config: HenryConfig,
     private readonly activity: ActivityLog,
     private readonly approvals: ApprovalStore,
+    /** Test seam only: replaces the authenticated Google client so tests never hit the network. */
+    private readonly clientFactory?: () => Promise<gmail_v1.Gmail>,
   ) {}
 
   private async oauth(): Promise<import("googleapis").Auth.OAuth2Client> {
@@ -70,8 +80,16 @@ export class GmailService {
 
   private async api(): Promise<gmail_v1.Gmail> {
     if (this.client) return this.client;
-    this.client = google.gmail({ version: "v1", auth: await this.oauth() });
+    this.client = this.clientFactory ? await this.clientFactory() : google.gmail({ version: "v1", auth: await this.oauth() });
     return this.client;
+  }
+
+  /**
+   * `henry gmail doctor` — read-only OAuth diagnostics. Never sends anything, never
+   * throws, and never returns a token, client secret, or refresh token.
+   */
+  async doctor(deps?: GmailDoctorDeps): Promise<GmailDoctorReport> {
+    return safeGmailDoctor(this.config, deps);
   }
 
   async authorize(): Promise<void> {
@@ -121,6 +139,8 @@ export class GmailService {
       const message = full.data;
       messages.push({
         id: message.id || item.id, threadId: message.threadId || undefined,
+        messageId: header(message, "Message-ID") || undefined,
+        references: header(message, "References") || undefined,
         from: header(message, "From"), to: header(message, "To"), subject: header(message, "Subject"),
         date: header(message, "Date"), snippet: message.snippet || "", body: textPart(message.payload),
       });
@@ -129,12 +149,27 @@ export class GmailService {
     return messages;
   }
 
-  async queueEmail(input: { to: string; subject: string; body: string; threadId?: string }): Promise<ApprovalItem> {
+  /**
+   * Stages an outbound message for Luvish's approval. NOTHING is sent here. When the
+   * message is a reply, `inReplyTo`/`references` are the RFC thread identity captured
+   * from the message being answered — they ride in the payload so that the eventual
+   * approved send can emit real threading headers.
+   */
+  async queueEmail(input: {
+    to: string; subject: string; body: string;
+    threadId?: string; inReplyTo?: string; references?: string;
+  }): Promise<ApprovalItem> {
     const item = await this.approvals.create({
       kind: "gmail.send", title: `Email ${input.to}: ${input.subject}`, recipient: input.to,
-      subject: input.subject, body: input.body, payload: { to: input.to, subject: input.subject, body: input.body, threadId: input.threadId },
+      subject: input.subject, body: input.body,
+      payload: {
+        to: input.to, subject: input.subject, body: input.body, threadId: input.threadId,
+        inReplyTo: input.inReplyTo, references: input.references,
+      },
     });
-    await this.activity.record("approval.created", `Queued Gmail message for approval`, { approvalId: item.id, to: input.to, subject: input.subject });
+    await this.activity.record("approval.created", `Queued Gmail message for approval`, {
+      approvalId: item.id, to: input.to, subject: input.subject, threaded: Boolean(input.inReplyTo || input.threadId),
+    });
     return item;
   }
 
@@ -142,9 +177,12 @@ export class GmailService {
     if (item.kind !== "gmail.send") throw new Error(`Not a Gmail approval: ${item.id}`);
     assertOutboundExecutionClaim(item);
     const gmail = await this.api();
-    const payload = item.payload as { to: string; subject: string; body: string; threadId?: string };
-    const raw = [`To: ${payload.to}`, `Subject: ${payload.subject}`, "Content-Type: text/plain; charset=utf-8", "", payload.body].join("\r\n");
-    const sent = await gmail.users.messages.send({ userId: "me", requestBody: { raw: asBase64Url(raw), ...(payload.threadId ? { threadId: payload.threadId } : {}) } });
+    const payload = item.payload as { to: string; subject: string; body: string; threadId?: string; inReplyTo?: string; references?: string };
+    const raw = buildRawMessage({
+      to: payload.to, subject: payload.subject, body: payload.body,
+      threadId: payload.threadId, inReplyTo: payload.inReplyTo, references: payload.references,
+    });
+    const sent = await gmail.users.messages.send({ userId: "me", requestBody: { raw: toBase64Url(raw), ...(payload.threadId ? { threadId: payload.threadId } : {}) } });
     const id = sent.data.id || "sent";
     await this.activity.record("approval.executed", `Sent Gmail message ${id}`, { approvalId: item.id, messageId: id });
     return id;
