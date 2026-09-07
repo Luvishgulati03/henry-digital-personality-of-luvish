@@ -14,9 +14,8 @@ import type { ConsumeOutcome, PumpConsumer, PumpMetaStore, TelegramUpdate } from
  *    logged, or stored. Replying to Luvish is not an outbound third-party send (soul.md
  *    "hard outbound boundary" governs messages to ANYONE ELSE, and still does: everything
  *    Henry decides to do from this conversation runs the normal rails).
- * 2. CONVERSATION, NOT MUTATION. Brain runs are `readOnly` — the bridge is a talking
- *    surface, not a way to change the repo from a phone. Long-running or destructive asks
- *    are answered with "do that in the terminal session" and never reach the provider.
+ * 2. CONVERSATION BY DEFAULT. Optional operator mode allows local engineering and research
+ *    from Telegram, but keeps external/destructive actions behind their existing rails.
  * 3. ONE IN FLIGHT. Messages are processed strictly sequentially (one M1 Air, one brain).
  *    At most 5 queue behind; older ones are dropped with a note in the next reply.
  * 4. KILL SWITCH. `telegram.bridge.enabled: false` in data/settings.json switches the
@@ -67,6 +66,15 @@ export function terminalOnlyReason(text: string): string | undefined {
   if (!trimmed) return undefined;
   if (QUESTION.test(trimmed) && trimmed.includes("?")) return undefined;
   for (const [pattern, reason] of TERMINAL_ONLY_PATTERNS) if (pattern.test(trimmed)) return reason;
+  return undefined;
+}
+
+/** Operator mode can edit/test locally, but never turns Telegram into an outbound shell. */
+export function operatorTerminalOnlyReason(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  if (/\bgit\s+(push|merge|rebase|reset|revert|cherry-pick)\b|\b(deploy|ship it|publish|release)\b|\b(approve|send|post|reply)\b/i.test(trimmed)) return "external or high-risk action";
+  if (/\brm\s+-rf\b|\bdrop\s+(the\s+)?(table|database|db)\b/i.test(trimmed)) return "destructive command";
   return undefined;
 }
 
@@ -155,6 +163,8 @@ export class TelegramBridge implements PumpConsumer {
     return this.configured && bridgeEnabled(this.config.settingsPath);
   }
 
+  get operatorMode(): boolean { return this.config.telegramOperatorMode; }
+
   /**
    * The pump routes by this. Returning undefined while disabled is the kill switch's teeth:
    * the pump then never hands this consumer a batch at all, and standup keeps polling fine.
@@ -239,7 +249,7 @@ export class TelegramBridge implements PumpConsumer {
   }
 
   private async handle(item: Pending, note: string): Promise<void> {
-    const deferral = terminalOnlyReason(item.text);
+    const deferral = this.operatorMode ? operatorTerminalOnlyReason(item.text) : terminalOnlyReason(item.text);
     if (deferral) {
       this.counters.deferred += 1;
       await this.reply(`${note}${TERMINAL_ONLY_REPLY}`);

@@ -33,7 +33,12 @@ export interface HenryConfig {
   dashboardToken?: string;
   allowRemoteDashboard: boolean;
   provider: "codex" | "claude";
+  /** Chief/orchestrator model for normal Codex work (t1). */
   codexModel?: string;
+  /** Fast delegated-worker model for t0 work. */
+  codexT0Model?: string;
+  /** Deep specialist model for t2 work. */
+  codexT2Model?: string;
   claudeModel?: string;
   requireOutboundApproval: boolean;
   /** The owner's own email address (HENRY_OWNER_EMAIL; legacy DAD_EMAIL still honoured). */
@@ -64,6 +69,8 @@ export interface HenryConfig {
   /** Operator-notification channel only (never a general send-to-anyone surface). */
   telegramBotToken?: string;
   telegramChatId?: string;
+  /** Explicit opt-in for local code edits and research initiated from Luvish's Telegram DM. */
+  telegramOperatorMode: boolean;
   /** The team standup group — the ONLY chat the standup poller reads and the group sender writes. */
   telegramStandupChatId?: string;
   /**
@@ -179,7 +186,12 @@ export function loadConfig(rootDir = defaultRoot): HenryConfig {
     dashboardToken: env("DASHBOARD_TOKEN") || undefined,
     allowRemoteDashboard: bool(env("ALLOW_REMOTE_DASHBOARD"), false),
     provider: env("PROVIDER") === "claude" ? "claude" : "codex",
-    codexModel: env("CODEX_MODEL") || undefined,
+    // Keep the model policy inside Henry instead of inheriting an operator's global
+    // Codex setting. Luvish's orchestration contract: Terra coordinates ordinary
+    // work, a cheaper 5.5 worker handles t0 tasks, and Luna gets the hard t2 work.
+    codexModel: env("CODEX_MODEL") || "gpt-5.6-terra",
+    codexT0Model: env("CODEX_T0_MODEL") || "gpt-5.5",
+    codexT2Model: env("CODEX_T2_MODEL") || "gpt-5.6-luna",
     claudeModel: env("CLAUDE_MODEL") || undefined,
     requireOutboundApproval: bool(env("REQUIRE_OUTBOUND_APPROVAL"), true),
     ownerEmail: env("OWNER_EMAIL") || process.env.DAD_EMAIL || undefined,
@@ -206,6 +218,7 @@ export function loadConfig(rootDir = defaultRoot): HenryConfig {
     socialDir: path.join(dataDir, "social"),
     telegramBotToken: env("TELEGRAM_BOT_TOKEN") || undefined,
     telegramChatId: env("TELEGRAM_CHAT_ID") || undefined,
+    telegramOperatorMode: bool(env("TELEGRAM_OPERATOR_MODE"), false),
     telegramStandupChatId: env("TELEGRAM_STANDUP_CHAT_ID") || undefined,
     portfolioDir: portfolioDir ? path.resolve(expandHome(portfolioDir)) : undefined,
     portfolioSite: env("PORTFOLIO_SITE") || undefined,

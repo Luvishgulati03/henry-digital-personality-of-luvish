@@ -68,6 +68,8 @@ npx tsx src/cli.ts repl
 henry ask "summarize the current git changes"
 henry repl                      # chat + dashboard + schedules, all alive in one terminal
 henry pm on                     # project-manager mode
+henry draft replies --limit 5   # reads unread mail and creates Gmail drafts only—never sends
+henry draft mail --to you@example.com --subject "Hello" --body "…"  # approval-gated
 henry jobs login && henry jobs scout --prepare 2
 henry jd --file posting.txt     # tailored one-page resume + cover letter
 henry standup discover          # wire your team's Telegram group

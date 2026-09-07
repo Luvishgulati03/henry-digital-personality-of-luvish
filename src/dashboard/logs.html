@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Henry — Logs</title>
 <style>
-:root{color-scheme:dark;--bg:#101318;--panel:#181d25;--line:#2c3442;--text:#e9edf5;--muted:#9ba7b8;--accent:#8b9cff;--good:#55d69b;--warn:#ffca75;--bad:#ff6b6b;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#202a45 0,#101318 36rem);color:var(--text);font:13.5px/1.5 ui-sans-serif,system-ui,sans-serif}
+:root{color-scheme:dark;--bg:#050706;--panel:#0a0e0b;--line:#1b2a20;--text:#f3f7f2;--muted:#91a296;--accent:#57e389;--good:#57e389;--warn:#e8bf67;--bad:#ff6f79;--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 82% -12%,rgba(39,119,67,.15),transparent 33rem),var(--bg);color:var(--text);font:13.5px/1.5 ui-sans-serif,system-ui,sans-serif}
 main{max-width:1200px;margin:auto;padding:22px}
 header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 h1{margin:0;font-size:22px}
@@ -10,7 +10,7 @@ h1{margin:0;font-size:22px}
 a.back{color:var(--accent);text-decoration:none;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:5px 12px}
 .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .chip{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer;user-select:none}
-.chip.active{background:var(--accent);color:#10131f;border-color:var(--accent);font-weight:600}
+.chip.active{background:rgba(87,227,137,.15);color:var(--accent);border-color:var(--accent);font-weight:600}
 .chip.errors.active{background:var(--bad);border-color:var(--bad)}
 input[type=search]{flex:1;min-width:180px;background:#0f131a;border:1px solid var(--line);border-radius:8px;color:var(--text);padding:7px 10px;font-size:13px}
 select{background:#0f131a;border:1px solid var(--line);border-radius:8px;color:var(--text);padding:6px}
@@ -26,6 +26,7 @@ label.follow{display:flex;align-items:center;gap:6px;color:var(--muted);font-siz
 .kind.mem{color:#b48bff;border-color:#5b4a8a}
 .kind.run{color:var(--good);border-color:#2c5c48}
 .kind.wf{color:var(--accent);border-color:#3c4a8a}
+.kind.telegram{color:#8ddcff;border-color:#2b6a7a}
 .kind.ap{color:var(--warn);border-color:#8a6c3c}
 .msg{word-break:break-word}
 .meta{grid-column:1/-1;display:none;font-family:var(--mono);font-size:11.5px;background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-word;color:#c8d2e4}
@@ -33,7 +34,7 @@ label.follow{display:flex;align-items:center;gap:6px;color:var(--muted);font-siz
 .empty{padding:26px;text-align:center;color:var(--muted)}
 </style></head><body><main>
 <header>
-  <div><h1>📜 Henry logs</h1><div class="sub">everything Henry does lands here — runs, memory, workflows, approvals, failures</div></div>
+  <div><h1>Henry / event log</h1><div class="sub">runs, memory, workflows, approvals, failures, and Telegram pipeline messages</div></div>
   <a class="back" href="/">← dashboard</a>
 </header>
 <div class="bar">
@@ -43,6 +44,7 @@ label.follow{display:flex;align-items:center;gap:6px;color:var(--muted);font-siz
   <span class="chip" data-cat="workflows">Workflows</span>
   <span class="chip" data-cat="approvals">Approvals</span>
   <span class="chip" data-cat="standup">Standup</span>
+  <span class="chip" data-cat="telegram">Telegram</span>
   <span class="chip" data-cat="jobs">Jobs</span>
   <span class="chip errors" data-cat="errors">⚠ Errors only</span>
   <input type="search" id="q" placeholder="search message, kind, metadata…">
@@ -55,7 +57,11 @@ label.follow{display:flex;align-items:center;gap:6px;color:var(--muted);font-siz
 <script>
 (function () {
   "use strict";
-  var state = { cat: "all", q: "", rows: [] };
+  var source = new URLSearchParams(location.search).get("source");
+  var state = { cat: source === "telegram" ? "telegram" : source === "jobs" ? "jobs" : "all", q: "", rows: [] };
+  document.querySelectorAll(".chip").forEach(function (chip) {
+    chip.classList.toggle("active", chip.dataset.cat === state.cat);
+  });
   var logEl = document.getElementById("log");
   var countEl = document.getElementById("count");
 
@@ -63,6 +69,7 @@ label.follow{display:flex;align-items:center;gap:6px;color:var(--muted);font-siz
 
   function kindClass(row) {
     if (row.kind.endsWith(".failed") || (row.metadata && row.metadata.error)) return "err";
+    if (row.metadata && (row.metadata.telegram || row.metadata.bridge || row.metadata.standup)) return "telegram";
     if (row.kind.indexOf("memory.") === 0) return "mem";
     if (row.kind.indexOf("run.") === 0) return "run";
     if (row.kind.indexOf("workflow.") === 0) return "wf";
@@ -79,6 +86,7 @@ label.follow{display:flex;align-items:center;gap:6px;color:var(--muted);font-siz
       case "workflows": return row.kind.indexOf("workflow.") === 0;
       case "approvals": return row.kind.indexOf("approval.") === 0;
       case "standup": return Boolean(meta.standup);
+      case "telegram": return Boolean(meta.telegram || meta.bridge || meta.standup) || /telegram/i.test(row.kind + " " + row.message);
       case "jobs": return Boolean(meta.scout || meta.jobTracker || meta.mailwatch || meta.applicationId) || row.kind.indexOf("job.") === 0;
       default: return true;
     }

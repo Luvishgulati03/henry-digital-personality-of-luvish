@@ -102,6 +102,8 @@ Check it:
 npx tsx src/cli.ts telegram status  # env presence, kill-switch state, replies/dropped/deferred counters
 npx tsx src/cli.ts telegram off     # kill switch → telegram.bridge.enabled=false in data/settings.json
 npx tsx src/cli.ts telegram on
+npx tsx src/cli.ts telegram operator on   # opt in to local code edits/tests/link research from your DM
+npx tsx src/cli.ts telegram operator off
 ```
 
 Rails worth knowing:
@@ -121,3 +123,18 @@ Rails worth knowing:
   intake, everything else → counted and dropped. Lock and offset rows
   (`poller:lock`, `poller:lastUpdateId`) are shared with the legacy standup
   poller so the two can never poll side by side.
+
+## Optional operator mode
+
+Operator mode is an explicit opt-in for Luvish's own DM. It lets Henry inspect
+and edit the local Henry repository, run its checks, and research URLs that
+Luvish shares. It does not bypass approvals: Telegram cannot push, merge,
+deploy, post, send mail, approve an action, or perform destructive commands.
+
+```bash
+henry telegram operator on
+henry repl                 # or: henry dashboard / henry schedule daemon
+```
+
+Restart the long-lived process after changing the mode. Use `operator off` for
+a conversation-only phone surface; `telegram status` reports the current mode.

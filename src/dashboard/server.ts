@@ -508,6 +508,19 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
       }
       if (request.method === "GET" && url.pathname === "/api/health") { json(response, 200, { ok: true, timestamp: new Date().toISOString() }); return; }
       if (request.method === "GET" && url.pathname === "/api/status") { json(response, 200, await runtime.status()); return; }
+      if (request.method === "GET" && url.pathname === "/api/resources") {
+        const resources = await sampleResources();
+        const pending = await runtime.approvals.list("pending").catch(() => []);
+        const admission = sharedAdmissionController().snapshot();
+        const events = await runtime.activity.list(1).catch(() => []);
+        const lastActivityAt = events[0]?.timestamp ?? null;
+        json(response, 200, {
+          ...resources,
+          agentState: { state: admission.running > 0 ? "working" : "idle", running: admission.running, heavy: admission.heavyRunning, queued: admission.queued },
+          heartbeat: { uptimeSec: Math.round(process.uptime()), lastActivityAt, lastActivityAgeSec: lastActivityAt ? Math.max(0, Math.round((Date.now() - new Date(lastActivityAt).getTime()) / 1000)) : null, pendingApprovals: pending.length },
+        });
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/api/activity") { json(response, 200, await runtime.activity.list(Number(url.searchParams.get("limit")) || 100)); return; }
       if (request.method === "GET" && url.pathname === "/api/events") {
         response.writeHead(200, {
@@ -770,10 +783,27 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
         json(response, 200, domainPolicy(runtime.config.settingsPath));
         return;
       }
-      const approval = url.pathname.match(/^\/api\/approvals\/([^/]+)\/(approve|execute)$/);
+      const approval = url.pathname.match(/^\/api\/approvals\/([^/]+)\/(approve|execute|approve-execute|retry)$/);
       if (request.method === "POST" && approval) {
         const id = decodeURIComponent(approval[1]);
         if (approval[2] === "approve") { await runtime.approve(id); json(response, 200, { ok: true }); return; }
+        // This route is reached only by the local dashboard's explicit confirmation
+        // dialog. It preserves both state transitions while removing error-prone
+        // copy/paste of two terminal commands.
+        if (approval[2] === "approve-execute") {
+          await runtime.approve(id);
+          json(response, 200, { ok: true, result: await runtime.executeApproval(id) }); return;
+        }
+        if (approval[2] === "retry") {
+          const failed = await runtime.approvals.get(id);
+          if (!failed || failed.kind !== "social.x-post" || failed.status !== "failed") {
+            json(response, 400, { error: "Only a failed X post can be retried" }); return;
+          }
+          const retry = await runtime.approvals.create({
+            kind: failed.kind, title: failed.title, body: failed.body, payload: failed.payload,
+          });
+          json(response, 200, { ok: true, approvalId: retry.id }); return;
+        }
         json(response, 200, { ok: true, result: await runtime.executeApproval(id) }); return;
       }
       json(response, 404, { error: "not found" });

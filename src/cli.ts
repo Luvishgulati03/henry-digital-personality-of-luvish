@@ -39,6 +39,34 @@ function print(value: unknown): void {
 }
 
 /**
+ * Keeps `henry gmail …` as the explicit integration namespace while also giving the
+ * common mail-drafting workflows a short, discoverable `henry draft …` alias. Both
+ * paths deliberately land on the same guarded implementations: automatic replies
+ * create Gmail drafts only; manual mail is staged in the approval queue.
+ */
+async function runGmailCommand(runtime: HenryRuntime, sub: string): Promise<void> {
+  if (sub === "auth") { await runtime.gmail.authorize(); console.log("Gmail connected."); }
+  else if (sub === "inbox") print(await runtime.gmail.inbox(Number(option("--limit") || 10)));
+  else if (sub === "send" || sub === "draft" || sub === "reply") {
+    const to = option("--to");
+    const subject = option("--subject");
+    const body = option("--body") || args.slice(2).filter((item) => !item.startsWith("--") && item !== to && item !== subject).join(" ");
+    if (!to || !subject || !body) throw new Error("Usage: henry draft mail --to email --subject subject --body body");
+    const item = await runtime.gmail.queueEmail({ to, subject, body, threadId: option("--thread-id") });
+    print({ message: "Saved locally and queued for Luvish's approval", approvalId: item.id, dashboard: `http://${runtime.config.host}:${runtime.config.port}` });
+  } else if (sub === "draftreplies") {
+    const limit = Number(option("--limit")) || 5;
+    const result = await runtime.draftReplies.draftReplies(limit);
+    print({
+      drafted: result.drafted,
+      skipped: result.skipped,
+      localPath: result.localPath,
+      message: result.drafted.length ? `Drafted ${result.drafted.length} replies — review in Gmail drafts` : "No replies needed",
+    });
+  } else throw new Error("Usage: henry gmail auth|inbox|draft|reply|draftreplies");
+}
+
+/**
  * Agent prose inside the REPL goes through the markdown-lite renderer. With color off
  * `renderMarkdown` is the identity function, so this stays `console.log`-equivalent.
  */
@@ -368,6 +396,11 @@ async function main(): Promise<void> {
       process.exit(0);
     } else if (command === "dashboard") {
       keepAlive = true;
+      // The dashboard is also a long-lived Henry process. Arm the same single
+      // Telegram pump here so `henry dashboard` does not leave the DM bridge
+      // silently offline when no REPL is open. The pump owns one getUpdates
+      // reader and its SQLite lock prevents a second Henry process from racing it.
+      const pump = runtime.startTelegramPump();
       try {
         const server = startDashboard(runtime);
         server.on("error", (error: NodeJS.ErrnoException) => {
@@ -385,6 +418,7 @@ async function main(): Promise<void> {
         promptRunner: (prompt) => runtime.agent.run(prompt).then((result) => result.response),
         executeApproval: (approvalId) => runtime.executeApproval(approvalId),
       });
+      announceTelegramPump(pump);
       console.log(`Henry dashboard: http://${runtime.config.host}:${runtime.config.port}`);
     } else if (command === "status") {
       print(await runtime.status());
@@ -549,24 +583,12 @@ async function main(): Promise<void> {
       if (!task) throw new Error("Usage: henry dispatch <role> <task>");
       print((await runtime.luna.dispatch(role, task, { allowEdits: args.includes("--edit") })).response);
     } else if (command === "gmail") {
-      const sub = args[1] || "inbox";
-      if (sub === "auth") { await runtime.gmail.authorize(); console.log("Gmail connected."); }
-      else if (sub === "inbox") print(await runtime.gmail.inbox(Number(option("--limit") || 10)));
-      else if (sub === "send" || sub === "draft" || sub === "reply") {
-        const to = option("--to"); const subject = option("--subject"); const body = option("--body") || args.slice(2).filter((item) => !item.startsWith("--") && item !== to && item !== subject).join(" ");
-        if (!to || !subject || !body) throw new Error("Usage: henry gmail draft --to email --subject subject --body body");
-        const item = await runtime.gmail.queueEmail({ to, subject, body, threadId: option("--thread-id") });
-        print({ message: "Saved locally and queued for Luvish's approval", approvalId: item.id, dashboard: `http://${runtime.config.host}:${runtime.config.port}` });
-      } else if (sub === "draftreplies") {
-        const limit = Number(option("--limit")) || 5;
-        const result = await runtime.draftReplies.draftReplies(limit);
-        print({
-          drafted: result.drafted,
-          skipped: result.skipped,
-          localPath: result.localPath,
-          message: result.drafted.length ? `Drafted ${result.drafted.length} replies — review in Gmail drafts` : "No replies needed",
-        });
-      } else throw new Error("Usage: henry gmail auth|inbox|draft|reply|draftreplies");
+      await runGmailCommand(runtime, args[1] || "inbox");
+    } else if (command === "draft") {
+      const sub = args[1] || "replies";
+      if (sub === "replies" || sub === "reply") await runGmailCommand(runtime, "draftreplies");
+      else if (sub === "mail" || sub === "email") await runGmailCommand(runtime, "draft");
+      else throw new Error("Usage: henry draft replies [--limit 5] | henry draft mail --to email --subject subject --body body");
     } else if (command === "pr") {
       const sub = args[1] || "review";
       const target = args[2];
@@ -710,13 +732,19 @@ async function main(): Promise<void> {
           dmChatConfigured: Boolean(runtime.config.telegramChatId),
           standupChatConfigured: Boolean(runtime.config.telegramStandupChatId),
           bridge: { enabled: bridge.enabled, killSwitch: "telegram.bridge.enabled in data/settings.json", ...bridge.stats() },
+          operatorMode: runtime.config.telegramOperatorMode,
           note: "One getUpdates pump serves both; it runs inside `henry repl` or `henry schedule daemon`.",
         });
       } else if (sub === "on" || sub === "off") {
         const { updateSettings } = await import("./util/settings.ts");
         updateSettings(runtime.config.settingsPath, { telegram: { bridge: { enabled: sub === "on" } } });
         console.log(`Telegram DM bridge ${sub === "on" ? "ON" : "OFF"}.`);
-      } else throw new Error("Usage: henry telegram test|status|on|off");
+      } else if (sub === "operator") {
+        const mode = args[2];
+        if (mode !== "on" && mode !== "off") throw new Error("Usage: henry telegram operator on|off");
+        await runtime.setTelegramOperatorMode(mode === "on");
+        console.log(`Telegram operator mode ${mode === "on" ? "ON" : "OFF"}. Restart the long-lived Henry process to apply it to its bridge.`);
+      } else throw new Error("Usage: henry telegram test|status|on|off|operator on|off");
     } else if (command === "mailwatch") {
       const sub = args[1] || "check";
       if (sub === "check") print(await runtime.mailwatch.check());
@@ -778,7 +806,19 @@ async function main(): Promise<void> {
       const sub = args[1];
       const { TweetService, tweetsEnabled, readXCredentials } = await import("./social/tweets.ts");
       const { updateSettings } = await import("./util/settings.ts");
-      if (sub === "on" || sub === "off") {
+      if (sub === "browser") {
+        const action = args[2];
+        if (action === "stage") {
+          const directText = option("--text");
+          const result = directText
+            ? await runtime.xBrowser.stageText(directText)
+            : await runtime.xBrowser.stage(option("--date"));
+          print({ ...result, next: `Review, then: henry approve approve ${result.approvalId} && henry approve send ${result.approvalId}` });
+        } else if (action === "login") {
+          if (!process.stdin.isTTY) throw new Error("X login is interactive — run `npx tsx src/cli.ts tweet browser login` in your own terminal, sign in, then press Ctrl-C.");
+          await runtime.xBrowser.login();
+        } else throw new Error("Usage: henry tweet browser login|stage [--date YYYY-MM-DD] [--text \"exact tweet\"]");
+      } else if (sub === "on" || sub === "off") {
         updateSettings(runtime.config.settingsPath, { social: { tweets: { enabled: sub === "on" } } });
         console.log(`Daily tech tweet: ${sub === "on" ? "ENABLED" : "OFF"}${sub === "on" && !readXCredentials() ? " (but the four X_* keys are missing — runs will stage, not post)" : ""}`);
       } else if (sub === "status") {
@@ -790,7 +830,7 @@ async function main(): Promise<void> {
         if (result.posted) console.log(`Posted: https://x.com/i/status/${result.tweetId}`);
         else if (result.stagedPath) console.log(`Staged (not posted — ${result.reason}): ${result.stagedPath}`);
         else console.log(`Skipped: ${result.reason}`);
-      } else throw new Error("Usage: henry tweet [draft|on|off|status]  (bare `tweet` runs today's pipeline; `draft` never posts)");
+      } else throw new Error("Usage: henry tweet [draft|on|off|status|browser login|stage]  (bare `tweet` runs today's pipeline; `draft` never posts)");
     } else if (command === "launch") {
       const sub = args[1];
       if (sub === "intake") {

@@ -11,25 +11,25 @@
   <style>
     #henry-memory-network {
       --baseline-font: 1px;
-      --background: #07090d;
-      --background-deep: #040509;
-      --card: rgba(17, 21, 31, 0.82);
-      --card-soft: rgba(12, 16, 25, 0.68);
-      --card-strong: rgba(23, 29, 43, 0.92);
-      --foreground: #f4f7fb;
-      --muted: #8791a5;
-      --faint: #505a6d;
-      --border: rgba(156, 172, 198, 0.16);
-      --border-strong: rgba(156, 172, 198, 0.28);
-      --blue: #64a4ff;
-      --cyan: #58e1db;
-      --purple: #b28cff;
-      --gold: #f0bd6e;
-      --green: #6fe0a7;
+      --background: #050706;
+      --background-deep: #020302;
+      --card: rgba(10, 16, 11, 0.88);
+      --card-soft: rgba(7, 12, 8, 0.76);
+      --card-strong: rgba(14, 25, 16, 0.94);
+      --foreground: #f3f7f2;
+      --muted: #91a296;
+      --faint: #53665a;
+      --border: rgba(87, 227, 137, 0.16);
+      --border-strong: rgba(87, 227, 137, 0.32);
+      --blue: #57e389;
+      --cyan: #9decb0;
+      --purple: #8acb9a;
+      --gold: #e8bf67;
+      --green: #57e389;
       --red: #f6848a;
-      --viz-series-1: #64a4ff;
-      --viz-series-2: #58e1db;
-      --viz-series-3: #b28cff;
+      --viz-series-1: #57e389;
+      --viz-series-2: #9decb0;
+      --viz-series-3: #8acb9a;
       --viz-series-4: #f0bd6e;
       --viz-series-5: #6fe0a7;
       --viz-series-6: #f6848a;
@@ -1392,6 +1392,10 @@
         zoom: 1,
         panX: 0,
         panY: 0,
+        orbitX: 0,
+        orbitY: 0,
+        focusStarted: 0,
+        focusProgress: 1,
         dragging: false,
         lastPointer: null,
         pulseStart: performance.now(),
@@ -1521,73 +1525,31 @@
         return "memory";
       }
 
-      // Deterministic force layout: GraphExport carries no coordinates, so the
-      // real edge structure is relaxed here and normalised into a zone box.
+      // Deterministic brain layout. GraphExport carries no coordinates, so place
+      // memories into two readable hemispheres instead of allowing a force graph
+      // to collapse labels into one dense cloud. The hash keeps the same memory
+      // in the same place between refreshes while still leaving the associative
+      // edges visible over the silhouette.
       function layoutForce(list, box) {
         var n = list.length;
         if (!n) return;
-        if (n === 1) { list[0].x = (box.x0 + box.x1) / 2; list[0].y = (box.y0 + box.y1) / 2; return; }
-        var index = {};
+        var hash = function (value) {
+          var h = 2166136261;
+          String(value).split("").forEach(function (ch) { h = Math.imul(h ^ ch.charCodeAt(0), 16777619); });
+          return (h >>> 0) / 4294967296;
+        };
         list.forEach(function (node, i) {
-          index[node.id] = i;
-          var angle = (i / n) * Math.PI * 2;
-          node.lx = Math.cos(angle) * 120 + (seededRandom() - 0.5) * 40;
-          node.ly = Math.sin(angle) * 120 + (seededRandom() - 0.5) * 40;
-          node.lvx = 0; node.lvy = 0;
-        });
-        var links = [];
-        edges.forEach(function (edge) {
-          if (index[edge.from] != null && index[edge.to] != null) {
-            links.push({ a: index[edge.from], b: index[edge.to], w: edge.weight });
-          }
-        });
-        var iterations = n > 160 ? 120 : 260;
-        for (var step = 0; step < iterations; step++) {
-          for (var i = 0; i < n; i++) {
-            var a = list[i];
-            var fx = -a.lx * 0.004;
-            var fy = -a.ly * 0.004;
-            for (var j = 0; j < n; j++) {
-              if (i === j) continue;
-              var b = list[j];
-              var dx = a.lx - b.lx;
-              var dy = a.ly - b.ly;
-              var distSq = dx * dx + dy * dy + 0.01;
-              var dist = Math.sqrt(distSq);
-              var force = 2600 / distSq;
-              fx += (dx / dist) * force;
-              fy += (dy / dist) * force;
-            }
-            a.lfx = fx; a.lfy = fy;
-          }
-          links.forEach(function (link) {
-            var p = list[link.a];
-            var q = list[link.b];
-            var dx = q.lx - p.lx;
-            var dy = q.ly - p.ly;
-            var dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-            var pull = (dist - 78) * 0.02 * (0.4 + link.w);
-            p.lfx += (dx / dist) * pull; p.lfy += (dy / dist) * pull;
-            q.lfx -= (dx / dist) * pull; q.lfy -= (dy / dist) * pull;
-          });
-          for (var k = 0; k < n; k++) {
-            var node = list[k];
-            node.lvx = (node.lvx + node.lfx) * 0.86;
-            node.lvy = (node.lvy + node.lfy) * 0.86;
-            node.lx += node.lvx;
-            node.ly += node.lvy;
-          }
-        }
-        var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        list.forEach(function (node) {
-          minX = Math.min(minX, node.lx); maxX = Math.max(maxX, node.lx);
-          minY = Math.min(minY, node.ly); maxY = Math.max(maxY, node.ly);
-        });
-        var spanX = (maxX - minX) || 1;
-        var spanY = (maxY - minY) || 1;
-        list.forEach(function (node) {
-          node.x = box.x0 + ((node.lx - minX) / spanX) * (box.x1 - box.x0);
-          node.y = box.y0 + ((node.ly - minY) / spanY) * (box.y1 - box.y0);
+          var t = n === 1 ? 0.5 : i / (n - 1);
+          var y = 0.09 + t * 0.82;
+          var dy = (y - 0.5) / 0.43;
+          var lobeWidth = 0.22 * Math.sqrt(Math.max(0.08, 1 - dy * dy));
+          var side = hash(node.id) > 0.5 ? 1 : -1;
+          // Keep the corpus and pipeline visually central; personal memories
+          // occupy the two lobes with a deliberate central groove.
+          var jitter = (hash(node.id + ":j") - 0.5) * 0.045;
+          node.x = clamp(0.5 + side * (0.075 + lobeWidth * (0.35 + hash(node.id + ":w") * 0.65)) + jitter, box.x0, box.x1);
+          node.y = clamp(y + (hash(node.id + ":y") - 0.5) * 0.035, box.y0, box.y1);
+          node.depth = 0.78 + hash(node.id + ":d") * 0.44;
         });
       }
 
@@ -1621,7 +1583,7 @@
             keywords: keywords,
             x: 0.25,
             y: 0.5,
-            radius: clamp(2.6 + (importance / 10) * 4.4 + Math.log(usage + 1) * 0.9, 2.4, 9.4) * (item.archived ? 0.7 : 1),
+            radius: clamp(1.8 + (importance / 10) * 2.5 + Math.log(usage + 1) * 0.45, 1.8, 5.4) * (item.archived ? 0.7 : 1),
             archived: Boolean(item.archived)
           });
         });
@@ -1793,10 +1755,32 @@
       }
 
       function pointFor(node) {
-        return {
-          x: (node.x * graphWidth - graphWidth / 2) * state.zoom + graphWidth / 2 + state.panX,
-          y: (node.y * graphHeight - graphHeight / 2) * state.zoom + graphHeight / 2 + state.panY
+        var cx = 0.5, cy = 0.5;
+        var rawX = node.x - cx;
+        var rawY = node.y - cy;
+        var yaw = state.orbitX;
+        var pitch = state.orbitY;
+        var depth = node.depth || 1;
+        var orbitAngle = yaw * 0.16;
+        var orbitX = rawX * Math.cos(orbitAngle) - rawY * Math.sin(orbitAngle);
+        var orbitY = rawX * Math.sin(orbitAngle) + rawY * Math.cos(orbitAngle);
+        var rotatedX = orbitX * Math.cos(yaw) + (depth - 1) * 0.05 * Math.sin(yaw);
+        var rotatedY = orbitY * Math.cos(pitch) - rawX * Math.sin(pitch) * 0.12;
+        var perspective = 1 + Math.sin(yaw) * (depth - 1) * 0.16;
+        var point = {
+          x: (rotatedX * graphWidth * perspective) * state.zoom + graphWidth / 2 + state.panX,
+          y: (rotatedY * graphHeight * perspective) * state.zoom + graphHeight / 2 + state.panY
         };
+        if (state.selectedId && state.focusProgress < 1 && node.id !== state.selectedId) {
+          var neighbor = edgeNeighbors(state.selectedId).some(function (item) { return item.node && item.node.id === node.id; });
+          if (neighbor) {
+            var angle = Math.atan2(rawY, rawX) + state.orbitX * 0.4;
+            var expand = 30 * (1 - state.focusProgress) * state.zoom;
+            point.x += Math.cos(angle) * expand;
+            point.y += Math.sin(angle) * expand;
+          }
+        }
+        return point;
       }
 
       function resizeCanvas() {
@@ -1838,17 +1822,50 @@
         ctx.save();
         ctx.font = "9px SFMono-Regular, Consolas, monospace";
         ctx.letterSpacing = "1px";
-        ctx.fillStyle = "rgba(88, 225, 219, 0.72)";
-        ctx.fillText("PERSONAL MEMORY", 18, 28);
-        ctx.fillStyle = "rgba(178, 140, 255, 0.72)";
+        ctx.fillStyle = "rgba(87, 227, 137, 0.72)";
+        ctx.fillText("PERSONAL MEMORY · CORTEX", 18, 28);
+        ctx.fillStyle = "rgba(157, 236, 176, 0.72)";
         ctx.fillText("KNOWLEDGE BASE", graphWidth - 126, 28);
-        ctx.strokeStyle = "rgba(156, 172, 198, 0.11)";
+        ctx.strokeStyle = "rgba(87, 227, 137, 0.16)";
         ctx.setLineDash([4, 8]);
         ctx.beginPath();
         ctx.moveTo(graphWidth * 0.52, 18);
         ctx.lineTo(graphWidth * 0.52, graphHeight - 20);
         ctx.stroke();
         ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      function drawBrainField(now) {
+        var x = graphWidth * 0.5;
+        var y = graphHeight * 0.5;
+        var rx = Math.min(graphWidth * 0.43, 430) * state.zoom;
+        var ry = Math.min(graphHeight * 0.39, 300) * state.zoom;
+        ctx.save();
+        ctx.translate(x + state.panX, y + state.panY);
+        ctx.rotate(state.orbitX * 0.08);
+        ctx.globalAlpha = 0.42;
+        ctx.strokeStyle = "rgba(87, 227, 137, 0.28)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 8]);
+        [-1, 1].forEach(function (side) {
+          ctx.beginPath();
+          ctx.ellipse(side * rx * 0.235, 0, rx * 0.62, ry, 0, 0, Math.PI * 2);
+          ctx.stroke();
+        });
+        ctx.setLineDash([]);
+        ctx.strokeStyle = "rgba(157, 236, 176, 0.18)";
+        ctx.beginPath(); ctx.moveTo(0, -ry * 0.84); ctx.bezierCurveTo(-8, -ry * 0.3, 8, ry * 0.3, 0, ry * 0.84); ctx.stroke();
+        ctx.globalAlpha = 0.16;
+        for (var i = 0; i < 5; i++) {
+          var wave = Math.sin(now / 1800 + i) * 5;
+          ctx.beginPath();
+          ctx.ellipse(-rx * 0.22 + wave, -ry * 0.52 + i * ry * 0.25, rx * 0.32, ry * 0.1, -0.14, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.ellipse(rx * 0.22 - wave, -ry * 0.52 + i * ry * 0.25, rx * 0.32, ry * 0.1, 0.14, 0, Math.PI * 2);
+          ctx.stroke();
+        }
         ctx.restore();
       }
 
@@ -1953,7 +1970,9 @@
           ctx.stroke();
         }
 
-        var shouldLabel = isSelected || isHovered || isSeed || isActivated || node.radius >= 7 || node.store === "retrieval";
+        var neighbors = state.selectedId ? edgeNeighbors(state.selectedId).slice(0, 8).some(function (item) { return item.node && item.node.id === node.id; }) : false;
+        var zoomLabels = state.zoom >= 1.35 && node.radius >= 2.5;
+        var shouldLabel = isSelected || isHovered || isSeed || isActivated || neighbors || (node.store === "retrieval") || (zoomLabels && node.score > 0.18);
         if (shouldLabel && !dim) {
           ctx.globalAlpha = isSelected || isHovered ? 1 : 0.78;
           ctx.font = (isSelected ? "500 11px " : "10px ") + "Inter, system-ui, sans-serif";
@@ -1968,9 +1987,11 @@
       function draw() {
         if (!graphWidth || !graphHeight) return;
         var now = performance.now();
+        if (state.focusProgress < 1) state.focusProgress = clamp((now - state.focusStarted) / 520, 0, 1);
         ctx.clearRect(0, 0, graphWidth, graphHeight);
         drawGrid();
         drawZones();
+        drawBrainField(now);
         var visible = visibleNodes();
         var visibleSet = new Set(visible.map(function (node) { return node.id; }));
         drawEdges(visibleSet);
@@ -2180,6 +2201,9 @@
         state.zoom = 1;
         state.panX = 0;
         state.panY = 0;
+        state.orbitX = 0;
+        state.orbitY = 0;
+        state.focusProgress = 1;
         state.selectedId = defaultSelectedId;
         state.hoveredId = null;
         state.search = "";
@@ -2344,6 +2368,11 @@
           }
           state.panX += event.clientX - state.lastPointer.x;
           state.panY += event.clientY - state.lastPointer.y;
+          // The graph remains pannable, while the brain itself gently orbits in
+          // response to the same gesture. Small angles preserve readability and
+          // make horizontal/vertical dragging feel like moving a hologram.
+          state.orbitX = clamp(state.orbitX + (event.clientX - state.lastPointer.x) * 0.004, -0.7, 0.7);
+          state.orbitY = clamp(state.orbitY + (event.clientY - state.lastPointer.y) * 0.003, -0.45, 0.45);
           state.lastPointer = { x: event.clientX, y: event.clientY };
           draw();
           return;
@@ -2365,6 +2394,8 @@
           var hit = nodeAt(event.clientX, event.clientY);
           if (hit) {
             state.selectedId = hit.id;
+            state.focusStarted = performance.now();
+            state.focusProgress = 0;
             renderInspector(hit);
             draw();
           }

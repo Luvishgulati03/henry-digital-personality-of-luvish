@@ -29,6 +29,7 @@ test("t0 routes to the cheap models on both CLIs", () => {
   assert.equal(codex[1], "-m");
   assert.equal(codex[2], CODEX_T0_MODEL);
   assert.ok(!codex.includes('model_reasoning_effort="high"'), "t0 must not raise reasoning effort");
+  assert.ok(codex.includes('model_reasoning_effort="low"'), "t0 must explicitly stay fast");
 });
 
 test("t0 overrides a configured heavy model rather than inheriting it", () => {
@@ -52,7 +53,7 @@ test("t1 and an absent tier keep the configured default models", () => {
   );
   const codexDefault = codexArgs(PROMPT, { readOnly: false });
   assert.equal(codexDefault[1], "--json", "no -m flag when nothing is configured");
-  assert.ok(!codexDefault.some((arg) => arg.includes("model_reasoning_effort")));
+  assert.ok(codexDefault.includes('model_reasoning_effort="medium"'), "t1 must not inherit a global xhigh setting");
   const codexConfigured = codexArgs(PROMPT, { readOnly: false, tier: "t1", model: "gpt-5-codex" });
   assert.deepEqual(codexConfigured.slice(0, 3), ["exec", "-m", "gpt-5-codex"]);
 });

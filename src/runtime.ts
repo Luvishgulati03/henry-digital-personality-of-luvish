@@ -23,6 +23,8 @@ import { GoalService } from "./goals/service.ts";
 import { ReminderService, notifyReminder, type ReminderNotifier } from "./reminders/service.ts";
 import { LinkedInDraftService } from "./social/linkedin.ts";
 import { LaunchCrewService } from "./launch/service.ts";
+import { XBrowserPostService } from "./social/x-browser.ts";
+import { readSettings, updateSettings } from "./util/settings.ts";
 import { sendTelegram } from "./notify/telegram.ts";
 import { MailWatchService } from "./mailwatch/service.ts";
 import { StandupStore } from "./standup/store.ts";
@@ -53,6 +55,7 @@ export class HenryRuntime {
   readonly reminders: ReminderService;
   readonly linkedin: LinkedInDraftService;
   readonly launch: LaunchCrewService;
+  readonly xBrowser: XBrowserPostService;
   readonly mailwatch: MailWatchService;
   readonly draftReplies: DraftRepliesService;
   private _knowledge?: KnowledgeBase;
@@ -105,6 +108,7 @@ export class HenryRuntime {
     this.goals = new GoalService(config, this.activity, this.memory, this.luna);
     this.linkedin = new LinkedInDraftService(config, this.activity, this.memory, this.agent.providerRunner);
     this.launch = new LaunchCrewService(config, this.activity, this.memory, () => this.knowledge, this.agent.providerRunner);
+    this.xBrowser = new XBrowserPostService(config, this.activity, this.approvals);
   }
 
   /** Lazily opens the organization's knowledge DB on first domain-relevant turn; keeps boot fast. */
@@ -150,7 +154,11 @@ export class HenryRuntime {
   get telegramBridge(): TelegramBridge {
     if (!this._telegramBridge) {
       this._telegramBridge = new TelegramBridge(this.config, this.activity, this.standupStore, {
-        think: (prompt) => this.agent.run(prompt, { surface: "telegram", readOnly: true, role: "telegram-bridge" }).then((result) => result.response),
+        think: (prompt) => this.agent.run(prompt, {
+          surface: "telegram",
+          readOnly: !this.config.telegramOperatorMode,
+          role: this.config.telegramOperatorMode ? "telegram-operator" : "telegram-bridge",
+        }).then((result) => result.response),
         send: (config, text) => sendTelegram(config, text),
       });
     }
@@ -212,7 +220,25 @@ export class HenryRuntime {
       const settings = JSON.parse(await fs.readFile(this.config.settingsPath, "utf8")) as Record<string, unknown>;
       if (settings.provider === "codex" || settings.provider === "claude") this.config.provider = settings.provider;
       if (typeof settings.pmMode === "boolean") this.config.pmMode = settings.pmMode;
+      const telegram = settings.telegram;
+      if (telegram && typeof telegram === "object" && !Array.isArray(telegram)) {
+        const operator = (telegram as Record<string, unknown>).operator;
+        if (operator && typeof operator === "object" && !Array.isArray(operator) && typeof (operator as Record<string, unknown>).enabled === "boolean") {
+          this.config.telegramOperatorMode = Boolean((operator as Record<string, unknown>).enabled);
+        }
+      }
     } catch { /* No settings file yet; env/default provider applies. */ }
+  }
+
+  async setTelegramOperatorMode(enabled: boolean): Promise<boolean> {
+    this.config.telegramOperatorMode = enabled;
+    const settings = readSettings(this.config.settingsPath);
+    const telegram = settings.telegram && typeof settings.telegram === "object" && !Array.isArray(settings.telegram)
+      ? settings.telegram as Record<string, unknown> : {};
+    telegram.operator = { ...(telegram.operator && typeof telegram.operator === "object" ? telegram.operator as Record<string, unknown> : {}), enabled };
+    updateSettings(this.config.settingsPath, { telegram });
+    await this.activity.record("workflow.completed", `Telegram operator mode ${enabled ? "enabled" : "disabled"}`, { telegram: true, operatorMode: enabled });
+    return enabled;
   }
 
   /** Toggles PM MODE (persisted) — Henry operates as a project manager until switched off. */
@@ -266,6 +292,7 @@ export class HenryRuntime {
         : item.kind === "job.application" ? await this.jobs.submitApproved(item)
         : item.kind === "github.merge" ? await this.reviewer.mergeApproved(item)
         : item.kind === "github.rollback" ? await this.reviewer.rollbackApproved(item)
+        : item.kind === "social.x-post" ? await this.xBrowser.submitApproved(item)
         : await this.reviewer.postApproved(item);
       await this.approvals.setStatus(id, "executed", result);
       return result;
@@ -288,5 +315,16 @@ export class HenryRuntime {
     };
   }
 
-  close(): void { this.memory.close(); this._knowledge?.close(); this.scheduler.stop(); this._workflowEngine?.stop(); this._telegramPump?.stop(); this._standupPoller?.stop(); this._standupStore?.close(); }
+  private closing?: Promise<void>;
+
+  close(): void {
+    this.scheduler.stop(); this._workflowEngine?.stop(); this._telegramPump?.stop(); this._standupPoller?.stop(); this._standupStore?.close();
+    // Agent replies stream/return before durable conversation capture completes.
+    // Defer only the memory close; shutting it immediately caused one-shot `ask`
+    // commands to log "database connection is not open" and lose the memory.
+    this.closing ||= this.agent.flushMemoryCaptures().finally(() => {
+      this.memory.close();
+      this._knowledge?.close();
+    });
+  }
 }

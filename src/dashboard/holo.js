@@ -22,8 +22,10 @@
   var CAM_DIST = 3.6;
   var FOCAL_DEFAULT = 560, FOCAL_MIN = 260, FOCAL_MAX = 1600;
   var PITCH_LIMIT = 1.15;
-  var TIER_COLORS = { episodic: [77, 217, 255], semantic: [185, 139, 255], procedural: [255, 190, 92] };
-  var DEFAULT_COLOR = [110, 231, 255];
+  // Henry's visual language is monochrome with one earned accent: memory tiers
+  // stay legible through green intensity instead of competing neon colors.
+  var TIER_COLORS = { episodic: [87, 227, 137], semantic: [151, 232, 174], procedural: [222, 246, 226] };
+  var DEFAULT_COLOR = [87, 227, 137];
   var TIER_SHELL = { procedural: 0.46, semantic: 0.76, episodic: 1.06 };
   var DEFAULT_SHELL = 0.92;
 
@@ -156,7 +158,7 @@
         var p = project(Math.cos(a) * rad, base, Math.sin(a) * rad);
         if (i === 0) ctx.moveTo(p.sx, p.sy); else ctx.lineTo(p.sx, p.sy);
       }
-      ctx.strokeStyle = rgba([90, 220, 240], 0.13 * alpha * (1 - r / (rings + 3)) + 0.04 * alpha);
+      ctx.strokeStyle = rgba([87, 227, 137], 0.13 * alpha * (1 - r / (rings + 3)) + 0.04 * alpha);
       ctx.stroke();
     }
     var spokes = 16;
@@ -165,7 +167,7 @@
       var inner = project(Math.cos(ang) * maxR * 0.16, base, Math.sin(ang) * maxR * 0.16);
       var outer = project(Math.cos(ang) * maxR * (0.35 + 0.65 * alpha), base, Math.sin(ang) * maxR * (0.35 + 0.65 * alpha));
       ctx.beginPath(); ctx.moveTo(inner.sx, inner.sy); ctx.lineTo(outer.sx, outer.sy);
-      ctx.strokeStyle = rgba([90, 220, 240], 0.07 * alpha);
+      ctx.strokeStyle = rgba([87, 227, 137], 0.07 * alpha);
       ctx.stroke();
     }
   }
@@ -174,8 +176,8 @@
     ctx.save();
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '13px ui-monospace,SFMono-Regular,Menlo,monospace';
-    ctx.shadowColor = 'rgba(77,217,255,0.9)'; ctx.shadowBlur = 14;
-    ctx.fillStyle = 'rgba(140,235,255,0.85)';
+    ctx.shadowColor = 'rgba(87,227,137,0.9)'; ctx.shadowBlur = 14;
+    ctx.fillStyle = 'rgba(160,245,180,0.85)';
     ctx.fillText(S.error || (S.loaded ? 'memory graph is empty' : 'establishing neural link…'), S.w / 2, S.h * 0.44);
     ctx.restore();
   }
@@ -207,7 +209,7 @@
       var depth = Math.min(a.fog, b.fog);
       var alpha = (hi ? 0.75 : Math.min(0.3, 0.05 + ed.w * 0.28)) * depth * e;
       if (alpha < 0.012) continue;
-      ctx.strokeStyle = rgba(hi ? [150, 245, 255] : [78, 190, 220], alpha);
+      ctx.strokeStyle = rgba(hi ? [190, 255, 205] : [50, 150, 77], alpha);
       ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
     }
 
@@ -229,11 +231,11 @@
       ctx.beginPath(); ctx.arc(n2.px, n2.py, r * 3.2, 0, Math.PI * 2); ctx.fill();
       ctx.save();
       ctx.shadowColor = rgba(col, 0.85 * f); ctx.shadowBlur = lit ? 22 : 10;
-      ctx.fillStyle = rgba([Math.min(255, col[0] + 70), Math.min(255, col[1] + 40), 255], Math.min(1, 0.55 + 0.45 * f));
+      ctx.fillStyle = rgba([Math.min(255, col[0] + 70), Math.min(255, col[1] + 40), Math.min(255, col[2] + 70)], Math.min(1, 0.55 + 0.45 * f));
       ctx.beginPath(); ctx.arc(n2.px, n2.py, r * 0.55, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
       if (lit) {
-        ctx.strokeStyle = rgba([160, 250, 255], 0.75);
+        ctx.strokeStyle = rgba([190, 255, 205], 0.75);
         ctx.beginPath(); ctx.arc(n2.px, n2.py, r * 2.1, 0, Math.PI * 2); ctx.stroke();
       }
     }
@@ -255,7 +257,7 @@
     if (focus != null && nodes[focus]) {
       var fn = nodes[focus];
       var anchorX = S.w - 232, anchorY = 74;
-      ctx.strokeStyle = rgba([120, 235, 255], 0.5);
+      ctx.strokeStyle = rgba([120, 235, 145], 0.5);
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.moveTo(fn.px, fn.py);
@@ -271,6 +273,7 @@
     if (!hud) return;
     hud.innerHTML =
       '<div class="holo-hud-bar">' +
+        '<button id="holo-reset" type="button" title="reset view">↺</button>' +
         '<button id="holo-toggle" type="button" title="pause/resume ambient rotation">⏸</button>' +
         '<span id="holo-note" class="holo-note"></span>' +
       '</div>' +
@@ -281,6 +284,12 @@
       S.autoRotate = !S.autoRotate;
       toggle.textContent = S.autoRotate ? '⏸' : '▶';
       interacted();
+    });
+    var reset = document.getElementById('holo-reset');
+    if (reset) reset.addEventListener('click', function (evt) {
+      evt.stopPropagation();
+      S.yaw = 0.6; S.pitch = 0.32; S.focal = FOCAL_DEFAULT;
+      S.selected = null; S.hover = null; hudUpdate(); interacted();
     });
   }
   function hudUpdate() {

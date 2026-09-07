@@ -36,6 +36,8 @@ export interface RunOptions {
   readOnly?: boolean;
   /** MASTER_PLAN §11.1 tier; absent keeps the configured default models. */
   tier?: DispatchTier;
+  /** Time spent assembling prompt/memory/RAG before this provider is admitted. */
+  promptBuildMs?: number;
   /** Wall-clock envelope per provider attempt (§7). */
   timeoutMs?: number;
   onEvent?: (event: ProviderEvent) => void;
@@ -45,8 +47,8 @@ export interface RunOptions {
 export const DEFAULT_ENVELOPE_MS = 300_000;
 /** Grace period between SIGTERM and SIGKILL. */
 export const ENVELOPE_KILL_GRACE_MS = 10_000;
-/** Cheap Codex model used for t0 triage work when nothing cheaper is configured. */
-export const CODEX_T0_MODEL = "gpt-5-mini";
+/** Fast delegated worker for t0 triage work. Config may override it per deployment. */
+export const CODEX_T0_MODEL = "gpt-5.5";
 export const ENVELOPE_TIMEOUT_ERROR = "envelope timeout";
 /** Waiting longer than this in the admission queue is worth recording. */
 export const QUEUE_NOTICE_MS = 5_000;
@@ -81,18 +83,40 @@ function collectText(value: unknown, output: string[]): void {
  */
 export function codexArgs(
   prompt: string,
-  options: { readOnly?: boolean; tier?: DispatchTier; model?: string; session?: { id: string; fresh: boolean } } = { readOnly: false },
+  options: { readOnly?: boolean; tier?: DispatchTier; model?: string; t0Model?: string; session?: { id: string; fresh: boolean } } = { readOnly: false },
 ): string[] {
-  const model = options.tier === "t0" ? CODEX_T0_MODEL : options.model;
-  const resume = options.session ? sessionArgs("codex", options.session).codexSubcommand : [];
+  // `model` is the normal/t1/t2 model. Keep the t0 worker separate so a
+  // caller's heavyweight configured model can never accidentally reach a
+  // cheap dispatch, while deployments may still choose their own t0 worker.
+  const model = options.tier === "t0" ? (options.t0Model || CODEX_T0_MODEL) : options.model;
+  const isResume = options.session !== undefined && !options.session.fresh;
+  const effort = options.tier === "t0" ? "low" : options.tier === "t2" ? "high" : "medium";
+  const config = [
+    "-c", 'approval_policy="never"',
+    // `codex exec resume` does not accept `--sandbox`; its equivalent must be a
+    // config override. Keeping this explicit also prevents the global xhigh
+    // operator preference from leaking into Henry's interactive latency path.
+    ...(isResume ? ["-c", `sandbox_mode="${options.readOnly ? "read-only" : "danger-full-access"}"`] : []),
+    "-c", `model_reasoning_effort="${effort}"`,
+  ];
   // Sessions imply persistence: drop --ephemeral whenever a surface session is in play.
+  // Important CLI detail: `resume` options precede SESSION_ID; arguments after it
+  // are interpreted as the prompt. The older order made every resumed Codex turn
+  // fail on `--sandbox` before the model could respond.
+  if (isResume) {
+    return [
+      "exec", "resume",
+      ...(model ? ["-m", model] : []),
+      "--json", ...config, "--skip-git-repo-check",
+      options.session!.id, prompt,
+    ];
+  }
   return [
-    "exec", ...resume,
+    "exec",
     ...(model ? ["-m", model] : []),
     "--json", ...(options.session ? [] : ["--ephemeral"]),
     "--sandbox", options.readOnly ? "read-only" : "danger-full-access",
-    "-c", 'approval_policy="never"',
-    ...(options.tier === "t2" ? ["-c", 'model_reasoning_effort="high"'] : []),
+    ...config,
     "--skip-git-repo-check", prompt,
   ];
 }
@@ -116,10 +140,15 @@ export function claudeArgs(
 export function buildProviderArgs(
   provider: ProviderName,
   prompt: string,
-  options: { readOnly: boolean; tier?: DispatchTier; codexModel?: string; claudeModel?: string; session?: { id: string; fresh: boolean } },
+  options: { readOnly: boolean; tier?: DispatchTier; codexModel?: string; codexT0Model?: string; codexT2Model?: string; claudeModel?: string; session?: { id: string; fresh: boolean } },
 ): string[] {
+  const codexModel = options.tier === "t0"
+    ? options.codexT0Model || CODEX_T0_MODEL
+    : options.tier === "t2"
+      ? options.codexT2Model || options.codexModel
+      : options.codexModel;
   return provider === "codex"
-    ? codexArgs(prompt, { readOnly: options.readOnly, tier: options.tier, model: options.codexModel, session: options.session })
+    ? codexArgs(prompt, { readOnly: options.readOnly, tier: options.tier, model: codexModel, t0Model: options.codexT0Model, session: options.session })
     : claudeArgs(prompt, { readOnly: options.readOnly, tier: options.tier, model: options.claudeModel, session: options.session });
 }
 
@@ -523,6 +552,8 @@ export class ProviderRunner {
         readOnly: options.readOnly === true,
         tier: options.tier,
         codexModel: this.config.codexModel,
+        codexT0Model: this.config.codexT0Model,
+        codexT2Model: this.config.codexT2Model,
         claudeModel: this.config.claudeModel,
         session,
       });
@@ -548,7 +579,7 @@ export class ProviderRunner {
       await this.activity.record(
         "run.started",
         `Starting ${provider} run`,
-        { cwd, tier: options.tier, queuedMs: decision.queuedMs, ...(queued ? { queued: true } : {}) },
+        { cwd, tier: options.tier, promptBuildMs: options.promptBuildMs ?? null, queuedMs: decision.queuedMs, ...(queued ? { queued: true } : {}) },
         { provider, role: options.role },
       );
       let result: RunResult;
@@ -623,6 +654,7 @@ export class ProviderRunner {
           firstEventMs: result.firstEventMs ?? null,
           firstTextMs: result.firstTextMs ?? null,
           tier: options.tier,
+          promptBuildMs: options.promptBuildMs ?? null,
           promptChars: prompt.length,
           ...(handoff ? { failoverFrom: handoff.from } : {}),
         }, { runId: result.runId, provider, role: options.role });

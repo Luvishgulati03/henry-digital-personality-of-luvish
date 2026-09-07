@@ -67,26 +67,29 @@ export class PlaywrightXFrontEnd implements XFrontEnd {
       // control to it so the underlying timeline cannot create a second match.
       const dialog = page.locator('[role="dialog"]').first();
       const root = await dialog.count() ? dialog : page;
-      const composer = root.locator(`${X_COMPOSER_SELECTOR}:visible`);
-      await composer.first().waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
-      if (await composer.count() !== 1 || !(await composer.first().isVisible().catch(() => false))) {
+      // X currently mounts duplicate visible composer nodes during hydration.
+      // The first scoped composer is the one paired with the first scoped Post
+      // button; strict count==1 incorrectly rejected a healthy logged-in page.
+      const composer = root.locator(`${X_COMPOSER_SELECTOR}:visible`).first();
+      await composer.waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
+      if (!(await composer.isVisible().catch(() => false))) {
         throw new Error("X composer unavailable — sign in with `henry tweet browser login` and close that window before posting");
       }
       await composer.fill(text);
       // One exact, known irreversible target. Never fall back to labels or generic buttons.
-      const button = root.locator(X_POST_BUTTON_SELECTOR);
-      await button.first().waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
-      if (await button.count() !== 1 || !(await button.first().isVisible().catch(() => false))) {
+      const button = root.locator(X_POST_BUTTON_SELECTOR).first();
+      await button.waitFor({ state: "visible", timeout: 15_000 }).catch(() => undefined);
+      if (!(await button.isVisible().catch(() => false))) {
         throw new Error("Could not identify exactly one visible X Post button; no post was made");
       }
-      if (await button.first().isDisabled()) throw new Error("X Post button is disabled; no post was made");
+      if (await button.isDisabled()) throw new Error("X Post button is disabled; no post was made");
       await button.click();
       // A successful post clears the composer and normally redirects. Either is a
       // positive signal; a fixed sleep alone caused false failures on slow X sessions.
       await page.waitForTimeout(1_000);
       const sent = await page.locator('[data-testid="toast"]').filter({ hasText: /sent|posted|published/i }).count().catch(() => 0);
       const leftCompose = !page.url().includes("/compose/");
-      const composerCleared = !(await composer.first().isVisible().catch(() => false));
+      const composerCleared = !(await composer.isVisible().catch(() => false));
       if (!sent && !leftCompose && !composerCleared) {
         throw new Error("X did not confirm the post; its status is unknown — check X before retrying");
       }

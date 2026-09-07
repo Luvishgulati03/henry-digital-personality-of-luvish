@@ -92,7 +92,9 @@ test("logs page serves and /api/logs returns the activity journal newest-first",
 
   const page = await fetch(`${base}/logs`);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /Henry logs/);
+  const pageText = await page.text();
+  assert.match(pageText, /Henry \/ event log/);
+  assert.match(pageText, /data-cat="telegram"/);
 
   const logs = await (await fetch(`${base}/api/logs?limit=50`)).json() as { events: Array<{ kind: string; message: string }> };
   assert.ok(logs.events.length >= 2);

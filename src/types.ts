@@ -75,7 +75,7 @@ export interface ApprovalItem {
   id: string;
   createdAt: string;
   updatedAt: string;
-  kind: "gmail.send" | "github.review" | "github.merge" | "github.rollback" | "message.send" | "job.application";
+  kind: "gmail.send" | "github.review" | "github.merge" | "github.rollback" | "message.send" | "job.application" | "social.x-post";
   status: "pending" | "approved" | "executing" | "executed" | "rejected" | "failed";
   title: string;
   recipient?: string;

@@ -11,14 +11,19 @@ import type { EmbeddingProvider } from "engram-memory";
 export class LocalEmbeddingProvider implements EmbeddingProvider {
   readonly name = "bge-small-en-v1.5-q8@384";
   readonly dim = 384;
-  private extractor?: Promise<(texts: string[], opts: object) => Promise<{ tolist(): number[][] }>>;
+  /**
+   * Memory and knowledge are distinct stores but run in the same process. A
+   * process-wide loader avoids constructing/loading the same ~30MB model twice
+   * when both lanes recall in parallel on the first substantive turn.
+   */
+  private static extractor?: Promise<(texts: string[], opts: object) => Promise<{ tolist(): number[][] }>>;
 
   private load() {
-    this.extractor ||= import("@huggingface/transformers").then(async ({ pipeline }) => {
+    LocalEmbeddingProvider.extractor ||= import("@huggingface/transformers").then(async ({ pipeline }) => {
       const pipe = await pipeline("feature-extraction", "Xenova/bge-small-en-v1.5", { dtype: "q8" });
       return (texts: string[], opts: object) => pipe(texts, opts) as Promise<{ tolist(): number[][] }>;
     });
-    return this.extractor;
+    return LocalEmbeddingProvider.extractor;
   }
 
   async embed(texts: string[]): Promise<Float32Array[]> {

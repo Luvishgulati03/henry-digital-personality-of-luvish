@@ -74,11 +74,11 @@ test("claude argv pins the model and session flags", () => {
 test("codex argv sandbox follows readOnly, and nothing else", () => {
   assert.deepEqual(codexArgs("p", { readOnly: false }), [
     "exec", "--json", "--ephemeral", "--sandbox", "danger-full-access",
-    "-c", 'approval_policy="never"', "--skip-git-repo-check", "p",
+    "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="medium"', "--skip-git-repo-check", "p",
   ]);
   assert.deepEqual(codexArgs("p", { readOnly: true }), [
     "exec", "--json", "--ephemeral", "--sandbox", "read-only",
-    "-c", 'approval_policy="never"', "--skip-git-repo-check", "p",
+    "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="medium"', "--skip-git-repo-check", "p",
   ]);
   // The operator's own environment is never stripped out from under a run.
   const args = codexArgs("p", { readOnly: false });
@@ -88,10 +88,13 @@ test("codex argv sandbox follows readOnly, and nothing else", () => {
 });
 
 test("codex argv keeps its tier and session behaviour", () => {
-  assert.deepEqual(codexArgs("p", { tier: "t0" }).slice(0, 4), ["exec", "-m", "gpt-5-mini", "--json"]);
+  assert.deepEqual(codexArgs("p", { tier: "t0" }).slice(0, 4), ["exec", "-m", "gpt-5.5", "--json"]);
   assert.ok(codexArgs("p", { tier: "t2" }).join(" ").includes('model_reasoning_effort="high"'));
   const resumed = codexArgs("p", { session: { id: "thread-1", fresh: false } });
-  assert.deepEqual(resumed.slice(0, 3), ["exec", "resume", "thread-1"]);
+  assert.deepEqual(resumed.slice(0, 3), ["exec", "resume", "--json"]);
+  assert.ok(resumed.includes('sandbox_mode="danger-full-access"'), "resume preserves the writable sandbox through config");
+  assert.equal(resumed.at(-2), "thread-1", "resume options must precede the session id");
+  assert.equal(resumed.at(-1), "p");
   assert.ok(!resumed.includes("--ephemeral"), "a session implies persistence");
 });
 
@@ -105,13 +108,19 @@ test("every claude argv carries --dangerously-skip-permissions and no tool disal
   }
 });
 
-test("every codex argv asks for exactly one sandbox, chosen by readOnly", () => {
+test("every codex argv preserves the correct sandbox, including the resume-only config form", () => {
   for (const { provider, args, label } of everyArgv()) {
     if (provider !== "codex") continue;
     const at = args.indexOf("--sandbox");
-    assert.ok(at >= 0, `${label}: --sandbox must be present`);
-    assert.ok(["read-only", "danger-full-access"].includes(args[at + 1]), `${label}: unexpected sandbox ${args[at + 1]}`);
-    assert.equal(args.filter((arg) => arg === "--sandbox").length, 1, `${label}: exactly one sandbox flag`);
+    const isResume = args[1] === "resume";
+    if (isResume) {
+      assert.equal(at, -1, `${label}: resume accepts sandbox only as config`);
+      assert.ok(args.some((arg) => arg === 'sandbox_mode="read-only"' || arg === 'sandbox_mode="danger-full-access"'), `${label}: resume sandbox config missing`);
+    } else {
+      assert.ok(at >= 0, `${label}: --sandbox must be present`);
+      assert.ok(["read-only", "danger-full-access"].includes(args[at + 1]), `${label}: unexpected sandbox ${args[at + 1]}`);
+      assert.equal(args.filter((arg) => arg === "--sandbox").length, 1, `${label}: exactly one sandbox flag`);
+    }
   }
 });
 
@@ -179,8 +188,8 @@ test("a real spawned codex run keeps danger-full-access when not readOnly", asyn
   const result = await runner.run("hi", { provider: "codex", timeoutMs: 20_000 });
   assert.equal(result.exitCode, 0);
   assert.deepEqual(argvOf(result), [
-    "exec", "--json", "--ephemeral", "--sandbox", "danger-full-access",
-    "-c", 'approval_policy="never"', "--skip-git-repo-check", "hi",
+    "exec", "-m", "gpt-5.6-terra", "--json", "--ephemeral", "--sandbox", "danger-full-access",
+    "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="medium"', "--skip-git-repo-check", "hi",
   ]);
 });
 
