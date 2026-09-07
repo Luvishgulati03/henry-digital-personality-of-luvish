@@ -6,7 +6,7 @@ import type { GraphExport, RecallResult } from "engram-memory";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import { LocalEmbeddingProvider } from "../embeddings.ts";
-import { hashQuery, recordRecallEvent } from "../metrics/recall-metrics.ts";
+import { hashQuery, planContextInjection, recordRecallEvent, recordRecallTrace } from "../metrics/recall-metrics.ts";
 
 export class HenryMemory {
   readonly engine: Engram;
@@ -88,26 +88,28 @@ export class HenryMemory {
    * 8 memories. Rules: drop weak hits (score floor) instead of padding to k, cap each
    * memory's excerpt, cap the whole block. Distractor memories actively hurt recall
    * quality (LongMemEval), so lean is correct as well as fast.
+   *
+   * Both drops are invisible from the outside — the caller only ever sees the surviving
+   * block — so this is also where the recall trace is written: planContextInjection builds
+   * the block and classifies every returned memory used/below-threshold/truncated in the
+   * same pass, and recordRecallTrace files that (ids/scores/why/source only, never content
+   * or the raw query) fire-and-forget. A trace failure can never fail or slow this call.
    */
   async context(query: string, k = 8, options: { charBudget?: number; perMemoryChars?: number; minScore?: number } = {}): Promise<string> {
-    const charBudget = options.charBudget ?? 4000;
-    const perMemoryChars = options.perMemoryChars ?? 700;
-    const minScore = options.minScore ?? 0.015;
-    const results = (await this.recall(query, k)).filter((r) => r.score >= minScore);
-    if (!results.length) return "";
-    const lines: string[] = [];
-    let used = 0;
-    for (const result of results) {
-      const body = result.content.length > perMemoryChars
-        ? `${result.content.slice(0, perMemoryChars)}… [truncated; full memory: ${result.source}]`
-        : result.content;
-      const block = `[memory ${result.id} · ${result.tier ?? "episodic"} · why: ${result.why ?? "relevant"}]
-${body}`;
-      if (used + block.length > charBudget) break;
-      lines.push(block);
-      used += block.length;
-    }
-    return lines.join("\n\n");
+    const budget = {
+      charBudget: options.charBudget ?? 4000,
+      perMemoryChars: options.perMemoryChars ?? 700,
+      minScore: options.minScore ?? 0.015,
+    };
+    const startedAt = Date.now();
+    const results = await this.recall(query, k);
+    const plan = planContextInjection(results, budget);
+    recordRecallTrace(this.config, {
+      ts: new Date().toISOString(), store: "personal", queryHash: hashQuery(query), k, ...budget,
+      latencyMs: Date.now() - startedAt, returned: results.length, used: plan.usedCount,
+      charsUsed: plan.charsUsed, memories: plan.memories,
+    });
+    return plan.text;
   }
 
   async remember(content: string, input: { source?: string; tier?: string; importance?: number; metadata?: Record<string, unknown> } = {}): Promise<string> {

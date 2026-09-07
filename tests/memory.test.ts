@@ -7,6 +7,7 @@ import { ActivityLog } from "../src/activity.ts";
 import { HenryMemory } from "../src/memory/engram.ts";
 import type { HenryConfig } from "../src/config.ts";
 import { loadConfig } from "../src/config.ts";
+import { readRecallTraces } from "../src/metrics/recall-metrics.ts";
 
 function config(rootDir: string): HenryConfig {
   return {
@@ -28,6 +29,19 @@ test("Engram memory survives index and recalls a durable decision", async () => 
   const hits = await memory.recall("what must happen before promoting the database migration?");
   assert.ok(hits.some((hit) => hit.id === id || hit.content.includes("canary deploy")));
   assert.ok(hits[0]?.why);
+  const context = await memory.context("what must happen before promoting the database migration?");
+  assert.match(context, /canary deploy/);
+  const deadline = Date.now() + 1_000;
+  let traces = await readRecallTraces(cfg);
+  while (!traces.length && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    traces = await readRecallTraces(cfg);
+  }
+  assert.equal(traces.length, 1);
+  assert.equal(traces[0].used, 1);
+  assert.equal(traces[0].memories[0].outcome, "used");
+  const traceFile = await fs.readFile(path.join(cfg.metricsDir, "recall-traces.jsonl"), "utf8");
+  assert.doesNotMatch(traceFile, /canary deploy must finish/);
   await memory.index();
   memory.close();
 });

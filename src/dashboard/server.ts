@@ -248,6 +248,33 @@ async function engramMetricsSummary(runtime: HenryRuntime): Promise<{ available:
   }
 }
 
+// GET /api/engram/traces is the used-vs-dropped half of the same module: one record per
+// context injection, each carrying per-memory rows (id, score, why, source, outcome). Loaded
+// through the same non-literal specifier and failing soft to {available:false} for the same
+// reason as the metrics route above (module-doctrine.md rule 6). The trace store holds no raw
+// query text and no memory content by construction, so this route has nothing to redact.
+interface EngramTraceMemory {
+  id: string; score: number; why: string; source: string | null;
+  outcome: "used" | "below-threshold" | "truncated"; clipped?: boolean;
+}
+interface EngramTrace {
+  ts: string; store: string; queryHash: string; k: number; minScore: number;
+  charBudget: number; perMemoryChars: number; latencyMs: number;
+  returned: number; used: number; charsUsed: number; memories: EngramTraceMemory[];
+}
+
+async function engramTraces(runtime: HenryRuntime, limit: number): Promise<{ available: boolean; traces?: EngramTrace[] }> {
+  try {
+    const mod = (await import(RECALL_METRICS_MODULE_SPECIFIER)) as {
+      readRecallTraces?: (config: HenryRuntime["config"], limit?: number) => Promise<EngramTrace[]>;
+    };
+    if (typeof mod.readRecallTraces !== "function") return { available: false };
+    return { available: true, traces: await mod.readRecallTraces(runtime.config, limit) };
+  } catch {
+    return { available: false };
+  }
+}
+
 const AUTH_ALERT_WINDOW_MS = 10 * 60 * 1000;
 
 /** Most recent provider auth failure in `events` (newest-first, per ActivityLog#list), or null. Powers §B1's re-login banner. */
@@ -599,6 +626,10 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
       }
       if (request.method === "GET" && url.pathname === "/api/engram/metrics") {
         json(response, 200, await engramMetricsSummary(runtime)); return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/engram/traces") {
+        const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 40));
+        json(response, 200, await engramTraces(runtime, limit)); return;
       }
       if (request.method === "GET" && url.pathname === "/api/covers") {
         const dir = path.join(runtime.config.dataDir, "cover-letters");

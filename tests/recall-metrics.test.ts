@@ -5,7 +5,19 @@ import os from "node:os";
 import path from "node:path";
 import { loadConfig } from "../src/config.ts";
 import type { HenryConfig } from "../src/config.ts";
-import { hashQuery, recordRecallEvent, summarizeRecallMetrics, type RecallEvent } from "../src/metrics/recall-metrics.ts";
+import {
+  hashQuery,
+  planContextInjection,
+  readRecallTraces,
+  recordRecallEvent,
+  recordRecallTrace,
+  rotateRecallTracesIfNeeded,
+  summarizeRecallMetrics,
+  TRACE_FILE_MAX_BYTES,
+  TRACE_RETAIN_LINES,
+  type RecallEvent,
+  type RecallTrace,
+} from "../src/metrics/recall-metrics.ts";
 import { scoreEvalQueries, type EvalQuery } from "../src/metrics/eval.ts";
 
 async function tempConfig(): Promise<HenryConfig> {
@@ -43,6 +55,71 @@ test("hashQuery hashes to a 12-char hex digest and never leaks the raw query", (
 test("recordRecallEvent never throws synchronously, even with a bogus config", () => {
   const bogusConfig = { ...({} as HenryConfig), metricsDir: "\0invalid" };
   assert.doesNotThrow(() => recordRecallEvent(bogusConfig, event()));
+});
+
+test("planContextInjection traces used, clipped, below-threshold, and budget-truncated hits", () => {
+  const first = { id: "first", content: "alpha", source: "a.md", tier: "semantic", score: 0.5, why: "semantic #1" };
+  const firstPlan = planContextInjection([first], { charBudget: 10_000, perMemoryChars: 700, minScore: 0.015 });
+  const plan = planContextInjection([
+    first,
+    { id: "weak", content: "beta", source: "b.md", tier: "episodic", score: 0.01, why: "weak" },
+    { id: "later", content: "gamma", source: "c.md", tier: "episodic", score: 0.4, why: "later" },
+  ], { charBudget: firstPlan.charsUsed + 1, perMemoryChars: 700, minScore: 0.015 });
+
+  assert.equal(plan.usedCount, 1);
+  assert.equal(plan.memories.map((memory) => memory.outcome).join(","), "used,below-threshold,truncated");
+  assert.equal(plan.text, firstPlan.text);
+
+  const clipped = planContextInjection([
+    { ...first, content: "0123456789" },
+  ], { charBudget: 10_000, perMemoryChars: 3, minScore: 0.015 });
+  assert.equal(clipped.memories[0].outcome, "used");
+  assert.equal(clipped.memories[0].clipped, true);
+  assert.match(clipped.text, /012… \[truncated; full memory: a\.md\]/);
+});
+
+test("recordRecallTrace is privacy-safe, fail-open, and readable newest-first", async () => {
+  const config = await tempConfig();
+  const trace = {
+    ts: new Date().toISOString(), store: "personal" as const, queryHash: "private query",
+    k: 8, minScore: 0.015, charBudget: 4000, perMemoryChars: 700, latencyMs: 12,
+    returned: 1, used: 1, charsUsed: 42,
+    memories: [{ id: "memory-id", score: 0.5, why: "semantic #1", source: "captured/a.md", outcome: "used" as const, content: "secret memory body", excerpt: "secret memory body" }],
+    query: "secret raw query",
+  } as unknown as RecallTrace & { query: string };
+  recordRecallTrace(config, trace);
+  const raw = await waitForFile(path.join(config.metricsDir, "recall-traces.jsonl"));
+  assert.doesNotMatch(raw, /secret raw query|secret memory body/);
+  const parsed = JSON.parse(raw.trim()) as RecallTrace;
+  assert.match(parsed.queryHash, /^[0-9a-f]{12}$/);
+  assert.equal(parsed.memories[0].id, "memory-id");
+  assert.equal("content" in parsed.memories[0], false);
+
+  const traces = await readRecallTraces(config);
+  assert.equal(traces.length, 1);
+  assert.equal(traces[0].queryHash, parsed.queryHash);
+
+  const bogusConfig = { ...({} as HenryConfig), metricsDir: "\0invalid" };
+  assert.doesNotThrow(() => recordRecallTrace(bogusConfig, trace));
+});
+
+test("rotateRecallTracesIfNeeded keeps the newest bounded JSONL content", async () => {
+  const config = await tempConfig();
+  await fs.mkdir(config.metricsDir, { recursive: true });
+  const lines = Array.from({ length: TRACE_RETAIN_LINES + 10 }, (_, index) => JSON.stringify({
+    ts: new Date(Date.now() + index).toISOString(), store: "personal", queryHash: "abc123def456",
+    k: 1, minScore: 0, charBudget: 1, perMemoryChars: 1, latencyMs: 1, returned: 0, used: 0, charsUsed: 0, memories: [],
+    padding: "x".repeat(4_000),
+  }));
+  const tracePath = path.join(config.metricsDir, "recall-traces.jsonl");
+  await fs.writeFile(tracePath, `${lines.join("\n")}\n`, "utf8");
+  assert.ok((await fs.stat(tracePath)).size > TRACE_FILE_MAX_BYTES);
+
+  await rotateRecallTracesIfNeeded(config);
+  assert.ok((await fs.stat(tracePath)).size <= TRACE_FILE_MAX_BYTES);
+  const traces = await readRecallTraces(config, 500);
+  assert.ok(traces.length <= TRACE_RETAIN_LINES);
+  assert.equal(traces[0].ts, JSON.parse(lines.at(-1)!).ts);
 });
 
 test("recordRecallEvent appends a JSONL line that summarizeRecallMetrics reads back", async () => {

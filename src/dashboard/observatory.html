@@ -401,6 +401,111 @@
       margin-bottom: 10px;
     }
 
+    #henry-memory-network #hmn-trace-panel {
+      padding: 16px 18px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    #henry-memory-network #hmn-trace-panel .hmn-section-label {
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    #henry-memory-network .hmn-trace-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 270px;
+      overflow-y: auto;
+    }
+
+    #henry-memory-network .hmn-trace-row {
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    #henry-memory-network .hmn-trace-row > summary {
+      list-style: none;
+      cursor: pointer;
+    }
+
+    #henry-memory-network .hmn-trace-row > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    #henry-memory-network .hmn-trace-summary,
+    #henry-memory-network .hmn-trace-memory {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    #henry-memory-network .hmn-trace-summary {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: calc(9 * var(--baseline-font));
+    }
+
+    #henry-memory-network .hmn-trace-count {
+      color: var(--cyan);
+      white-space: nowrap;
+    }
+
+    #henry-memory-network .hmn-trace-memory-list {
+      display: flex;
+      flex-wrap: wrap;
+      flex-direction: column;
+      gap: 5px;
+      margin-top: 7px;
+    }
+
+    #henry-memory-network .hmn-trace-memory {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      justify-content: flex-start;
+      max-width: 100%;
+      padding: 3px 5px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: calc(8 * var(--baseline-font));
+    }
+
+    #henry-memory-network .hmn-trace-memory-main,
+    #henry-memory-network .hmn-trace-memory-detail {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    #henry-memory-network .hmn-trace-memory-main {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    #henry-memory-network .hmn-trace-memory-id {
+      color: var(--foreground);
+      font-weight: 500;
+    }
+
+    #henry-memory-network .hmn-trace-memory-score {
+      white-space: nowrap;
+    }
+
+    #henry-memory-network .hmn-trace-memory-detail {
+      margin-top: 3px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    #henry-memory-network .hmn-trace-memory[data-outcome="used"] { color: var(--green); }
+    #henry-memory-network .hmn-trace-memory[data-outcome="below-threshold"] { color: var(--gold); }
+    #henry-memory-network .hmn-trace-memory[data-outcome="truncated"] { color: var(--red); }
+
     #henry-memory-network .hmn-ring-note {
       display: inline-flex;
       align-items: center;
@@ -1228,6 +1333,14 @@
             <div class="hmn-section-label"><span>recall lab results</span><strong id="hmn-recall-meta"></strong></div>
             <div id="hmn-recall-results" class="hmn-result-list"></div>
           </div>
+          <div id="hmn-trace-panel" class="hmn-inspector-section">
+            <div class="hmn-section-label">
+              <span>context traces</span>
+              <button class="hmn-tab" type="button" id="hmn-trace-refresh">refresh</button>
+            </div>
+            <div id="hmn-trace-meta" class="hmn-node-copy">loading…</div>
+            <div id="hmn-trace-list" class="hmn-trace-list" aria-live="polite"></div>
+          </div>
           <div class="hmn-inspector-body" id="hmn-inspector-body"></div>
         </aside>
       </section>
@@ -1354,6 +1467,8 @@
       var topbarMeta = root.querySelector("#hmn-topbar-meta");
       var embeddingNote = root.querySelector("#hmn-embedding-note");
       var emptyState = root.querySelector("#hmn-graph-empty");
+      var traceMeta = root.querySelector("#hmn-trace-meta");
+      var traceList = root.querySelector("#hmn-trace-list");
 
       // Cap on rendered personal-memory nodes; the relax pass is O(n^2)/step.
       var PERSONAL_MAX_NODES = 400;
@@ -1716,7 +1831,8 @@
         return Promise.all([
           fetchJson("/api/memory/graph").catch(function (error) { loadNotes.push("memory graph unavailable (" + error.message + ")"); return null; }),
           fetchJson("/api/status").catch(function () { loadNotes.push("status unavailable"); return null; }),
-          fetchKnowledge(0).catch(function (error) { loadNotes.push("knowledge base unavailable (" + error.message + ")"); return null; })
+          fetchKnowledge(0).catch(function (error) { loadNotes.push("knowledge base unavailable (" + error.message + ")"); return null; }),
+          refreshRecallTraces()
         ]).then(function (payloads) {
           var personal = buildPersonal(payloads[0]);
           buildKnowledge(payloads[2]);
@@ -2319,6 +2435,45 @@
         });
       }
 
+      function renderRecallTraces(payload) {
+        if (!traceMeta || !traceList) return;
+        if (!payload || payload.available === false) {
+          traceMeta.textContent = "unavailable — tracing is fail-open";
+          traceList.innerHTML = "";
+          return;
+        }
+        var traces = payload.traces || [];
+        traceMeta.textContent = traces.length + " recent injection" + (traces.length === 1 ? "" : "s") + " · no query or memory text stored";
+        traceList.innerHTML = traces.length
+          ? traces.map(function (trace) {
+              var memories = trace.memories || [];
+              var used = memories.filter(function (memory) { return memory.outcome === "used"; }).length;
+              var dropped = memories.length - used;
+              return "<details class='hmn-trace-row'>"
+                + "<summary class='hmn-trace-summary'><span>" + esc(new Date(trace.ts).toLocaleTimeString()) + " · " + esc(trace.store) + "</span>"
+                + "<span class='hmn-trace-count'>" + used + " used · " + dropped + " dropped</span>"
+                + "</summary>"
+                + "<div class='hmn-trace-memory-list' role='list'>"
+                + memories.map(function (memory) {
+                    var score = Number.isFinite(Number(memory.score)) ? Number(memory.score).toFixed(3) : "—";
+                    var why = memory.why || "—";
+                    var source = memory.source || "—";
+                    return "<div class='hmn-trace-memory' role='listitem' data-outcome='" + esc(memory.outcome) + "'>"
+                      + "<div class='hmn-trace-memory-main'><strong class='hmn-trace-memory-id'>" + esc(memory.id) + "</strong>"
+                      + "<span class='hmn-trace-memory-score'>score " + esc(score) + " · " + esc(memory.outcome) + "</span></div>"
+                      + "<div class='hmn-trace-memory-detail'>why: " + esc(why) + " · source: " + esc(source) + "</div></div>";
+                  }).join("")
+                + "</div></details>";
+            }).join("")
+          : "<div class='hmn-node-copy'>No context injections recorded yet.</div>";
+      }
+
+      function refreshRecallTraces() {
+        return fetchJson("/api/engram/traces?limit=12")
+          .then(renderRecallTraces)
+          .catch(function () { renderRecallTraces({ available: false }); });
+      }
+
       function runRecallLabQuery(query) {
         var trimmed = (query || "").trim();
         if (!trimmed) return;
@@ -2478,6 +2633,7 @@
 
       root.querySelector("#hmn-replay").addEventListener("click", replayPipeline);
       root.querySelector("#hmn-reset").addEventListener("click", resetView);
+      root.querySelector("#hmn-trace-refresh").addEventListener("click", refreshRecallTraces);
 
       function showToast(message) {
         toast.textContent = message;
