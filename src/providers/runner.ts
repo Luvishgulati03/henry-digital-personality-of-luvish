@@ -121,18 +121,32 @@ export function codexArgs(
   ];
 }
 
+/** Claude tier defaults, used when a deployment names no model of its own. */
+export const CLAUDE_T0_MODEL = "haiku";
+export const CLAUDE_T2_MODEL = "opus";
+
 /**
  * Claude argv for one dispatch (subscription CLI — never the API).
- * t0 → haiku, t2 → opus, t1/absent → the configured model or the CLI default.
+ * t0 → the t0 worker, t2 → the deep specialist, t1/absent → the configured model
+ * or the CLI's own default.
+ *
+ * The tier models are parameters rather than literals for the same reason the Codex
+ * side takes them: which model serves a tier is a DEPLOYMENT decision, so moving the
+ * brain back to the Claude seat stays a config change and never a code change. The
+ * defaults reproduce the previous hardcoded haiku/opus behaviour exactly.
  *
  * The shape is the prompt followed by `--dangerously-skip-permissions`, which is
  * how the agent edits files on Luvish's machine.
  */
 export function claudeArgs(
   prompt: string,
-  options: { readOnly?: boolean; tier?: DispatchTier; model?: string; session?: { id: string; fresh: boolean } } = {},
+  options: { readOnly?: boolean; tier?: DispatchTier; model?: string; t0Model?: string; t2Model?: string; session?: { id: string; fresh: boolean } } = {},
 ): string[] {
-  const model = options.tier === "t0" ? "haiku" : options.tier === "t2" ? "opus" : options.model;
+  const model = options.tier === "t0"
+    ? (options.t0Model || CLAUDE_T0_MODEL)
+    : options.tier === "t2"
+      ? (options.t2Model || CLAUDE_T2_MODEL)
+      : options.model;
   const session = options.session ? sessionArgs("claude", options.session).claudeArgs : [];
   return ["-p", ...(model ? ["--model", model] : []), ...session, prompt, "--dangerously-skip-permissions"];
 }
@@ -140,7 +154,7 @@ export function claudeArgs(
 export function buildProviderArgs(
   provider: ProviderName,
   prompt: string,
-  options: { readOnly: boolean; tier?: DispatchTier; codexModel?: string; codexT0Model?: string; codexT2Model?: string; claudeModel?: string; session?: { id: string; fresh: boolean } },
+  options: { readOnly: boolean; tier?: DispatchTier; codexModel?: string; codexT0Model?: string; codexT2Model?: string; claudeModel?: string; claudeT0Model?: string; claudeT2Model?: string; session?: { id: string; fresh: boolean } },
 ): string[] {
   const codexModel = options.tier === "t0"
     ? options.codexT0Model || CODEX_T0_MODEL
@@ -149,7 +163,10 @@ export function buildProviderArgs(
       : options.codexModel;
   return provider === "codex"
     ? codexArgs(prompt, { readOnly: options.readOnly, tier: options.tier, model: codexModel, t0Model: options.codexT0Model, session: options.session })
-    : claudeArgs(prompt, { readOnly: options.readOnly, tier: options.tier, model: options.claudeModel, session: options.session });
+    : claudeArgs(prompt, {
+      readOnly: options.readOnly, tier: options.tier, model: options.claudeModel,
+      t0Model: options.claudeT0Model, t2Model: options.claudeT2Model, session: options.session,
+    });
 }
 
 /**
@@ -555,6 +572,8 @@ export class ProviderRunner {
         codexT0Model: this.config.codexT0Model,
         codexT2Model: this.config.codexT2Model,
         claudeModel: this.config.claudeModel,
+        claudeT0Model: this.config.claudeT0Model,
+        claudeT2Model: this.config.claudeT2Model,
         session,
       });
       const cwd = options.cwd || this.config.rootDir;

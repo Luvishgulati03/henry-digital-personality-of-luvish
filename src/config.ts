@@ -39,7 +39,12 @@ export interface HenryConfig {
   codexT0Model?: string;
   /** Deep specialist model for t2 work. */
   codexT2Model?: string;
+  /** Chief/orchestrator model for normal Claude work (t1). Blank = the CLI's own default. */
   claudeModel?: string;
+  /** Fast delegated-worker model for t0 work on Claude. */
+  claudeT0Model?: string;
+  /** Deep specialist model for t2 work on Claude. */
+  claudeT2Model?: string;
   requireOutboundApproval: boolean;
   /** The owner's own email address (HENRY_OWNER_EMAIL; legacy DAD_EMAIL still honoured). */
   ownerEmail?: string;
@@ -192,7 +197,12 @@ export function loadConfig(rootDir = defaultRoot): HenryConfig {
     codexModel: env("CODEX_MODEL") || "gpt-5.6-terra",
     codexT0Model: env("CODEX_T0_MODEL") || "gpt-5.5",
     codexT2Model: env("CODEX_T2_MODEL") || "gpt-5.6-luna",
+    // The same tiering on the Claude seat, so switching provider is a config change and
+    // never a code change. Defaults reproduce the long-standing hardcoded behaviour
+    // (t0 → haiku, t2 → opus); t1 stays blank so the CLI's own default wins.
     claudeModel: env("CLAUDE_MODEL") || undefined,
+    claudeT0Model: env("CLAUDE_T0_MODEL") || "haiku",
+    claudeT2Model: env("CLAUDE_T2_MODEL") || "opus",
     requireOutboundApproval: bool(env("REQUIRE_OUTBOUND_APPROVAL"), true),
     ownerEmail: env("OWNER_EMAIL") || process.env.DAD_EMAIL || undefined,
     gmailCredentialsPath: resolveFromRoot(rootDir, process.env.GMAIL_CREDENTIALS_PATH, "data/gmail-credentials.json"),

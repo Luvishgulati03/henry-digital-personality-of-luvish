@@ -71,6 +71,41 @@ test("claude argv pins the model and session flags", () => {
   );
 });
 
+/**
+ * Which model serves a tier is a DEPLOYMENT decision on both seats. Codex has always taken
+ * its tier models from config; Claude's were literals, so moving the brain back to the Claude
+ * seat would have meant editing code. These pin the symmetry — and that the defaults still
+ * reproduce the long-standing haiku/opus behaviour when a deployment names nothing.
+ */
+test("claude tier models come from config, defaulting to the historical haiku/opus", () => {
+  assert.deepEqual(
+    claudeArgs("p", { tier: "t0", t0Model: "haiku-4-5" }),
+    ["-p", "--model", "haiku-4-5", "p", "--dangerously-skip-permissions"],
+  );
+  assert.deepEqual(
+    claudeArgs("p", { tier: "t2", t2Model: "opus-4-8" }),
+    ["-p", "--model", "opus-4-8", "p", "--dangerously-skip-permissions"],
+  );
+  // Unset → exactly what Henry spawned before the tier models became configurable.
+  assert.deepEqual(claudeArgs("p", { tier: "t0" }), ["-p", "--model", "haiku", "p", "--dangerously-skip-permissions"]);
+  assert.deepEqual(claudeArgs("p", { tier: "t2" }), ["-p", "--model", "opus", "p", "--dangerously-skip-permissions"]);
+  // A t2 override must not bleed into t0, and a t1 turn still defers to the CLI default.
+  assert.deepEqual(
+    claudeArgs("p", { tier: "t0", t0Model: "haiku-4-5", t2Model: "opus-4-8" }),
+    ["-p", "--model", "haiku-4-5", "p", "--dangerously-skip-permissions"],
+  );
+  assert.deepEqual(claudeArgs("p", { t0Model: "haiku-4-5", t2Model: "opus-4-8" }), ["-p", "p", "--dangerously-skip-permissions"]);
+});
+
+test("buildProviderArgs carries the claude tier models through", () => {
+  assert.deepEqual(
+    buildProviderArgs("claude", "p", { readOnly: false, tier: "t2", claudeT0Model: "haiku-4-5", claudeT2Model: "opus-4-8" }),
+    ["-p", "--model", "opus-4-8", "p", "--dangerously-skip-permissions"],
+  );
+  // The codex seat is unaffected by claude's tier config.
+  assert.ok(!buildProviderArgs("codex", "p", { readOnly: false, tier: "t2", claudeT2Model: "opus-4-8" }).includes("opus-4-8"));
+});
+
 test("codex argv sandbox follows readOnly, and nothing else", () => {
   assert.deepEqual(codexArgs("p", { readOnly: false }), [
     "exec", "--json", "--ephemeral", "--sandbox", "danger-full-access",
