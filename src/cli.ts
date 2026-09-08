@@ -460,11 +460,16 @@ async function main(): Promise<void> {
         if (!args[2]) throw new Error("Usage: henry jobs inspect <url>");
         print(await runtime.jobs.inspect(args[2]));
       } else if (sub === "prepare") {
-        if (!args[2]) throw new Error("Usage: henry jobs prepare <url>");
-        const draft = await runtime.jobs.prepare(args[2]);
+        if (!args[2] || args[2].startsWith("--")) throw new Error("Usage: henry jobs prepare <url> [--resume PATH]");
+        const resumePath = option("--resume");
+        if (args.includes("--resume") && (!resumePath?.trim() || resumePath.startsWith("--"))) {
+          throw new Error("Usage: henry jobs prepare <url> [--resume PATH]; --resume requires a path");
+        }
+        const draft = await runtime.jobs.prepare(args[2], undefined, resumePath);
         print({
           applicationId: draft.id, status: draft.status, approvalId: draft.approvalId,
           resumePdf: draft.resumePdfPath, missingFacts: draft.missingFacts,
+          resumeEdits: draft.resumeEditsPath, independentlyReviewed: draft.review?.accepted === true,
           next: `Review it, then: henry approve approve ${draft.approvalId} && henry approve send ${draft.approvalId}`,
         });
       } else if (sub === "list") {
@@ -508,7 +513,7 @@ async function main(): Promise<void> {
           if (dropped > 0) console.log(`  (…and ${dropped} more learned but NOT searched — capped at ${learned.titles.length} titles/pass to keep the LinkedIn volume rail honest)`);
           console.log(`Profile: ${learned.profilePath}`);
         }
-      } else throw new Error("Usage: henry jobs inspect <url>|prepare <url>|list|fill <application-id>|login|linkedin-cookie|scout [--prepare N]|alerts-sync  (submission goes through henry approve; LinkedIn submission is blocked by design)");
+      } else throw new Error("Usage: henry jobs inspect <url>|prepare <url> [--resume PATH]|list|fill <application-id>|login|linkedin-cookie|scout [--prepare N]|alerts-sync  (submission goes through henry approve; LinkedIn submission is blocked by design)");
     } else if (command === "cover") {
       const sub = args[1];
       if (sub === "import") {

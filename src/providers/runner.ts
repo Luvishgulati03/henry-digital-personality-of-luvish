@@ -52,6 +52,15 @@ export const CODEX_T0_MODEL = "gpt-5.5";
 export const ENVELOPE_TIMEOUT_ERROR = "envelope timeout";
 /** Waiting longer than this in the admission queue is worth recording. */
 export const QUEUE_NOTICE_MS = 5_000;
+export const CODEX_RESUME_TAILOR_MODEL = "gpt-5.5";
+export const CODEX_APPLICATION_REVIEW_MODEL = "gpt-5.5";
+export const CODEX_APPLICATION_MANAGER_MODEL = "gpt-5.6-sol";
+const CODEX_JOB_ROLE_MODELS = {
+  "resume-tailor": { key: "codexResumeTailorModel", fallback: CODEX_RESUME_TAILOR_MODEL },
+  "application-review": { key: "codexApplicationReviewModel", fallback: CODEX_APPLICATION_REVIEW_MODEL },
+  "application-manager": { key: "codexApplicationManagerModel", fallback: CODEX_APPLICATION_MANAGER_MODEL },
+} as const;
+type CodexJobRole = keyof typeof CODEX_JOB_ROLE_MODELS;
 
 function now(): string { return new Date().toISOString(); }
 
@@ -154,19 +163,59 @@ export function claudeArgs(
 export function buildProviderArgs(
   provider: ProviderName,
   prompt: string,
-  options: { readOnly: boolean; tier?: DispatchTier; codexModel?: string; codexT0Model?: string; codexT2Model?: string; claudeModel?: string; claudeT0Model?: string; claudeT2Model?: string; session?: { id: string; fresh: boolean } },
+  options: {
+    readOnly: boolean; tier?: DispatchTier; role?: string;
+    codexModel?: string; codexT0Model?: string; codexT2Model?: string;
+    codexResumeTailorModel?: string; codexApplicationReviewModel?: string; codexApplicationManagerModel?: string;
+    claudeModel?: string; claudeT0Model?: string; claudeT2Model?: string; session?: { id: string; fresh: boolean };
+  },
 ): string[] {
-  const codexModel = options.tier === "t0"
+  const route = resolveProviderRoute(provider, options);
+  return provider === "codex"
+    ? codexArgs(prompt, { readOnly: options.readOnly, tier: route.tier, model: route.model, t0Model: options.codexT0Model, session: options.session })
+    : claudeArgs(prompt, {
+      readOnly: options.readOnly, tier: route.tier, model: route.model,
+      t0Model: options.claudeT0Model, t2Model: options.claudeT2Model, session: options.session,
+    });
+}
+
+export interface ProviderRoute {
+  tier?: DispatchTier;
+  model?: string;
+  roleModelOverride: boolean;
+}
+
+export function resolveProviderRoute(
+  provider: ProviderName,
+  options: {
+    tier?: DispatchTier; role?: string;
+    codexModel?: string; codexT0Model?: string; codexT2Model?: string;
+    codexResumeTailorModel?: string; codexApplicationReviewModel?: string; codexApplicationManagerModel?: string;
+    claudeModel?: string; claudeT0Model?: string; claudeT2Model?: string;
+  },
+): ProviderRoute {
+  if (provider === "codex" && isCodexJobRole(options.role)) {
+    const routing = CODEX_JOB_ROLE_MODELS[options.role];
+    return { tier: "t1", model: options[routing.key] || routing.fallback, roleModelOverride: true };
+  }
+  if (provider === "claude") {
+    const model = options.tier === "t0"
+      ? options.claudeT0Model || CLAUDE_T0_MODEL
+      : options.tier === "t2"
+        ? options.claudeT2Model || CLAUDE_T2_MODEL
+        : options.claudeModel;
+    return { tier: options.tier, model, roleModelOverride: false };
+  }
+  const model = options.tier === "t0"
     ? options.codexT0Model || CODEX_T0_MODEL
     : options.tier === "t2"
       ? options.codexT2Model || options.codexModel
       : options.codexModel;
-  return provider === "codex"
-    ? codexArgs(prompt, { readOnly: options.readOnly, tier: options.tier, model: codexModel, t0Model: options.codexT0Model, session: options.session })
-    : claudeArgs(prompt, {
-      readOnly: options.readOnly, tier: options.tier, model: options.claudeModel,
-      t0Model: options.claudeT0Model, t2Model: options.claudeT2Model, session: options.session,
-    });
+  return { tier: options.tier, model, roleModelOverride: false };
+}
+
+function isCodexJobRole(role: string | undefined): role is CodexJobRole {
+  return role === "resume-tailor" || role === "application-review" || role === "application-manager";
 }
 
 /**
@@ -568,13 +617,30 @@ export class ProviderRunner {
       const args = buildProviderArgs(provider, prompt, {
         readOnly: options.readOnly === true,
         tier: options.tier,
+        role: options.role,
         codexModel: this.config.codexModel,
         codexT0Model: this.config.codexT0Model,
         codexT2Model: this.config.codexT2Model,
+        codexResumeTailorModel: this.config.codexResumeTailorModel,
+        codexApplicationReviewModel: this.config.codexApplicationReviewModel,
+        codexApplicationManagerModel: this.config.codexApplicationManagerModel,
         claudeModel: this.config.claudeModel,
         claudeT0Model: this.config.claudeT0Model,
         claudeT2Model: this.config.claudeT2Model,
         session,
+      });
+      const route = resolveProviderRoute(provider, {
+        tier: options.tier,
+        role: options.role,
+        codexModel: this.config.codexModel,
+        codexT0Model: this.config.codexT0Model,
+        codexT2Model: this.config.codexT2Model,
+        codexResumeTailorModel: this.config.codexResumeTailorModel,
+        codexApplicationReviewModel: this.config.codexApplicationReviewModel,
+        codexApplicationManagerModel: this.config.codexApplicationManagerModel,
+        claudeModel: this.config.claudeModel,
+        claudeT0Model: this.config.claudeT0Model,
+        claudeT2Model: this.config.claudeT2Model,
       });
       const cwd = options.cwd || this.config.rootDir;
       const decision = await this.admission.waitForSlot({ provider, timeoutMs: envelopeMs, label: options.role });
@@ -587,7 +653,11 @@ export class ProviderRunner {
         await this.activity.record(
           "run.started",
           `Refused ${provider} spawn (${decision.reason})`,
-          { cwd, tier: options.tier, queuedMs: decision.queuedMs, queued: true, refused: decision.reason, pressure: decision.pressure },
+          {
+            cwd, tier: route.tier, requestedTier: options.tier ?? null, model: route.model ?? null,
+            role: options.role ?? null, roleModelOverride: route.roleModelOverride,
+            queuedMs: decision.queuedMs, queued: true, refused: decision.reason, pressure: decision.pressure,
+          },
           { provider, role: options.role },
         );
         last = { runId: randomUUID(), provider, response: "", exitCode: null, durationMs: decision.queuedMs, error, events: [] };
@@ -598,7 +668,11 @@ export class ProviderRunner {
       await this.activity.record(
         "run.started",
         `Starting ${provider} run`,
-        { cwd, tier: options.tier, promptBuildMs: options.promptBuildMs ?? null, queuedMs: decision.queuedMs, ...(queued ? { queued: true } : {}) },
+        {
+          cwd, tier: route.tier, requestedTier: options.tier ?? null, model: route.model ?? null,
+          role: options.role ?? null, roleModelOverride: route.roleModelOverride,
+          promptBuildMs: options.promptBuildMs ?? null, queuedMs: decision.queuedMs, ...(queued ? { queued: true } : {}),
+        },
         { provider, role: options.role },
       );
       let result: RunResult;

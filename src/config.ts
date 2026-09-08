@@ -39,6 +39,12 @@ export interface HenryConfig {
   codexT0Model?: string;
   /** Deep specialist model for t2 work. */
   codexT2Model?: string;
+  /** Codex-only job role override for resume tailoring. */
+  codexResumeTailorModel?: string;
+  /** Codex-only job role override for application review. */
+  codexApplicationReviewModel?: string;
+  /** Codex-only job role override for application management. */
+  codexApplicationManagerModel?: string;
   /** Chief/orchestrator model for normal Claude work (t1). Blank = the CLI's own default. */
   claudeModel?: string;
   /** Fast delegated-worker model for t0 work on Claude. */
@@ -192,11 +198,17 @@ export function loadConfig(rootDir = defaultRoot): HenryConfig {
     allowRemoteDashboard: bool(env("ALLOW_REMOTE_DASHBOARD"), false),
     provider: env("PROVIDER") === "claude" ? "claude" : "codex",
     // Keep the model policy inside Henry instead of inheriting an operator's global
-    // Codex setting. Luvish's orchestration contract: Terra coordinates ordinary
+    // Codex setting. Luvish's orchestration contract: Sol coordinates ordinary
     // work, a cheaper 5.5 worker handles t0 tasks, and Luna gets the hard t2 work.
-    codexModel: env("CODEX_MODEL") || "gpt-5.6-terra",
+    codexModel: env("CODEX_MODEL") || "gpt-5.6-sol",
     codexT0Model: env("CODEX_T0_MODEL") || "gpt-5.5",
     codexT2Model: env("CODEX_T2_MODEL") || "gpt-5.6-luna",
+    codexResumeTailorModel: env("CODEX_RESUME_TAILOR_MODEL") || "gpt-5.5",
+    // GPT-5.4 is available in the API but rejected by Codex with this ChatGPT
+    // account. Keep the role configurable; default to the cheapest verified
+    // subscription model instead of silently failing every review.
+    codexApplicationReviewModel: env("CODEX_APPLICATION_REVIEW_MODEL") || "gpt-5.5",
+    codexApplicationManagerModel: env("CODEX_APPLICATION_MANAGER_MODEL") || "gpt-5.6-sol",
     // The same tiering on the Claude seat, so switching provider is a config change and
     // never a code change. Defaults reproduce the long-standing hardcoded behaviour
     // (t0 → haiku, t2 → opus); t1 stays blank so the CLI's own default wins.

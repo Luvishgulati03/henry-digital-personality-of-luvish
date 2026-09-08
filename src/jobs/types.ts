@@ -46,6 +46,11 @@ export interface JobApplicationDraft {
   submittedAt?: string;
   submissionUrl?: string;
   error?: string;
+  /** Independent review is advisory; it never constitutes outbound approval. */
+  review?: { accepted: boolean; issues: string[]; sourceHash: string; draftHash: string };
+  reviewedContentHash?: string;
+  resumeSha256?: string;
+  resumeEditsPath?: string;
 }
 
 export interface JobApplicationSummary {

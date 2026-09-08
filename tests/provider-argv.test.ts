@@ -223,7 +223,7 @@ test("a real spawned codex run keeps danger-full-access when not readOnly", asyn
   const result = await runner.run("hi", { provider: "codex", timeoutMs: 20_000 });
   assert.equal(result.exitCode, 0);
   assert.deepEqual(argvOf(result), [
-    "exec", "-m", "gpt-5.6-terra", "--json", "--ephemeral", "--sandbox", "danger-full-access",
+    "exec", "-m", "gpt-5.6-sol", "--json", "--ephemeral", "--sandbox", "danger-full-access",
     "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="medium"', "--skip-git-repo-check", "hi",
   ]);
 });

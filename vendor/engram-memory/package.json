@@ -1,0 +1,62 @@
+{
+  "name": "engram-memory",
+  "version": "0.1.0",
+  "description": "A plug-and-play associative memory layer for any AI agent: hybrid (semantic + lexical) recall, an associative graph with spreading activation, dreaming consolidation, and recall@k eval — backed by SQLite + FTS5.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anmolmoses/engram-memory.git"
+  },
+  "homepage": "https://github.com/anmolmoses/engram-memory#readme",
+  "bugs": "https://github.com/anmolmoses/engram-memory/issues",
+  "keywords": [
+    "agent",
+    "memory",
+    "llm",
+    "rag",
+    "sqlite",
+    "fts5",
+    "embeddings",
+    "retrieval",
+    "associative-memory",
+    "hybrid-search"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "engram": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.19.19",
+    "tsx": "^4.22.3",
+    "typescript": "^5.9.3"
+  }
+}
