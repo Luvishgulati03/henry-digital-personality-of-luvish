@@ -15,7 +15,8 @@
     "test": "tsx --import ./tests/isolate.mjs --test-concurrency=1 --test tests/**/*.test.ts",
     "dashboard": "tsx src/cli.ts dashboard",
     "schedule": "tsx src/cli.ts schedule daemon",
-    "build": "tsc --outDir dist --declaration --noEmit false"
+    "build": "tsc --outDir dist --declaration --noEmit false",
+    "handbook:build": "node scripts/build-handbook.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",

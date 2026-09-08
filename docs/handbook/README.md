@@ -1,5 +1,8 @@
 # Henry Handbook
 
+> [Open the visual HTML handbook](index.html) · Markdown remains available
+> below for readers and coding agents.
+
 Welcome. This handbook is a public, user-neutral path for learning Henry by
 doing small verified steps on a laptop.
 

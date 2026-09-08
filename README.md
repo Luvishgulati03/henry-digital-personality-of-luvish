@@ -7,7 +7,7 @@
 > tests. A ten-line human quick path and the real troubleshooting list
 > are in the same file.
 >
-> **Want to understand and customize it? → [Henry Handbook](docs/handbook/README.md).**
+> **Want to understand and customize it? → [Open the Henry Handbook](docs/handbook/index.html).**
 > It takes you from a blank clone to your own persona, first working run,
 > private knowledge base, Telegram surface, automation, and custom module.
 
