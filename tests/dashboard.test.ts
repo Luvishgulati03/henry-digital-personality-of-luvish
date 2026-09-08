@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
 import { HenryRuntime } from "../src/runtime.ts";
 import { startDashboard } from "../src/dashboard/server.ts";
 
@@ -174,4 +175,82 @@ test("web chat races: overlapping sends both persist; a send finishing after cle
 
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   runtime.close();
+});
+
+test("dispatch registry: /api/dispatch records an agent, /api/agents returns the contract shape, and /api/events streams an agent event", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "henry-agents-"));
+  fs.cpSync(path.join(process.cwd(), "workflows"), path.join(tempRoot, "workflows"), { recursive: true });
+  const runtime = await HenryRuntime.create(tempRoot);
+  runtime.config.port = 0;
+  runtime.config.host = "127.0.0.1";
+  // Luna dispatches through its own internal ProviderRunner; swap it so the
+  // test never spawns a real provider process.
+  (runtime.luna as unknown as { runner: { run: unknown } }).runner = {
+    run: async () => ({ runId: "run-1", provider: "codex", response: "Looked into it.\nmore detail", exitCode: 0, durationMs: 1, events: [] }),
+  };
+
+  const server = startDashboard(runtime);
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const dispatchResponse = await fetch(`${base}/api/dispatch`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ role: "architect", task: "look into the thing" }),
+    });
+    assert.equal(dispatchResponse.status, 200);
+
+    const agents = await (await fetch(`${base}/api/agents`)).json() as {
+      running: Array<{ id: string; role: string; task: string; provider: string; startedAt: string; status: string }>;
+      recent: Array<{ id: string; role: string; task: string; provider: string; startedAt: string; finishedAt?: string; status: string; summary?: string }>;
+    };
+    assert.equal(agents.running.length, 0, "dispatch already resolved before we asked");
+    assert.equal(agents.recent.length, 1);
+    const entry = agents.recent[0];
+    assert.equal(entry.role, "architect");
+    assert.equal(entry.task, "look into the thing");
+    assert.equal(entry.provider, "codex");
+    assert.equal(entry.status, "done");
+    assert.equal(entry.summary, "Looked into it.");
+    assert.ok(entry.startedAt && entry.finishedAt);
+
+    // /api/events replays the registry changelog since this connection's cursor
+    // (0), so its very first tick carries both the running-start and the
+    // done-settle "agent" events for the dispatch above — as two separate SSE
+    // frames, possibly split across TCP chunks, so wait for the settled one
+    // specifically. Uses raw node:http (not fetch) so the socket can be
+    // force-destroyed afterwards: this endpoint's connection never ends on its
+    // own, and an undici keep-alive socket left dangling after the test hangs
+    // `server.close()` (and the whole suite).
+    const buffer = await new Promise<string>((resolve, reject) => {
+      const request = http.get(`${base}/api/events`, { agent: new http.Agent({ keepAlive: false }) }, (sseResponse) => {
+        assert.equal(sseResponse.statusCode, 200);
+        let collected = "";
+        const deadline = setTimeout(() => { request.destroy(); resolve(collected); }, 5_000);
+        sseResponse.on("data", (chunk: Buffer) => {
+          collected += chunk.toString("utf8");
+          if (collected.includes("event: agent") && collected.includes('"status":"done"')) { clearTimeout(deadline); request.destroy(); resolve(collected); }
+        });
+        sseResponse.on("error", () => { clearTimeout(deadline); resolve(collected); });
+      });
+      request.on("error", (error: NodeJS.ErrnoException) => {
+        // Destroying the request ourselves also raises ECONNRESET/socket-hang-up here; that's expected teardown, not a failure.
+        if (error.code === "ECONNRESET" || /socket hang up/.test(error.message)) return;
+        reject(error);
+      });
+    });
+    assert.match(buffer, /event: agent/);
+    assert.match(buffer, /"role":"architect"/);
+    assert.match(buffer, /"status":"done"/);
+  } finally {
+    // Always tear down, even on assertion failure: a dangling SSE connection
+    // keeps the http.Server's event loop reference alive and hangs the whole
+    // test run (this endpoint's connection never closes on its own). Force any
+    // socket the destroy() above raced with closed too, so server.close()'s
+    // callback can never be left waiting on it.
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    runtime.close();
+  }
 });

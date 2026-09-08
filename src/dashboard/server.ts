@@ -9,6 +9,7 @@ import { clearedSessionCookie, endSession, issueSession, readSession, requireRol
 import { KnowledgeBase } from "../knowledge/store.ts";
 import { sampleResources } from "./resources.ts";
 import { sharedAdmissionController } from "../orchestration/admission.ts";
+import { sharedAgentRegistry } from "../orchestration/agent-registry.ts";
 import { domainPolicy, setDomainEnabled } from "../knowledge/gate.ts";
 import { executeExplicitApproval } from "../approval/explicit.ts";
 import type { HenryRuntime } from "../runtime.ts";
@@ -558,6 +559,7 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
         sseWrite(response, "hello", { timestamp: new Date().toISOString() });
 
         let lastSeenId: string | null = null;
+        let lastAgentSeq = 0;
 
         const tick = async (): Promise<void> => {
           if (response.writableEnded) return;
@@ -570,6 +572,11 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
             for (const event of chronological.slice(startIndex)) sseWrite(response, "activity", event);
             lastSeenId = chronological[chronological.length - 1].id;
           }
+          try {
+            const { entries, seq } = sharedAgentRegistry().changesSince(lastAgentSeq);
+            for (const entry of entries) sseWrite(response, "agent", entry);
+            lastAgentSeq = seq;
+          } catch { /* registry hiccup; skip this tick's agent diff */ }
           try {
             const resources = await sampleResources();
             const pending = await runtime.approvals.list("pending").catch(() => []);
@@ -603,6 +610,7 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
         response.on("close", () => clearInterval(interval));
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/agents") { json(response, 200, sharedAgentRegistry().snapshot()); return; }
       if (request.method === "GET" && url.pathname === "/api/approvals") { json(response, 200, await runtime.approvals.list()); return; }
       if (request.method === "GET" && url.pathname === "/api/workflows") { json(response, 200, await runtime.scheduler.definitions()); return; }
       if (request.method === "GET" && url.pathname === "/api/jobs") {

@@ -4,6 +4,7 @@ import type { HenryMemory } from "../memory/engram.ts";
 import type { DispatchTier } from "../types.ts";
 import { ProviderRunner } from "../providers/runner.ts";
 import { sharedAdmissionController } from "./admission.ts";
+import { sharedAgentRegistry } from "./agent-registry.ts";
 
 export const SPECIALISTS = {
   architect: "Design boundaries, data flow, and sequencing. Do not edit unrelated files.",
@@ -17,6 +18,12 @@ export const SPECIALISTS = {
 } as const;
 
 export type SpecialistRole = keyof typeof SPECIALISTS;
+
+/** Short outcome text for the agent registry: first non-empty line of a provider response. */
+function firstLine(text: string): string | undefined {
+  const line = text.split("\n").find((candidate) => candidate.trim().length > 0)?.trim();
+  return line;
+}
 
 /** Default tier per specialist (§11.2: lowest tier that clears the quality bar). */
 const ROLE_TIER: Partial<Record<SpecialistRole, DispatchTier>> = {
@@ -56,20 +63,40 @@ export class LunaOrchestrator {
       `Task from Luvish: ${task}`,
     ].join("\n\n");
     const tier = options.tier ?? ROLE_TIER[selected];
-    const result = await this.runner.run(prompt, {
-      cwd: options.cwd || this.config.rootDir,
-      role: selected,
-      // Resumable workers: each specialist role rides a per-surface provider session,
-      // so a disconnected worker's context survives restarts — the next dispatch of
-      // the same role resumes the same provider session instead of starting cold.
-      surface: `luna::${selected}`,
-      readOnly: !options.allowEdits,
-      ...(tier ? { tier } : {}),
-      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
-    });
-    await this.activity.record("agent.dispatched", `Luna dispatched ${selected}`, { task, provider: result.provider, tier, success: result.exitCode === 0 }, { runId: result.runId, role: selected, provider: result.provider });
-    if (result.response) await this.memory.remember(`Luna dispatched ${selected} for: ${task}\n\nResult:\n${result.response}`, { tier: "procedural", importance: 6, metadata: { role: selected, runId: result.runId } });
-    return result;
+    // Registry bookkeeping is dashboard display only (§ dispatch-registry): never
+    // let it change dispatch's behaviour/return value or slow/break a real run, so
+    // every touch point is wrapped and failures are swallowed (fail open).
+    const registry = sharedAgentRegistry();
+    let agentId: string | null = null;
+    try { agentId = registry.start(selected, task, this.config.provider); } catch { /* best effort */ }
+    try {
+      const result = await this.runner.run(prompt, {
+        cwd: options.cwd || this.config.rootDir,
+        role: selected,
+        // Resumable workers: each specialist role rides a per-surface provider session,
+        // so a disconnected worker's context survives restarts — the next dispatch of
+        // the same role resumes the same provider session instead of starting cold.
+        surface: `luna::${selected}`,
+        readOnly: !options.allowEdits,
+        ...(tier ? { tier } : {}),
+        ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+      });
+      try {
+        if (agentId) {
+          const ok = result.exitCode === 0;
+          registry.settle(agentId, ok ? "done" : "failed", {
+            provider: result.provider,
+            summary: ok ? firstLine(result.response) : (result.error ?? `exit ${String(result.exitCode)}`),
+          });
+        }
+      } catch { /* best effort */ }
+      await this.activity.record("agent.dispatched", `Luna dispatched ${selected}`, { task, provider: result.provider, tier, success: result.exitCode === 0 }, { runId: result.runId, role: selected, provider: result.provider });
+      if (result.response) await this.memory.remember(`Luna dispatched ${selected} for: ${task}\n\nResult:\n${result.response}`, { tier: "procedural", importance: 6, metadata: { role: selected, runId: result.runId } });
+      return result;
+    } catch (error) {
+      try { if (agentId) registry.settle(agentId, "failed", { summary: error instanceof Error ? error.message : String(error) }); } catch { /* best effort */ }
+      throw error;
+    }
   }
 
   /**
