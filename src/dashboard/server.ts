@@ -12,6 +12,13 @@ import { sharedAdmissionController } from "../orchestration/admission.ts";
 import { sharedAgentRegistry } from "../orchestration/agent-registry.ts";
 import { domainPolicy, setDomainEnabled } from "../knowledge/gate.ts";
 import { executeExplicitApproval } from "../approval/explicit.ts";
+import { ConversationStore, type ChatAttachmentRef } from "./conversations.ts";
+import { listSkills, loadSkill, skillGuidanceBlock } from "./skills.ts";
+import {
+  ALLOWED_IMAGE_TYPES, MAX_ATTACHMENT_BYTES, attachmentPath, attachmentPromptBlock,
+  purgeAttachments, readAttachment, saveAttachment, sanitizeFileName,
+} from "./attachments.ts";
+import { CHAT_COMMANDS, parseCommand, unescapeMessage, unknownCommandMessage } from "./chat-commands.ts";
 import type { HenryRuntime } from "../runtime.ts";
 import type { ActivityEvent, ProviderName } from "../types.ts";
 
@@ -142,62 +149,62 @@ async function loginHtml(): Promise<string> {
 }
 
 /**
- * Web-chat transcript (data/chats/web-chat.json) — the page reloads it on open, so a
- * conversation survives refreshes and browser switches. Provider-side context lives
- * separately in the "web-chat" surface session (sessions.db); this file is only the
- * human-readable half. Re-read before every write (reminders-clobber lesson) and
- * capped so it never grows unbounded.
+ * Web chat state (chat v2).
+ *
+ * The single implicit thread became a real, multi-conversation store — see
+ * src/dashboard/conversations.ts, which owns `data/chats/` end to end (index.json plus
+ * one JSON file per conversation) and adopts the pre-existing `web-chat.json` transcript
+ * in place on first read, so nothing already on disk is orphaned. Every read/append/clear
+ * below goes through that one store, so there is still exactly one writer per file and the
+ * append serialization + clear-generation guard that the single transcript had are kept.
+ *
+ * Cached per dataDir, not merely cached: a test (or a re-pointed HENRY_DATA_DIR) must get a
+ * store for ITS directory rather than keep writing to the previous one.
  */
-const CHAT_TRANSCRIPT_CAP = 400;
-interface ChatMessage { role: "user" | "henry"; text: string; at: string }
+let conversationStoreCache: { dataDir: string; store: ConversationStore } | null = null;
 
-function chatTranscriptPath(runtime: HenryRuntime): string {
-  return path.join(runtime.config.dataDir, "chats", "web-chat.json");
+function conversations(runtime: HenryRuntime): ConversationStore {
+  if (conversationStoreCache?.dataDir !== runtime.config.dataDir) {
+    conversationStoreCache = { dataDir: runtime.config.dataDir, store: new ConversationStore(runtime.config.dataDir) };
+  }
+  return conversationStoreCache.store;
 }
 
-async function readChatTranscript(runtime: HenryRuntime): Promise<ChatMessage[]> {
-  try {
-    const raw = JSON.parse(await fs.readFile(chatTranscriptPath(runtime), "utf8")) as { messages?: unknown };
-    if (!Array.isArray(raw.messages)) return [];
-    return raw.messages.filter((item): item is ChatMessage =>
-      !!item && typeof item === "object"
-      && ((item as ChatMessage).role === "user" || (item as ChatMessage).role === "henry")
-      && typeof (item as ChatMessage).text === "string");
-  } catch { return []; }
+/** Max images per turn — a bound on both the prompt and the upload surface. */
+const MAX_ATTACHMENTS_PER_TURN = 6;
+
+/**
+ * Attachment retention (owner's decision: 30 days). Cheap schedule — once on dashboard
+ * startup, then daily on an unref'd timer so it never holds the process open. Failures are
+ * swallowed: a purge that cannot run must not take the dashboard down with it.
+ */
+const ATTACHMENT_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+function scheduleAttachmentPurge(runtime: HenryRuntime): NodeJS.Timeout {
+  const sweep = (): void => { void purgeAttachments(runtime.config.dataDir).catch(() => undefined); };
+  setImmediate(sweep);
+  const timer = setInterval(sweep, ATTACHMENT_PURGE_INTERVAL_MS);
+  timer.unref?.();
+  return timer;
 }
 
-// All transcript mutations run through one module-level chain (audit M4): append
-// is read-then-write, so two overlapping sends could each read the same base and
-// the second write would drop the first send's reply. The generation counter
-// closes the race's other half: a send that finishes AFTER "New chat" cleared the
-// transcript must not resurrect its stale reply into the fresh conversation — the
-// send handler records the generation up front, and its final append is skipped
-// (inside the lock) once a clear has bumped it.
-let chatWriteChain: Promise<void> = Promise.resolve();
-let chatClearGeneration = 0;
-
-function withChatTranscript<T>(operation: () => Promise<T>): Promise<T> {
-  const run = chatWriteChain.then(operation);
-  chatWriteChain = run.then(() => undefined, () => undefined);
-  return run;
-}
-
-async function appendChatMessages(runtime: HenryRuntime, entries: ChatMessage[], options: { ifGeneration?: number } = {}): Promise<void> {
-  await withChatTranscript(async () => {
-    if (options.ifGeneration !== undefined && options.ifGeneration !== chatClearGeneration) return; // cleared mid-run — drop, never resurrect
-    const filePath = chatTranscriptPath(runtime);
-    await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    const fresh = await readChatTranscript(runtime);
-    const messages = [...fresh, ...entries].slice(-CHAT_TRANSCRIPT_CAP);
-    await fs.writeFile(filePath, `${JSON.stringify({ messages }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  });
-}
-
-async function clearChatTranscript(runtime: HenryRuntime): Promise<void> {
-  await withChatTranscript(async () => {
-    chatClearGeneration += 1;
-    await fs.rm(chatTranscriptPath(runtime), { force: true });
-  });
+/** Attachment ids the caller claims, reduced to the ones that actually exist on disk. */
+async function resolveAttachments(runtime: HenryRuntime, raw: unknown): Promise<{ refs: ChatAttachmentRef[]; paths: string[] }> {
+  const refs: ChatAttachmentRef[] = [];
+  const paths: string[] = [];
+  if (!Array.isArray(raw)) return { refs, paths };
+  for (const item of raw.slice(0, MAX_ATTACHMENTS_PER_TURN)) {
+    const id = typeof item === "string" ? item : typeof (item as { id?: unknown })?.id === "string" ? String((item as { id: string }).id) : "";
+    const target = id ? attachmentPath(runtime.config.dataDir, id) : undefined;
+    if (!target) continue;
+    try { await fs.access(target); } catch { continue; }
+    const extension = path.extname(id).slice(1);
+    const mime = Object.keys(ALLOWED_IMAGE_TYPES).find((type) => ALLOWED_IMAGE_TYPES[type] === extension) || "image/png";
+    const name = typeof (item as { name?: unknown })?.name === "string" ? sanitizeFileName(String((item as { name: string }).name)) : id;
+    refs.push({ id, name, mime });
+    paths.push(target);
+  }
+  return { refs, paths };
 }
 
 // The holographic memory display is hand-rolled 3D canvas code. Same reasoning
@@ -343,6 +350,24 @@ async function rawBody(request: http.IncomingMessage): Promise<string> {
 async function body(request: http.IncomingMessage): Promise<Record<string, unknown>> {
   const raw = await rawBody(request);
   try { return JSON.parse(raw || "{}") as Record<string, unknown>; } catch { throw new Error("Invalid JSON body"); }
+}
+
+/**
+ * Raw bytes for a binary upload (chat image attachments). Separate from rawBody because
+ * that helper decodes UTF-8 and caps at 256KB — an image is neither text nor small. The
+ * cap is enforced while streaming, so an oversized upload is refused without ever being
+ * fully buffered.
+ */
+async function binaryBody(request: http.IncomingMessage, limit: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of request) {
+    const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += piece.length;
+    if (total > limit) throw new Error(`Image is too large (max ${Math.round(limit / (1024 * 1024))}MB).`);
+    chunks.push(piece);
+  }
+  return Buffer.concat(chunks);
 }
 
 /** POST /login is a plain browser form submit, so its body is urlencoded rather than JSON. */
@@ -538,7 +563,48 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/chat/history") {
-        json(response, 200, { messages: await readChatTranscript(runtime) });
+        // Back-compatible: no conversationId still answers `{ messages }` for the most
+        // recently used thread. It never CREATES one — a GET stays read-only; the first
+        // send is what mints a conversation.
+        const store = conversations(runtime);
+        const requested = url.searchParams.get("conversationId")?.trim() || "";
+        const list = await store.list();
+        const conversation = requested ? list.find((item) => item.id === requested) : list[0];
+        if (!conversation) { json(response, requested ? 404 : 200, requested ? { error: "conversation not found" } : { conversationId: null, title: null, messages: [] }); return; }
+        json(response, 200, {
+          conversationId: conversation.id,
+          title: conversation.title,
+          messages: await store.messages(conversation.id),
+        });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/conversations") {
+        json(response, 200, { conversations: await conversations(runtime).list() });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/chat/commands") {
+        json(response, 200, { commands: CHAT_COMMANDS });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/skills") {
+        // Enumerated from disk on every request: `skills/` is edited by hand, and a new
+        // skill must be usable without a restart, a build step, or a bundling pass.
+        json(response, 200, { skills: await listSkills(runtime.config.rootDir) });
+        return;
+      }
+      const attachmentRoute = url.pathname.match(/^\/api\/attachments\/([^/]+)$/);
+      if (request.method === "GET" && attachmentRoute) {
+        // Preview bytes for the page. Behind the same admin gate as everything else, and
+        // only ids this server minted resolve to a path at all.
+        const stored = await readAttachment(runtime.config.dataDir, decodeURIComponent(attachmentRoute[1]));
+        if (!stored) { json(response, 404, { error: "attachment not found" }); return; }
+        response.writeHead(200, {
+          "content-type": stored.mime,
+          "cache-control": "private, max-age=300",
+          "content-security-policy": "default-src 'none'; sandbox",
+          "x-content-type-options": "nosniff",
+        });
+        response.end(stored.bytes);
         return;
       }
       if (request.method === "GET" && url.pathname === "/holo.js") {
@@ -717,15 +783,43 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
         json(response, 200, await runtime.agent.run(prompt)); return;
       }
       if (request.method === "POST" && url.pathname === "/api/chat/send") {
-        const input = await body(request); const prompt = String(input.prompt || "").trim();
-        if (!prompt) { json(response, 400, { error: "prompt is required" }); return; }
-        // Recorded BEFORE any work: if "New chat" clears the transcript while this
+        const input = await body(request);
+        const rawPrompt = String(input.prompt || "").trim();
+        // Slash commands are SURFACE actions the page performs itself. One that reaches
+        // here is either an unknown command (answer with a clear inline message — never a
+        // silent no-op, and never quietly forwarded to the model as if it were a question)
+        // or a known one that belongs to the UI.
+        const parsedCommand = parseCommand(rawPrompt);
+        if (parsedCommand.kind === "unknown") { json(response, 400, { error: unknownCommandMessage(parsedCommand.name) }); return; }
+        if (parsedCommand.kind === "command") {
+          json(response, 400, { error: `/${parsedCommand.name} is a chat command — it is handled by the chat surface, not sent to Henry.` });
+          return;
+        }
+        const prompt = unescapeMessage(rawPrompt); // `//text` sends a literal leading slash
+        const store = conversations(runtime);
+        const { refs: attachmentRefs, paths: attachmentPaths } = await resolveAttachments(runtime, input.attachments);
+        if (!prompt && !attachmentRefs.length) { json(response, 400, { error: "prompt is required" }); return; }
+        const requestedSkill = typeof input.skill === "string" ? input.skill.trim() : "";
+        const skill = requestedSkill ? await loadSkill(runtime.config.rootDir, requestedSkill) : undefined;
+        if (requestedSkill && !skill) { json(response, 400, { error: `Unknown skill: ${requestedSkill}` }); return; }
+        const requestedConversation = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
+        const conversation = requestedConversation
+          ? await store.get(requestedConversation)
+          : await store.ensureActive();
+        if (!conversation) { json(response, 404, { error: "conversation not found" }); return; }
+        // Recorded BEFORE any work: if the conversation is cleared or deleted while this
         // send is running, the final append below must notice and drop the reply.
-        const generation = chatClearGeneration;
+        const generation = store.generation(conversation.id);
         // Append BEFORE committing SSE headers (audit 2026-08-09 B-H1): a failed
         // write after writeHead made the outer catch call json() on a headers-sent
         // response, and that second throw killed the whole process (repl included).
-        await appendChatMessages(runtime, [{ role: "user", text: prompt, at: new Date().toISOString() }]);
+        await store.append(conversation.id, [{
+          role: "user",
+          text: prompt,
+          at: new Date().toISOString(),
+          ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
+          ...(skill ? { skill: skill.name } : {}),
+        }]);
         response.writeHead(200, {
           "content-type": "text/event-stream; charset=utf-8",
           "cache-control": "no-store",
@@ -734,15 +828,32 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
         try {
           const approvalResult = await executeExplicitApproval(runtime, prompt);
           if (approvalResult !== undefined) {
-            await appendChatMessages(runtime, [{ role: "henry", text: approvalResult, at: new Date().toISOString() }], { ifGeneration: generation });
-            sseWrite(response, "done", { response: approvalResult, provider: "local", durationMs: 0 });
+            await store.append(conversation.id, [{ role: "henry", text: approvalResult, at: new Date().toISOString() }], { ifGeneration: generation });
+            sseWrite(response, "done", { response: approvalResult, provider: "local", durationMs: 0, conversationId: conversation.id });
             response.end();
             return;
           }
-          // Same surface-session model as the REPL, its own surface: provider-side
-          // context persists across web messages until "New chat" resets it.
-          const result = await runtime.agent.run(prompt, {
-            surface: "web-chat",
+          // Images ride the EXISTING vision path: local file paths in the prompt with the
+          // provider pinned to claude (same mechanism as src/screenshots/service.ts). The pin
+          // is stated out loud rather than applied silently — if the active provider is codex
+          // it cannot read images, and the user is told which model actually saw them.
+          const visionPin = attachmentPaths.length > 0;
+          if (visionPin && runtime.config.provider !== "claude") {
+            sseWrite(response, "notice", {
+              text: `${runtime.config.provider} can't read images — this turn was routed to Claude so the attachment could be seen.`,
+            });
+          }
+          const composed = [
+            skill ? skillGuidanceBlock(skill) : "",
+            attachmentPromptBlock(attachmentPaths),
+            prompt,
+          ].filter(Boolean).join("\n\n");
+          // Same surface-session model as the REPL, one surface PER CONVERSATION:
+          // provider-side context persists across messages in a thread and never
+          // bleeds between threads.
+          const result = await runtime.agent.run(composed, {
+            surface: conversation.surface,
+            ...(visionPin ? { provider: "claude" as const } : {}),
             onEvent: (event) => {
               const text = event.parsed && typeof (event.parsed as Record<string, unknown>).text === "string"
                 ? String((event.parsed as Record<string, unknown>).text)
@@ -752,8 +863,8 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
           });
           // The transcript records the authoritative final response even if the
           // browser tab bailed mid-stream — reload shows the full reply.
-          await appendChatMessages(runtime, [{ role: "henry", text: result.response, at: new Date().toISOString() }], { ifGeneration: generation });
-          sseWrite(response, "done", { response: result.response, provider: result.provider, durationMs: result.durationMs });
+          await store.append(conversation.id, [{ role: "henry", text: result.response, at: new Date().toISOString() }], { ifGeneration: generation });
+          sseWrite(response, "done", { response: result.response, provider: result.provider, durationMs: result.durationMs, conversationId: conversation.id });
         } catch (error) {
           sseWrite(response, "error", { error: error instanceof Error ? error.message : String(error) });
         }
@@ -761,10 +872,55 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/chat/clear") {
-        await clearChatTranscript(runtime);
-        // Fresh conversation = fresh provider context: drop the web-chat surface session.
-        runtime.agent.providerRunner.sessions().reset("web-chat");
-        json(response, 200, { cleared: true });
+        const input = await body(request);
+        const store = conversations(runtime);
+        const requested = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
+        const conversation = requested ? await store.get(requested) : (await store.list())[0];
+        if (!conversation) { json(response, 200, { cleared: true, conversationId: null }); return; }
+        await store.clear(conversation.id);
+        // Fresh conversation = fresh provider context: drop that conversation's session.
+        runtime.agent.providerRunner.sessions().reset(conversation.surface);
+        json(response, 200, { cleared: true, conversationId: conversation.id });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/conversations") {
+        const input = await body(request);
+        const title = typeof input.title === "string" ? input.title : undefined;
+        json(response, 200, { conversation: await conversations(runtime).create(title) });
+        return;
+      }
+      const conversationRoute = url.pathname.match(/^\/api\/conversations\/([^/]+)$/);
+      if (conversationRoute && (request.method === "PATCH" || request.method === "DELETE")) {
+        const id = decodeURIComponent(conversationRoute[1]);
+        const store = conversations(runtime);
+        const existing = await store.get(id);
+        if (!existing) { json(response, 404, { error: "conversation not found" }); return; }
+        if (request.method === "DELETE") {
+          await store.remove(id);
+          // The thread is gone; so is the provider context that belonged to it.
+          runtime.agent.providerRunner.sessions().reset(existing.surface);
+          json(response, 200, { deleted: true, id });
+          return;
+        }
+        const input = await body(request);
+        const title = typeof input.title === "string" ? input.title.trim() : "";
+        if (!title) { json(response, 400, { error: "title is required" }); return; }
+        json(response, 200, { conversation: await store.rename(id, title) });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/attachments") {
+        // Raw binary upload (no multipart parser, no dependency): the file is the body,
+        // its name rides in a header. Stored locally only; never logged, never decoded as text.
+        const declared = String(request.headers["content-type"] || "").split(";")[0].trim();
+        const rawName = request.headers["x-filename"];
+        let bytes: Buffer;
+        try { bytes = await binaryBody(request, MAX_ATTACHMENT_BYTES); }
+        catch (error) { json(response, 413, { error: error instanceof Error ? error.message : String(error) }); return; }
+        let name = "";
+        if (typeof rawName === "string") { try { name = decodeURIComponent(rawName); } catch { name = rawName; } }
+        const saved = await saveAttachment(runtime.config.dataDir, bytes, { name, mime: declared });
+        if ("error" in saved) { json(response, 400, { error: saved.error }); return; }
+        json(response, 200, { attachment: { id: saved.id, name: saved.name, mime: saved.mime, size: saved.size } });
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/dispatch") {
@@ -871,6 +1027,9 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
       else json(response, 500, { error: error instanceof Error ? error.message : String(error) });
     }
   });
+  // Attachment retention runs with the dashboard (owner's decision: 30 days) and stops with it.
+  const attachmentPurge = scheduleAttachmentPurge(runtime);
+  server.on("close", () => clearInterval(attachmentPurge));
   server.listen(runtime.config.port, runtime.config.host);
   return server;
 }

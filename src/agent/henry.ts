@@ -10,6 +10,16 @@ import { holdInteractiveLock } from "../orchestration/interactive-lock.ts";
 
 /** Surfaces where a human is live-waiting — their runs raise the cross-process courtesy flag. */
 const INTERACTIVE_SURFACES = new Set(["repl", "web-chat", "dashboard-ask", "telegram"]);
+
+/**
+ * A surface may be sub-scoped as `<base>:<id>` (the web chat gives every conversation its
+ * own provider session, e.g. "web-chat:conv_ab12"). The courtesy flag follows the BASE
+ * surface, so a per-conversation session is still recognised as a human waiting.
+ */
+function isInteractiveSurface(surface: string | undefined): boolean {
+  if (!surface) return false;
+  return INTERACTIVE_SURFACES.has(surface.split(":")[0]);
+}
 import { detectKnowledgeDomain } from "../knowledge/router.ts";
 import { disabledDomains } from "../knowledge/gate.ts";
 import { ProviderRunner, type RunOptions } from "../providers/runner.ts";
@@ -209,7 +219,7 @@ export class HenryAgent {
     const surface = tier === "t0" ? undefined : options.surface;
     // A live conversation turn (any tier, incl. t0 chatter) raises the courtesy flag so
     // background pipelines in OTHER processes yield instead of contending for the CPU.
-    const releaseInteractive = options.surface && INTERACTIVE_SURFACES.has(options.surface)
+    const releaseInteractive = isInteractiveSurface(options.surface)
       ? holdInteractiveLock(this.config) : undefined;
     try {
     const session = surface ? this.runner.acquireSession(surface, options.provider) : undefined;
