@@ -6,33 +6,36 @@
   <meta name="description" content="Interactive neural-style observatory for Henry's associative memory system." />
   <title>Henry / Memory Observatory</title>
 </head>
-<body style="margin:0; background:#040509;">
+<body style="margin:0; background:#030912;">
 <div id="henry-memory-network">
   <style>
     #henry-memory-network {
       --baseline-font: 1px;
-      --background: #050706;
-      --background-deep: #020302;
-      --card: rgba(10, 16, 11, 0.88);
-      --card-soft: rgba(7, 12, 8, 0.76);
-      --card-strong: rgba(14, 25, 16, 0.94);
-      --foreground: #f3f7f2;
-      --muted: #91a296;
-      --faint: #53665a;
-      --border: rgba(87, 227, 137, 0.16);
-      --border-strong: rgba(87, 227, 137, 0.32);
-      --blue: #57e389;
-      --cyan: #9decb0;
-      --purple: #8acb9a;
-      --gold: #e8bf67;
-      --green: #57e389;
-      --red: #f6848a;
-      --viz-series-1: #57e389;
-      --viz-series-2: #9decb0;
-      --viz-series-3: #8acb9a;
-      --viz-series-4: #f0bd6e;
-      --viz-series-5: #6fe0a7;
-      --viz-series-6: #f6848a;
+      /* Constellation palette (constellation-spec.md) — deep ink grounds with a
+         restrained cyan/blue/violet accent family. Green survives only as the
+         Communication node type in the graph, never as a UI accent. */
+      --background: #07111f;
+      --background-deep: #030912;
+      --card: rgba(9, 20, 38, 0.72);
+      --card-soft: rgba(12, 28, 52, 0.62);
+      --card-strong: rgba(12, 28, 52, 0.86);
+      --foreground: #eef7ff;
+      --muted: #8aa4bf;
+      --faint: #5c7a99;
+      --border: rgba(155, 190, 255, 0.18);
+      --border-strong: rgba(38, 230, 255, 0.34);
+      --blue: #4e7dff;
+      --cyan: #26e6ff;
+      --purple: #8d5cff;
+      --gold: #ffc857;
+      --green: #35efc3;
+      --red: #ff6f8d;
+      --viz-series-1: #26e6ff;
+      --viz-series-2: #4e7dff;
+      --viz-series-3: #8d5cff;
+      --viz-series-4: #ffc857;
+      --viz-series-5: #35efc3;
+      --viz-series-6: #ff4fd8;
       width: 100%;
       color: var(--foreground);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -573,79 +576,10 @@
       white-space: nowrap;
     }
 
-    #henry-memory-network .hmn-graph-shell {
+    #henry-memory-network .hmn-graph-mount {
       position: relative;
-      height: clamp(480px, 57vw, 650px);
-      overflow: hidden;
-      background:
-        radial-gradient(circle at 50% 52%, rgba(100, 164, 255, 0.07), transparent 38%),
-        radial-gradient(circle at 18% 42%, rgba(88, 225, 219, 0.06), transparent 28%);
-    }
-
-    #henry-memory-network canvas {
-      display: block;
-      width: 100%;
-      height: 100%;
-      cursor: grab;
-    }
-
-    #henry-memory-network canvas:active {
-      cursor: grabbing;
-    }
-
-    #henry-memory-network .hmn-graph-badge {
-      position: absolute;
-      top: 14px;
-      left: 15px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 7px 9px;
-      border: 1px solid rgba(156, 172, 198, 0.18);
-      border-radius: 7px;
-      background: rgba(5, 8, 13, 0.64);
-      color: var(--muted);
-      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-      font-size: calc(9 * var(--baseline-font));
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      backdrop-filter: blur(12px);
-    }
-
-    #henry-memory-network .hmn-graph-badge strong {
-      color: var(--blue);
-      font-weight: 400;
-    }
-
-    #henry-memory-network .hmn-zoom-readout {
-      position: absolute;
-      right: 14px;
-      bottom: 13px;
-      padding: 6px 8px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: rgba(5, 8, 13, 0.66);
-      color: var(--muted);
-      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-      font-size: calc(9 * var(--baseline-font));
-    }
-
-    #henry-memory-network .hmn-graph-empty {
-      position: absolute;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0 32px;
-      text-align: center;
-      color: var(--muted);
-      background: rgba(5, 8, 13, 0.72);
-      font-size: calc(12 * var(--baseline-font));
-      line-height: 1.6;
-    }
-
-    #henry-memory-network .hmn-graph-empty[hidden] {
-      display: none;
+      padding: 0 16px 16px;
+      --hmc-height: clamp(480px, 57vw, 650px);
     }
 
     #henry-memory-network .hmn-graph-footer {
@@ -659,27 +593,6 @@
       border-top: 1px solid var(--border);
       color: var(--muted);
       font-size: calc(10 * var(--baseline-font));
-    }
-
-    #henry-memory-network .hmn-legend {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px 14px;
-    }
-
-    #henry-memory-network .hmn-legend-item {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      white-space: nowrap;
-    }
-
-    #henry-memory-network .hmn-legend-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--legend-color);
-      box-shadow: 0 0 9px color-mix(in srgb, var(--legend-color), transparent 35%);
     }
 
     #henry-memory-network .hmn-inspector {
@@ -1168,8 +1081,8 @@
         min-width: 0;
       }
 
-      #henry-memory-network .hmn-graph-shell {
-        height: 510px;
+      #henry-memory-network .hmn-graph-mount {
+        --hmc-height: 510px;
       }
 
       #henry-memory-network .hmn-pipeline {
@@ -1300,23 +1213,16 @@
           <div class="hmn-panel-head">
             <div>
               <div class="hmn-panel-title">Associative topology</div>
-              <div class="hmn-panel-subtitle">drag to pan · scroll to zoom · click a node to inspect</div>
+              <div class="hmn-panel-subtitle">drag to orbit · scroll to zoom · click a star to inspect</div>
             </div>
             <div class="hmn-panel-status"><span class="hmn-signal" aria-hidden="true"></span><span id="hmn-graph-status">warm / indexed</span></div>
           </div>
-          <div class="hmn-graph-shell" id="hmn-graph-shell">
-            <canvas id="hmn-graph-canvas" tabindex="0" aria-label="Interactive neural-style graph of Henry memory nodes and typed associations"></canvas>
-            <div class="hmn-graph-badge"><strong id="hmn-visible-count">—</strong><span>visible nodes</span></div>
-            <div class="hmn-zoom-readout" id="hmn-zoom-readout">zoom 100%</div>
-            <div class="hmn-graph-empty" id="hmn-graph-empty" role="status" hidden></div>
-          </div>
+          <!-- The graph is the shared constellation module (/constellation.js): it
+               builds its own canvas, HUD, legend and controls, so this immersive view
+               and the compact dashboard card cannot drift apart. -->
+          <div class="hmn-graph-mount" id="hmn-graph-shell"><div id="hmn-constellation"></div></div>
           <div class="hmn-graph-footer">
-            <div class="hmn-legend" aria-label="Graph legend">
-              <span class="hmn-legend-item"><span class="hmn-legend-dot" style="--legend-color: var(--cyan)"></span>personal</span>
-              <span class="hmn-legend-item"><span class="hmn-legend-dot" style="--legend-color: var(--purple)"></span>knowledge</span>
-              <span class="hmn-legend-item"><span class="hmn-legend-dot" style="--legend-color: var(--blue)"></span>retrieval</span>
-              <span class="hmn-legend-item"><span class="hmn-legend-dot" style="--legend-color: var(--gold)"></span>entity</span>
-            </div>
+            <span class="hmn-mono"><strong id="hmn-visible-count">—</strong> visible stars</span>
             <span class="hmn-mono">activation = relevance × spread × usefulness</span>
           </div>
         </div>
@@ -1442,6 +1348,7 @@
     <div class="hmn-toast" id="hmn-toast" role="status">handoff copied to clipboard</div>
   </div>
 
+  <script src="/constellation.js"></script>
   <script>
     (function () {
       "use strict";
@@ -1449,15 +1356,16 @@
       var root = document.getElementById("henry-memory-network");
       if (!root) return;
 
-      var canvas = root.querySelector("#hmn-graph-canvas");
+      var mountHost = root.querySelector("#hmn-constellation");
       var graphShell = root.querySelector("#hmn-graph-shell");
-      var ctx = canvas.getContext("2d");
+      // Rendering lives in the shared module; this page owns data, the recall
+      // lab, traces and the pipeline panels — no drawing code of its own.
+      var constellation = null;
       var searchInput = root.querySelector("#hmn-search-input");
       var recallInput = root.querySelector("#hmn-recall-input");
       var visibleCount = root.querySelector("#hmn-visible-count");
       var nodeCount = root.querySelector("#hmn-node-count");
       var edgeCount = root.querySelector("#hmn-edge-count");
-      var zoomReadout = root.querySelector("#hmn-zoom-readout");
       var graphStatus = root.querySelector("#hmn-graph-status");
       var inspectorBody = root.querySelector("#hmn-inspector-body");
       var inspectorStatus = root.querySelector("#hmn-inspector-status");
@@ -1466,7 +1374,6 @@
       var toast = root.querySelector("#hmn-toast");
       var topbarMeta = root.querySelector("#hmn-topbar-meta");
       var embeddingNote = root.querySelector("#hmn-embedding-note");
-      var emptyState = root.querySelector("#hmn-graph-empty");
       var traceMeta = root.querySelector("#hmn-trace-meta");
       var traceList = root.querySelector("#hmn-trace-list");
 
@@ -1504,20 +1411,11 @@
         search: "",
         selectedId: null,
         hoveredId: null,
-        zoom: 1,
-        panX: 0,
-        panY: 0,
-        orbitX: 0,
-        orbitY: 0,
-        focusStarted: 0,
-        focusProgress: 1,
-        dragging: false,
-        lastPointer: null,
         pulseStart: performance.now(),
         animationToken: 0,
         routeDomain: "gtm / product",
         // Recall lab (dashboard-design-v2.md §A1-A2): null when no lab query has run yet;
-        // otherwise {seeds:Set<id>, activated:Set<id>} drives drawNode/drawEdges highlighting.
+        // otherwise {seeds:Set<id>, activated:Set<id>} is handed to the module as a highlight map.
         recallLab: null,
         recallStore: "personal",
         edgeTypeFilter: new Set(["similar", "temporal_next", "about", "caused", "supersedes", "lesson_from"]),
@@ -1812,14 +1710,9 @@
       }
 
       function showEmptyState(message) {
-        if (!emptyState || message === lastEmptyMessage) return;
+        if (!constellation || message === lastEmptyMessage) return;
         lastEmptyMessage = message;
-        if (message) {
-          emptyState.textContent = message;
-          emptyState.removeAttribute("hidden");
-        } else {
-          emptyState.setAttribute("hidden", "hidden");
-        }
+        constellation.setEmpty(message || "");
       }
 
       function boot() {
@@ -1846,6 +1739,8 @@
           baseEmptyMessage = personal.length ? null : (payloads[0]
             ? "No memories indexed yet. Run `henry memory index` to populate the associative graph."
             : "Memory graph could not be loaded" + (loadNotes.length ? " — " + loadNotes[0] : "") + ".");
+          mountConstellation();
+          syncGraph();
           renderInspector(byId[state.selectedId]);
           runRetrieval("");
           if (loadNotes.length) graphStatus.textContent = shorten(loadNotes[0], 46);
@@ -1854,285 +1749,77 @@
         });
       }
 
-      function colorForNode(node) {
-        if (node.type === "entity") return palette.entity;
-        if (node.store === "retrieval") return palette.retrieval;
-        return node.store === "knowledge" ? palette.knowledge : palette.personal;
+      function nodeFilter(node) {
+        var query = state.search.trim().toLowerCase();
+        var storeOk = state.storeView === "all" || node.store === state.storeView || node.store === "retrieval";
+        var queryOk = !query || (node.title + " " + node.body + " " + node.keywords.join(" ")).toLowerCase().indexOf(query) > -1;
+        var archivedOk = state.showArchived || !node.archived;
+        return storeOk && queryOk && archivedOk;
       }
 
       function visibleNodes() {
-        var query = state.search.trim().toLowerCase();
-        return nodes.filter(function (node) {
-          var storeOk = state.storeView === "all" || node.store === state.storeView || node.store === "retrieval";
-          var queryOk = !query || (node.title + " " + node.body + " " + node.keywords.join(" ")).toLowerCase().indexOf(query) > -1;
-          var archivedOk = state.showArchived || !node.archived;
-          return storeOk && queryOk && archivedOk;
+        return nodes.filter(nodeFilter);
+      }
+
+      // Scaffolding edges (pipeline routing, knowledge rollups) are none of the six
+      // typed associations the filter chips describe, so they stay exempt from those
+      // chips — the same rule the previous renderer applied.
+      var EXEMPT_EDGE_TYPES = ["routes", "contains", "derived", "related", "mentions", "supports"];
+
+      function applyEdgeFilter() {
+        if (!constellation) return;
+        if (!state.showEdges) { constellation.setEdgeTypes(new Set()); return; }
+        var allowed = new Set(EXEMPT_EDGE_TYPES);
+        state.edgeTypeFilter.forEach(function (type) { allowed.add(type); });
+        constellation.setEdgeTypes(allowed);
+      }
+
+      function mountConstellation() {
+        if (constellation || !window.HenryConstellation || !mountHost) return;
+        constellation = window.HenryConstellation.mount({
+          el: mountHost,
+          height: "var(--hmc-height, 560px)",
+          ariaLabel: "Memory constellation: Henry memories drawn as stars grouped by type, with typed "
+            + "associations as filaments. Drag to orbit, scroll to zoom, click a star to inspect it, "
+            + "or submerge the camera into the lattice.",
+          onSelect: function (node) {
+            state.selectedId = node ? node.id : null;
+            renderInspector(node || null);
+          },
+          onReset: resetView
         });
+        constellation.setFilter(nodeFilter);
+        applyEdgeFilter();
       }
 
-      function pointFor(node) {
-        var cx = 0.5, cy = 0.5;
-        var rawX = node.x - cx;
-        var rawY = node.y - cy;
-        var yaw = state.orbitX;
-        var pitch = state.orbitY;
-        var depth = node.depth || 1;
-        var orbitAngle = yaw * 0.16;
-        var orbitX = rawX * Math.cos(orbitAngle) - rawY * Math.sin(orbitAngle);
-        var orbitY = rawX * Math.sin(orbitAngle) + rawY * Math.cos(orbitAngle);
-        var rotatedX = orbitX * Math.cos(yaw) + (depth - 1) * 0.05 * Math.sin(yaw);
-        var rotatedY = orbitY * Math.cos(pitch) - rawX * Math.sin(pitch) * 0.12;
-        var perspective = 1 + Math.sin(yaw) * (depth - 1) * 0.16;
-        var point = {
-          x: (rotatedX * graphWidth * perspective) * state.zoom + graphWidth / 2 + state.panX,
-          y: (rotatedY * graphHeight * perspective) * state.zoom + graphHeight / 2 + state.panY
-        };
-        if (state.selectedId && state.focusProgress < 1 && node.id !== state.selectedId) {
-          var neighbor = edgeNeighbors(state.selectedId).some(function (item) { return item.node && item.node.id === node.id; });
-          if (neighbor) {
-            var angle = Math.atan2(rawY, rawX) + state.orbitX * 0.4;
-            var expand = 30 * (1 - state.focusProgress) * state.zoom;
-            point.x += Math.cos(angle) * expand;
-            point.y += Math.sin(angle) * expand;
-          }
-        }
-        return point;
+      function syncGraph() {
+        if (!constellation) return;
+        constellation.setData({ nodes: nodes, edges: edges });
+        applyEdgeFilter();
+        if (state.selectedId) constellation.select(state.selectedId);
       }
 
-      function resizeCanvas() {
-        var rect = graphShell.getBoundingClientRect();
-        var ratio = window.devicePixelRatio || 1;
-        graphWidth = Math.max(320, rect.width);
-        graphHeight = Math.max(420, rect.height);
-        canvas.width = Math.floor(graphWidth * ratio);
-        canvas.height = Math.floor(graphHeight * ratio);
-        canvas.style.width = graphWidth + "px";
-        canvas.style.height = graphHeight + "px";
-        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-        draw();
-      }
-
-      function drawGrid() {
-        ctx.save();
-        ctx.strokeStyle = "rgba(164, 183, 212, 0.055)";
-        ctx.lineWidth = 1;
-        var step = 36 * state.zoom;
-        var offsetX = (state.panX % step + step) % step;
-        var offsetY = (state.panY % step + step) % step;
-        for (var x = offsetX; x < graphWidth; x += step) {
-          ctx.beginPath();
-          ctx.moveTo(x, 0);
-          ctx.lineTo(x, graphHeight);
-          ctx.stroke();
-        }
-        for (var y = offsetY; y < graphHeight; y += step) {
-          ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(graphWidth, y);
-          ctx.stroke();
-        }
-        ctx.restore();
-      }
-
-      function drawZones() {
-        ctx.save();
-        ctx.font = "9px SFMono-Regular, Consolas, monospace";
-        ctx.letterSpacing = "1px";
-        ctx.fillStyle = "rgba(87, 227, 137, 0.72)";
-        ctx.fillText("PERSONAL MEMORY · CORTEX", 18, 28);
-        ctx.fillStyle = "rgba(157, 236, 176, 0.72)";
-        ctx.fillText("KNOWLEDGE BASE", graphWidth - 126, 28);
-        ctx.strokeStyle = "rgba(87, 227, 137, 0.16)";
-        ctx.setLineDash([4, 8]);
-        ctx.beginPath();
-        ctx.moveTo(graphWidth * 0.52, 18);
-        ctx.lineTo(graphWidth * 0.52, graphHeight - 20);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-      }
-
-      function drawBrainField(now) {
-        var x = graphWidth * 0.5;
-        var y = graphHeight * 0.5;
-        var rx = Math.min(graphWidth * 0.43, 430) * state.zoom;
-        var ry = Math.min(graphHeight * 0.39, 300) * state.zoom;
-        ctx.save();
-        ctx.translate(x + state.panX, y + state.panY);
-        ctx.rotate(state.orbitX * 0.08);
-        ctx.globalAlpha = 0.42;
-        ctx.strokeStyle = "rgba(87, 227, 137, 0.28)";
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 8]);
-        [-1, 1].forEach(function (side) {
-          ctx.beginPath();
-          ctx.ellipse(side * rx * 0.235, 0, rx * 0.62, ry, 0, 0, Math.PI * 2);
-          ctx.stroke();
-        });
-        ctx.setLineDash([]);
-        ctx.strokeStyle = "rgba(157, 236, 176, 0.18)";
-        ctx.beginPath(); ctx.moveTo(0, -ry * 0.84); ctx.bezierCurveTo(-8, -ry * 0.3, 8, ry * 0.3, 0, ry * 0.84); ctx.stroke();
-        ctx.globalAlpha = 0.16;
-        for (var i = 0; i < 5; i++) {
-          var wave = Math.sin(now / 1800 + i) * 5;
-          ctx.beginPath();
-          ctx.ellipse(-rx * 0.22 + wave, -ry * 0.52 + i * ry * 0.25, rx * 0.32, ry * 0.1, -0.14, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.ellipse(rx * 0.22 - wave, -ry * 0.52 + i * ry * 0.25, rx * 0.32, ry * 0.1, 0.14, 0, Math.PI * 2);
-          ctx.stroke();
-        }
-        ctx.restore();
-      }
-
-      function drawEdges(visibleSet) {
-        if (!state.showEdges) return;
-        var activeQuery = state.search.trim().length > 0;
-        var recallLab = state.recallLab;
-        edges.forEach(function (edge) {
-          // Edge-type filter chips (§A2) only ever hide *real* engram edges — the
-          // pipeline/aggregate scaffolding edges (routes/contains/derived/...) aren't
-          // any of the six typed associations the chips describe, so they stay exempt.
-          if (edge.real && !state.edgeTypeFilter.has(edge.kind)) return;
-          var from = byId[edge.from];
-          var to = byId[edge.to];
-          if (!visibleSet.has(from.id) || !visibleSet.has(to.id)) return;
-          var a = pointFor(from);
-          var b = pointFor(to);
-          var active = Math.max(from.activation, to.activation);
-          var edgeColor = palette[edge.kind] || palette.edge;
-          var alpha;
-          if (recallLab) {
-            var fromLit = recallLab.seeds.has(from.id) || recallLab.activated.has(from.id);
-            var toLit = recallLab.seeds.has(to.id) || recallLab.activated.has(to.id);
-            alpha = fromLit && toLit ? 0.15 + edge.weight * 0.45 : 0.05;
-          } else {
-            alpha = activeQuery ? 0.05 + active * 0.65 : 0.05 + edge.weight * 0.16;
-          }
-          if (from.store === "retrieval" || to.store === "retrieval") alpha += 0.16;
-          ctx.save();
-          ctx.strokeStyle = edgeColor.replace("rgba", "rgba").replace(/[\d.]+\)$/, clamp(alpha, 0.02, 0.9) + ")");
-          if (!palette[edge.kind]) ctx.strokeStyle = "rgba(161, 178, 205, " + clamp(alpha, 0.02, 0.45) + ")";
-          ctx.lineWidth = active > 0.55 ? 1.4 + active * 1.5 : 0.55 + edge.weight * 0.8;
-          if (edge.kind === "supersedes") ctx.setLineDash([4, 4]);
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
-          ctx.stroke();
-          ctx.restore();
-        });
-      }
-
-      function drawNode(node, now) {
-        var point = pointFor(node);
-        var color = colorForNode(node);
-        var baseRadius = node.radius * (node.store === "retrieval" ? 1.14 : 1);
-        var active = node.activation;
-        var isSelected = node.id === state.selectedId;
-        var isHovered = node.id === state.hoveredId;
-        var recallLab = state.recallLab;
-        var isSeed = Boolean(recallLab && recallLab.seeds.has(node.id));
-        var isActivated = Boolean(recallLab && !isSeed && recallLab.activated.has(node.id));
-        var recallFaded = Boolean(recallLab && !isSeed && !isActivated);
-        // Recall lab (§A1) takes over dimming from the plain text-search preview while a
-        // lab query is live: seeds/activated stay lit, everything else fades to ~15% alpha.
-        var dim = recallLab
-          ? (recallFaded && !isSelected && !isHovered)
-          : (state.search.trim() && active < 0.08 && !isSelected && !isHovered);
-        ctx.save();
-        ctx.globalAlpha = dim ? (recallLab ? 0.15 : 0.16) : 0.93;
-
-        if (active > 0.16 && state.showMotion) {
-          var pulse = ((now - state.pulseStart) / 1600) % 1;
-          var pulseRadius = baseRadius + pulse * (15 + active * 18);
-          ctx.beginPath();
-          ctx.arc(point.x, point.y, pulseRadius, 0, Math.PI * 2);
-          ctx.strokeStyle = color;
-          ctx.globalAlpha = (1 - pulse) * active * 0.26;
-          ctx.lineWidth = 1.4;
-          ctx.stroke();
-          ctx.globalAlpha = dim ? 0.16 : 0.93;
-        }
-
-        var haloRadius = baseRadius + 7 + active * 12 + (isSelected ? 5 : 0);
-        var gradient = ctx.createRadialGradient(point.x, point.y, 0, point.x, point.y, haloRadius);
-        gradient.addColorStop(0, color);
-        gradient.addColorStop(0.25, color.replace("#", "#"));
-        gradient.addColorStop(0.44, "rgba(255,255,255,0.08)");
-        gradient.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = gradient;
-        ctx.globalAlpha = dim ? 0.08 : 0.22 + active * 0.38;
-        ctx.beginPath();
-        ctx.arc(point.x, point.y, haloRadius, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.globalAlpha = dim ? 0.16 : 0.9;
-        ctx.beginPath();
-        ctx.arc(point.x, point.y, baseRadius + active * 1.6 + (isSelected ? 1.6 : 0), 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.lineWidth = isSelected ? 2 : 0.7;
-        ctx.strokeStyle = isSelected ? "#f6fbff" : "rgba(237, 245, 255, 0.52)";
-        ctx.stroke();
-
-        // Recall lab activation ring (§A1): seeds get a bright cyan ring, spread-activated
-        // nodes a dimmer one — drawn last so it sits on top of the halo/core for both.
-        if (isSeed || isActivated) {
-          ctx.globalAlpha = isSeed ? 1 : 0.55;
-          ctx.beginPath();
-          ctx.arc(point.x, point.y, baseRadius + (isSeed ? 6.5 : 4.5), 0, Math.PI * 2);
-          ctx.strokeStyle = palette.personal;
-          ctx.lineWidth = isSeed ? 2.4 : 1.4;
-          ctx.stroke();
-        }
-
-        var neighbors = state.selectedId ? edgeNeighbors(state.selectedId).slice(0, 8).some(function (item) { return item.node && item.node.id === node.id; }) : false;
-        var zoomLabels = state.zoom >= 1.35 && node.radius >= 2.5;
-        var shouldLabel = isSelected || isHovered || isSeed || isActivated || neighbors || (node.store === "retrieval") || (zoomLabels && node.score > 0.18);
-        if (shouldLabel && !dim) {
-          ctx.globalAlpha = isSelected || isHovered ? 1 : 0.78;
-          ctx.font = (isSelected ? "500 11px " : "10px ") + "Inter, system-ui, sans-serif";
-          ctx.fillStyle = "#eaf2ff";
-          var labelX = point.x + baseRadius + 7;
-          var labelY = point.y + 3;
-          ctx.fillText(node.title, labelX, labelY);
-        }
-        ctx.restore();
-      }
-
-      function draw() {
-        if (!graphWidth || !graphHeight) return;
-        var now = performance.now();
-        if (state.focusProgress < 1) state.focusProgress = clamp((now - state.focusStarted) / 520, 0, 1);
-        ctx.clearRect(0, 0, graphWidth, graphHeight);
-        drawGrid();
-        drawZones();
-        drawBrainField(now);
+      function updateCounters() {
         var visible = visibleNodes();
-        var visibleSet = new Set(visible.map(function (node) { return node.id; }));
-        drawEdges(visibleSet);
-        visible.slice().sort(function (a, b) {
-          return (a.radius + a.activation * 5) - (b.radius + b.activation * 5);
-        }).forEach(function (node) { drawNode(node, now); });
-        showEmptyState(baseEmptyMessage || (visible.length ? null : "Nothing matches this scope or query — clear the search or press reset view."));
         visibleCount.textContent = visible.length;
         nodeCount.textContent = realNodeCount;
         edgeCount.textContent = new Set(edges.filter(function (edge) { return edge.real; }).map(function (edge) { return edge.kind; })).size;
-        zoomReadout.textContent = "zoom " + Math.round(state.zoom * 100) + "%";
+        showEmptyState(baseEmptyMessage || (visible.length ? null : "Nothing matches this scope or query — clear the search or press reset view."));
+      }
+
+      function draw() {
+        updateCounters();
+        if (constellation) constellation.redraw();
+      }
+
+      function resizeCanvas() {
+        if (constellation) constellation.resize();
       }
 
       function ensureAnimationLoop() {
-        if (animationRunning || !state.showMotion) return;
-        animationRunning = true;
-        function frame() {
-          draw();
-          if (state.showMotion) {
-            requestAnimationFrame(frame);
-          } else {
-            animationRunning = false;
-          }
-        }
-        requestAnimationFrame(frame);
+        if (!constellation) return;
+        constellation.state.pulsesOn = state.showMotion && !constellation.reduceMotion;
+        constellation.redraw();
       }
 
       function edgeNeighbors(nodeId) {
@@ -2145,45 +1832,11 @@
       }
 
       function renderInspector(node) {
-        if (!node) {
-          inspectorBody.innerHTML = "<div class='hmn-node-copy'>Click any node in the graph to inspect its tier, source, usefulness, and typed associations.</div>";
-          inspectorStatus.textContent = "waiting";
-          return;
+        // One inspector implementation, shared with the dashboard card.
+        inspectorStatus.textContent = !node ? "waiting" : (node.store === "retrieval" ? "pipeline node" : "selected");
+        if (window.HenryConstellation) {
+          window.HenryConstellation.renderInspector(inspectorBody, node || null, constellation);
         }
-        var neighbors = edgeNeighbors(node.id).slice(0, 5);
-        var color = colorForNode(node);
-        inspectorStatus.textContent = node.store === "retrieval" ? "pipeline node" : "selected";
-        inspectorBody.innerHTML =
-          "<div>" +
-            "<div class='hmn-node-identity'>" +
-              "<div class='hmn-node-orb' style='--node-color:" + color + "'></div>" +
-              "<div>" +
-                "<div class='hmn-node-title'>" + esc(node.title) + "</div>" +
-                "<div class='hmn-node-id'>" + esc(node.id) + " · " + esc(node.source) + "</div>" +
-              "</div>" +
-            "</div>" +
-            "<div class='hmn-chip-row' style='margin-top:14px'>" +
-              "<span class='hmn-chip " + (node.store === "personal" ? "store-personal" : node.store === "knowledge" ? "store-knowledge" : "") + "'>" + esc(node.store) + "</span>" +
-              "<span class='hmn-chip'>" + esc(node.tier) + "</span>" +
-              "<span class='hmn-chip'>" + esc(node.type) + "</span>" +
-              "<span class='hmn-chip'>importance " + node.importance + "/10</span>" +
-            "</div>" +
-          "</div>" +
-          "<div class='hmn-node-copy'>" + esc(node.body) + "</div>" +
-          "<div class='hmn-inspector-section'>" +
-            "<div class='hmn-section-label'><span>scoring blend</span><strong>client-side preview</strong></div>" +
-            "<div class='hmn-score-row'><span>relevance</span><div class='hmn-score-bar'><span style='--score-width:" + Math.round((0.38 + node.activation * 0.62) * 100) + "%;--score-color:var(--blue)'></span></div><strong>" + (0.38 + node.activation * 0.62).toFixed(2) + "</strong></div>" +
-            "<div class='hmn-score-row'><span>recency</span><div class='hmn-score-bar'><span style='--score-width:" + (40 + node.importance * 5) + "%;--score-color:var(--cyan)'></span></div><strong>" + (0.4 + node.importance / 20).toFixed(2) + "</strong></div>" +
-            "<div class='hmn-score-row'><span>usefulness</span><div class='hmn-score-bar'><span style='--score-width:" + Math.min(100, 22 + node.usage / 1.7) + "%;--score-color:var(--gold)'></span></div><strong>" + Math.min(0.99, 0.22 + node.usage / 170).toFixed(2) + "</strong></div>" +
-          "</div>" +
-          "<div class='hmn-inspector-section'>" +
-            "<div class='hmn-section-label'><span>associative neighborhood</span><strong>" + neighbors.length + " edges</strong></div>" +
-            "<div class='hmn-edge-list'>" +
-              (neighbors.length ? neighbors.map(function (item) {
-                return "<div class='hmn-edge-item'><div class='hmn-edge-main'><div class='hmn-edge-name'>" + esc(item.node.title) + "</div><div class='hmn-edge-type'>" + esc(item.edge.kind) + "</div></div><div class='hmn-edge-weight'>" + item.edge.weight.toFixed(2) + "</div></div>";
-              }).join("") : "<div class='hmn-node-copy'>No typed edges yet.</div>") +
-            "</div>" +
-          "</div>";
       }
 
       function renderResults(topHits) {
@@ -2310,16 +1963,17 @@
         });
       }
 
+      var resetting = false;
       function resetView() {
+        // Guarded: the module's own reset button calls back into here.
+        if (constellation && !resetting) {
+          resetting = true;
+          constellation.resetView();
+          resetting = false;
+        }
         state.storeView = "all";
         state.showEdges = true;
         state.showMotion = true;
-        state.zoom = 1;
-        state.panX = 0;
-        state.panY = 0;
-        state.orbitX = 0;
-        state.orbitY = 0;
-        state.focusProgress = 1;
         state.selectedId = defaultSelectedId;
         state.hoveredId = null;
         state.search = "";
@@ -2336,25 +1990,9 @@
         if (archivedToggleBtn) { archivedToggleBtn.setAttribute("aria-pressed", "false"); archivedToggleBtn.textContent = "show archived"; }
         state.edgeTypeFilter = new Set(["similar", "temporal_next", "about", "caused", "supersedes", "lesson_from"]);
         root.querySelectorAll("[data-edge-filter]").forEach(function (button) { button.setAttribute("aria-pressed", "true"); });
+        applyEdgeFilter();
         clearRecallLab();
         runRetrieval("");
-      }
-
-      function nodeAt(clientX, clientY) {
-        var rect = canvas.getBoundingClientRect();
-        var x = clientX - rect.left;
-        var y = clientY - rect.top;
-        var hit = null;
-        visibleNodes().slice().reverse().some(function (node) {
-          var point = pointFor(node);
-          var radius = Math.max(10, node.radius + node.activation * 7);
-          if (Math.hypot(point.x - x, point.y - y) <= radius) {
-            hit = node;
-            return true;
-          }
-          return false;
-        });
-        return hit;
       }
 
       function setStoreView(value) {
@@ -2377,6 +2015,7 @@
         if (panel) panel.hidden = true;
         if (recallInput) recallInput.value = "";
         graphStatus.textContent = realNodeCount ? "warm / indexed" : "loading / engram";
+        if (constellation) constellation.setHighlight(null, null);
         draw();
       }
 
@@ -2398,6 +2037,7 @@
         }
         state.recallLab = { seeds: new Set(Object.keys(seeds)), activated: new Set(Object.keys(activated)) };
         state.pulseStart = performance.now();
+        if (constellation) constellation.setHighlight(Object.keys(seeds), Object.keys(activated));
         draw();
       }
 
@@ -2504,73 +2144,6 @@
         });
       }
 
-      canvas.addEventListener("pointerdown", function (event) {
-        state.dragging = true;
-        // Click-vs-drag: "pressed" is not "dragged". The old pointerup test used
-        // state.dragging (true on EVERY press), so each click was misread as a
-        // drag and node selection was dead code — the inspector never updated
-        // from the graph. Selection now fires unless the pointer really moved.
-        state.dragMoved = false;
-        state.downPointer = { x: event.clientX, y: event.clientY };
-        state.lastPointer = { x: event.clientX, y: event.clientY };
-        canvas.setPointerCapture(event.pointerId);
-      });
-
-      canvas.addEventListener("pointermove", function (event) {
-        if (state.dragging && state.lastPointer) {
-          if (state.downPointer && Math.hypot(event.clientX - state.downPointer.x, event.clientY - state.downPointer.y) > 4) {
-            state.dragMoved = true;
-          }
-          state.panX += event.clientX - state.lastPointer.x;
-          state.panY += event.clientY - state.lastPointer.y;
-          // The graph remains pannable, while the brain itself gently orbits in
-          // response to the same gesture. Small angles preserve readability and
-          // make horizontal/vertical dragging feel like moving a hologram.
-          state.orbitX = clamp(state.orbitX + (event.clientX - state.lastPointer.x) * 0.004, -0.7, 0.7);
-          state.orbitY = clamp(state.orbitY + (event.clientY - state.lastPointer.y) * 0.003, -0.45, 0.45);
-          state.lastPointer = { x: event.clientX, y: event.clientY };
-          draw();
-          return;
-        }
-        var hit = nodeAt(event.clientX, event.clientY);
-        state.hoveredId = hit ? hit.id : null;
-        canvas.style.cursor = hit ? "pointer" : "grab";
-        draw();
-      });
-
-      canvas.addEventListener("pointerup", function (event) {
-        var wasDragging = state.dragMoved === true;
-        state.dragging = false;
-        state.dragMoved = false;
-        state.downPointer = null;
-        state.lastPointer = null;
-        if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-        if (!wasDragging) {
-          var hit = nodeAt(event.clientX, event.clientY);
-          if (hit) {
-            state.selectedId = hit.id;
-            state.focusStarted = performance.now();
-            state.focusProgress = 0;
-            renderInspector(hit);
-            draw();
-          }
-        }
-      });
-
-      canvas.addEventListener("pointerleave", function () {
-        if (!state.dragging) {
-          state.hoveredId = null;
-          draw();
-        }
-      });
-
-      canvas.addEventListener("wheel", function (event) {
-        event.preventDefault();
-        var factor = event.deltaY > 0 ? 0.91 : 1.1;
-        state.zoom = clamp(state.zoom * factor, 0.7, 2.2);
-        draw();
-      }, { passive: false });
-
       root.querySelectorAll("[data-store-view]").forEach(function (button) {
         button.addEventListener("click", function () {
           setStoreView(button.getAttribute("data-store-view"));
@@ -2587,6 +2160,7 @@
           var type = button.getAttribute("data-edge-filter");
           if (state.edgeTypeFilter.has(type)) { state.edgeTypeFilter.delete(type); button.setAttribute("aria-pressed", "false"); }
           else { state.edgeTypeFilter.add(type); button.setAttribute("aria-pressed", "true"); }
+          applyEdgeFilter();
           draw();
         });
       });
@@ -2615,6 +2189,7 @@
         state.showEdges = !state.showEdges;
         button.currentTarget.setAttribute("aria-pressed", String(state.showEdges));
         button.currentTarget.textContent = state.showEdges ? "edges on" : "edges off";
+        applyEdgeFilter();
         draw();
       });
 
@@ -2677,6 +2252,7 @@
       });
 
       window.addEventListener("resize", resizeCanvas);
+      mountConstellation();
       renderInspector(null);
       resizeCanvas();
       boot().catch(function (error) {

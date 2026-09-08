@@ -213,6 +213,18 @@ async function holoJs(): Promise<string> {
   return holoJsCache;
 }
 
+// The ONE constellation renderer. Both memory graphs — the dashboard card
+// (holo.js) and the observatory — mount this same module, so they are
+// physically incapable of drifting apart. Shipped as a plain .js asset for the
+// same escaping reasons as holo.js above.
+const CONSTELLATION_JS_PATH = fileURLToPath(new URL("./constellation.js", import.meta.url));
+let constellationJsCache: string | null = null;
+
+async function constellationJs(): Promise<string> {
+  constellationJsCache ??= await fs.readFile(CONSTELLATION_JS_PATH, "utf8");
+  return constellationJsCache;
+}
+
 // GET /api/engram/metrics wraps src/metrics/recall-metrics.ts#summarizeRecallMetrics —
 // a module owned elsewhere (dashboard-design-v2.md §C). The field list is declared
 // locally (the exact contract, nothing beyond it) rather than imported, and the
@@ -532,6 +544,11 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
       if (request.method === "GET" && url.pathname === "/holo.js") {
         response.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store" });
         response.end(await holoJs());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/constellation.js") {
+        response.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store" });
+        response.end(await constellationJs());
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/health") { json(response, 200, { ok: true, timestamp: new Date().toISOString() }); return; }
