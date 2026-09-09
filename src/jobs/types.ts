@@ -6,6 +6,12 @@ export type ApplicationStatus =
   | "ready-for-review"
   | "filled"
   | "submitted"
+  /**
+   * The submit control was clicked but no confirmation was observed. The application may
+   * or may not have reached the employer, so this is deliberately NOT `failed`: a retry
+   * could submit a second time. Terminal until a human checks and resolves it.
+   */
+  | "submission-uncertain"
   | "rejected"
   | "failed";
 

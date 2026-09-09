@@ -3,6 +3,11 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ApprovalItem } from "../types.ts";
 
+/** How long a mutation waits for another process's lock before giving up. */
+const LOCK_WAIT_MS = 10_000;
+/** A lock older than this is assumed to belong to a process that died holding it. */
+const STALE_LOCK_MS = 60_000;
+
 export class ApprovalStore {
   private items: ApprovalItem[] = [];
   private loaded = false;
@@ -52,14 +57,54 @@ export class ApprovalStore {
     this.lastLoadedMtimeMs = (await fs.stat(this.filePath)).mtimeMs;
   }
 
+  /**
+   * Cross-process exclusion around the approval file.
+   *
+   * The in-process chain below only serialises callers inside ONE Node process, but the
+   * REPL/CLI, the dashboard and the scheduler are separate processes sharing this file
+   * (see `refreshIfChanged`). Without this, two of them could both read an item as
+   * `approved`, both write `executing`, and both execute it — for a job application that
+   * means submitting to a real employer twice. `wx` gives us the atomic create-or-fail
+   * the file system already guarantees; the read-modify-write happens inside it.
+   *
+   * A lock whose owning process died is worse than no lock, so a lock older than
+   * STALE_LOCK_MS is broken deliberately rather than blocking every future mutation.
+   */
+  private async withFileLock<T>(operation: () => Promise<T>): Promise<T> {
+    const lockPath = `${this.filePath}.lock`;
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    let handle: import("node:fs/promises").FileHandle | undefined;
+    for (;;) {
+      try { handle = await fs.open(lockPath, "wx", 0o600); break; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const age = await fs.stat(lockPath).then((s) => Date.now() - s.mtimeMs).catch(() => 0);
+        if (age > STALE_LOCK_MS) { await fs.rm(lockPath, { force: true }).catch(() => undefined); continue; }
+        if (Date.now() > deadline) throw new Error(`Timed out waiting for the approval lock at ${lockPath}`);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    try {
+      await handle.writeFile(`${process.pid}`).catch(() => undefined);
+      return await operation();
+    } finally {
+      await handle.close().catch(() => undefined);
+      await fs.rm(lockPath, { force: true }).catch(() => undefined);
+    }
+  }
+
   private async mutate<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.mutationChain;
     let release!: () => void;
     this.mutationChain = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      await this.refreshIfChanged();
-      return await operation();
+      // The refresh must happen INSIDE the file lock: reading before we hold it would
+      // re-introduce exactly the stale-read race the lock exists to close.
+      return await this.withFileLock(async () => {
+        await this.refreshIfChanged();
+        return await operation();
+      });
     } finally { release(); }
   }
 

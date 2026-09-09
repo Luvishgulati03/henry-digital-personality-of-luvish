@@ -10,7 +10,7 @@ import type { HenryMemory } from "../memory/engram.ts";
 import type { ProviderRunner } from "../providers/runner.ts";
 import { assertOutboundExecutionClaim } from "../guardrails.ts";
 import { JobApplicationStore } from "./store.ts";
-import { PlaywrightJobBrowser, type JobBrowser } from "./browser.ts";
+import { PlaywrightJobBrowser, SubmissionOutcomeUnknownError, type BrowserSubmitResult, type JobBrowser } from "./browser.ts";
 import { renderResumePdf, type ResumeRenderer } from "./resume.ts";
 import { applicationContentHash, runApplicationTeam } from "./team.ts";
 import { numberGuard } from "./tailor.ts";
@@ -289,11 +289,31 @@ export class JobApplicationService {
     if (!draft) throw new Error(`Job application not found: ${applicationId}`);
     await this.assertReviewed(draft);
     if (draft.status === "submitted") throw new Error("Application was already submitted; refusing duplicate");
+    // A previous attempt clicked submit and never saw a confirmation. Retrying could be the
+    // second application this employer receives, so only a human who has checked can clear it.
+    if (draft.status === "submission-uncertain") {
+      throw new Error(`Application ${applicationId} was clicked through but never confirmed; check with the employer and resolve it by hand before any retry`);
+    }
     if (draft.missingFacts.length) throw new Error("Application has unresolved facts; do not submit");
     if (item.payload.reviewedContentHash !== draft.reviewedContentHash) throw new Error("Application content changed after approval");
     if (item.payload.descriptionHash !== draft.posting.descriptionHash) throw new Error("Job description changed after approval; prepare the application again");
     assertNotLinkedInAutomation(draft.posting.url, "submission");
-    const result = await this.browser.submit(draft.posting.url, draft);
+    let result: BrowserSubmitResult;
+    try {
+      result = await this.browser.submit(draft.posting.url, draft);
+    } catch (error) {
+      // Only a POST-click failure is uncertain. Every pre-click refusal leaves the
+      // application untouched and stays an ordinary error the operator can retry.
+      if (error instanceof SubmissionOutcomeUnknownError) {
+        await this.store.update(applicationId, { status: "submission-uncertain" }).catch(() => undefined);
+        await this.activity.record(
+          "job.submission_uncertain",
+          `Clicked submit for ${draft.posting.title} at ${draft.posting.company} but saw no confirmation — verify by hand`,
+          { applicationId, url: draft.posting.url },
+        );
+      }
+      throw error;
+    }
     await this.store.update(applicationId, { status: "submitted", submittedAt: result.submittedAt, submissionUrl: result.url });
     await this.memory.remember(
       `Submitted job application ${applicationId} for ${draft.posting.title} at ${draft.posting.company} on ${result.submittedAt}. Confirmation: ${result.confirmationText.slice(0, 500)}`,

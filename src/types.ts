@@ -31,6 +31,7 @@ export type ActivityKind =
   | "job.prepared"
   | "job.filled"
   | "job.submitted"
+  | "job.submission_uncertain"
   | "resume.generated"
   | "provider.switched"
   | "task.started"

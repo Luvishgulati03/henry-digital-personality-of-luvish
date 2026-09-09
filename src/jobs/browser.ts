@@ -16,6 +16,19 @@ export interface BrowserFillResult {
   verifiedValues?: Record<string, string>;
 }
 
+/**
+ * Thrown when the submit control WAS clicked but no confirmation could be observed.
+ * Distinct from every pre-click refusal, because the application may already be with the
+ * employer: the caller must record uncertainty and refuse to retry, not mark it failed.
+ */
+export class SubmissionOutcomeUnknownError extends Error {
+  readonly clicked = true;
+  constructor() {
+    super("Clicked submit but saw no confirmation — the application may or may not have been received; verify by hand before retrying");
+    this.name = "SubmissionOutcomeUnknownError";
+  }
+}
+
 export interface BrowserSubmitResult {
   url: string;
   submittedAt: string;
@@ -310,7 +323,10 @@ export class PlaywrightJobBrowser implements JobBrowser {
       await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
       // Post-click teardown must not mark a REAL submission as failed (audit B-M10).
       const confirmationText = (await page.locator("body").innerText().catch(() => "")).slice(0, 2_000);
-      if (!clearSubmissionConfirmation(beforeSubmitText, confirmationText)) throw new Error("No clear application confirmation was found after clicking submit");
+      // The click already happened, so "no confirmation" is NOT the same failure as the
+      // pre-click refusals above: the employer may well have received this application.
+      // Callers must be able to tell the two apart, or a retry double-submits.
+      if (!clearSubmissionConfirmation(beforeSubmitText, confirmationText)) throw new SubmissionOutcomeUnknownError();
       const submittedAt = new Date().toISOString();
       await this.activity.record("job.submitted", `Submitted application for ${draft.posting.title}`, { applicationId: draft.id, url: page.url() });
       return { url: page.url(), submittedAt, confirmationText };

@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { chromium, type Page } from "playwright";
-import { PlaywrightJobBrowser } from "../src/jobs/browser.ts";
+import { PlaywrightJobBrowser, SubmissionOutcomeUnknownError } from "../src/jobs/browser.ts";
 import { ActivityLog } from "../src/activity.ts";
 import { loadConfig } from "../src/config.ts";
 import type { JobApplicationDraft, JobQuestion } from "../src/jobs/types.ts";
@@ -152,7 +152,7 @@ test("submit does not report success without a clear confirmation", async () => 
     <label for="name">Name*</label><input id="name">
     <button>Submit application</button></form>`, async (henry, _root, state) => {
     const application = draft([{ ...q("name", "Name*"), required: true }], { name: "Luvish" });
-    await assert.rejects(henry.submit(url, application), /No clear application confirmation/);
+    await assert.rejects(henry.submit(url, application), SubmissionOutcomeUnknownError, "clicked-but-unconfirmed must surface as an UNKNOWN outcome, never as success");
     assert.equal(state().submits, "1");
   });
 });
@@ -162,7 +162,7 @@ test("submit rejects negative confirmation text", async () => {
     <main><label for="name">Name*</label><input id="name"></main>
     <button>Submit application</button></form>`, async (henry, _root, state) => {
     const application = draft([{ ...q("name", "Name*"), required: true }], { name: "Luvish" });
-    await assert.rejects(henry.submit(url, application), /No clear application confirmation/);
+    await assert.rejects(henry.submit(url, application), SubmissionOutcomeUnknownError, "clicked-but-unconfirmed must surface as an UNKNOWN outcome, never as success");
     assert.equal(state().submits, "1");
   });
 });
@@ -173,7 +173,7 @@ test("submit ignores preexisting footer confirmation copy unless a new positive 
     <footer>Thank you for applying.</footer>
     <button>Submit application</button></form>`, async (henry, _root, state) => {
     const application = draft([{ ...q("name", "Name*"), required: true }], { name: "Luvish" });
-    await assert.rejects(henry.submit(url, application), /No clear application confirmation/);
+    await assert.rejects(henry.submit(url, application), SubmissionOutcomeUnknownError, "clicked-but-unconfirmed must surface as an UNKNOWN outcome, never as success");
     assert.equal(state().submits, "1");
   });
 });
@@ -221,5 +221,39 @@ test("submit returns success only after a clear confirmation", async () => {
     const result = await henry.submit(url, application);
     assert.match(result.confirmationText, /Application submitted/);
     assert.equal(state().submits, "1");
+  });
+});
+
+/**
+ * A click that produced no confirmation is NOT the same failure as the refusals that
+ * happen before the click. The application may already be with the employer, so the
+ * error carries that fact — the service records uncertainty and refuses to retry rather
+ * than marking it failed and inviting a second submission.
+ */
+test("a submit click with no confirmation reports an UNKNOWN outcome, not a plain failure", async () => {
+  await fixture(`<h1>Engineer</h1><form><button type="button">Submit application</button></form>`, async (henry) => {
+    const applied = draft([], {});
+    await assert.rejects(
+      () => henry.submit(url, applied),
+      (error: unknown) => {
+        assert.ok(error instanceof SubmissionOutcomeUnknownError, `post-click failure must be distinguishable, got ${String(error)}`);
+        assert.equal((error as SubmissionOutcomeUnknownError).clicked, true, "the caller has to know the click happened");
+        assert.match(String((error as Error).message), /may or may not|verify by hand/i);
+        return true;
+      },
+    );
+  });
+});
+
+test("an ambiguous submit control is refused BEFORE clicking, and stays an ordinary error", async () => {
+  await fixture(`<h1>Engineer</h1><form><button type="button">Submit</button><button type="button">Submit application</button></form>`, async (henry) => {
+    await assert.rejects(
+      () => henry.submit(url, draft([], {})),
+      (error: unknown) => {
+        assert.ok(!(error instanceof SubmissionOutcomeUnknownError), "nothing was clicked, so this must NOT be an unknown outcome");
+        assert.match(String((error as Error).message), /exactly one final application button/i);
+        return true;
+      },
+    );
   });
 });
