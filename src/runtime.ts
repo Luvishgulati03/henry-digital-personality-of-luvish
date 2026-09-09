@@ -170,7 +170,15 @@ export class HenryRuntime {
             readOnly: !this.config.telegramOperatorMode,
             role: this.config.telegramOperatorMode ? "telegram-operator" : "telegram-bridge",
           });
-          if (!turn.delegated) return turn.completion.then((result) => result.response);
+          if (!turn.delegated) {
+            return turn.completion.then((result) => {
+              // Out of quota is NOT an answer. Surfaced as an ordinary empty response it made
+              // the bridge fall through to "say it again" and discard the turn; `deferrable`
+              // lets the bridge keep the message and resume it when capacity returns.
+              if (result.limited) throw Object.assign(new Error(result.error ?? "every provider is out of quota"), { deferrable: true });
+              return result.response;
+            });
+          }
           // The bridge sends this acknowledgement through its normal reply path.
           // The finished report is a second DM, so the inbound queue is free for
           // Luvish's next message while the research worker is still running.

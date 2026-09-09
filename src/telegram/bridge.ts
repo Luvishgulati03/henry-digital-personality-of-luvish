@@ -36,6 +36,12 @@ export const BRIDGE_STALE_MS = 24 * 60 * 60 * 1000;
 /** Telegram clears a typing indicator after ~5s, so refresh a little faster than that. */
 const TYPING_REFRESH_MS = 4_000;
 const HANDLED_KEY = "bridge:lastUpdateId";
+/**
+ * The one turn that was interrupted by a provider running out of quota. Persisted (not held
+ * in memory) so it survives the restart that a quota wall often prompts, and singular on
+ * purpose: keeping a backlog of stale asks would be worse than keeping the last one.
+ */
+const DEFERRED_KEY = "bridge:deferredTurn";
 
 const TERMINAL_ONLY_REPLY = [
   "That one belongs in the terminal session, not here 🙂",
@@ -121,6 +127,10 @@ export interface BridgeStats {
   replies: number;
   /** Answered from local state with no provider call — see the reflex lane below. */
   reflex: number;
+  /** Turns picked back up after a quota wall. */
+  resumed: number;
+  /** Turns parked because every provider was out of quota. */
+  deferredByLimit: number;
   deferred: number;
   dropped: number;
   stale: number;
@@ -215,7 +225,7 @@ export class TelegramBridge implements PumpConsumer {
   private readonly queue: Pending[] = [];
   private draining?: Promise<void>;
   private droppedSinceLastReply = 0;
-  private counters = { replies: 0, deferred: 0, dropped: 0, stale: 0, failed: 0, reflex: 0 };
+  private counters = { replies: 0, deferred: 0, dropped: 0, stale: 0, failed: 0, reflex: 0, resumed: 0, deferredByLimit: 0 };
   /** Reflex answers run outside the sequential queue; `settled()` still has to wait for them. */
   private readonly reflexInFlight = new Set<Promise<void>>();
   private thinking = false;
@@ -277,6 +287,10 @@ export class TelegramBridge implements PumpConsumer {
       // REFLEX FIRST, and deliberately outside the queue: a question about local state
       // must not wait behind a brain call that may run for a minute. This is what keeps
       // Henry answerable while he is busy.
+      // RESUME FIRST. A turn parked by a quota wall goes back at the FRONT of the queue
+      // before this new message is queued behind it, so the work Luvish already asked for
+      // finishes before the thing he just said — which is the order he asked them in.
+      this.resumeDeferred();
       const reflex = this.deps.snapshot ? reflexKind(text) : undefined;
       if (reflex) {
         const pending = this.answerReflex(reflex).catch(() => undefined).finally(() => { this.reflexInFlight.delete(pending); });
@@ -309,6 +323,31 @@ export class TelegramBridge implements PumpConsumer {
       this.counters.failed += 1;
       await this.activity.record("run.failed", "Telegram reflex answer failed", { telegram: true, error: String(error) }).catch(() => undefined);
     }
+  }
+
+  /**
+   * Puts a quota-parked turn back at the FRONT of the queue, once. Cleared as it is taken,
+   * so a turn can be parked again if quota is still gone but can never be replayed twice.
+   */
+  private resumeDeferred(): void {
+    const raw = this.store.getMeta(DEFERRED_KEY);
+    if (!raw) return;
+    this.store.deleteMeta(DEFERRED_KEY);
+    try {
+      const parsed = JSON.parse(raw) as Pending;
+      if (parsed && typeof parsed.text === "string" && parsed.text.trim()) {
+        this.queue.unshift(parsed);
+        this.counters.resumed += 1;
+      }
+    } catch { /* an unreadable row is dropped rather than poisoning every future poll */ }
+  }
+
+  /** Parks the turn for the next message to pick up, and says so instead of pretending it failed. */
+  private async deferTurn(item: Pending, reason: string): Promise<void> {
+    this.counters.deferredByLimit += 1;
+    try { this.store.setMeta(DEFERRED_KEY, JSON.stringify(item)); } catch { /* best effort */ }
+    await this.activity.record("run.failed", "Telegram turn parked — provider out of quota", { telegram: true, reason }).catch(() => undefined);
+    await this.reply(`I'm out of provider quota right now, so I haven't answered that yet.\n\nI've kept your message — send me anything when quota is back and I'll finish this one first.`);
   }
 
   private enqueue(item: Pending): void {
@@ -374,6 +413,15 @@ export class TelegramBridge implements PumpConsumer {
       // so long reports are chunked safely instead of Telegram-truncated.
       answer = (await this.deps.think(item.text, (text) => this.reply(text))).trim();
     } catch (error) {
+      // Out of quota is not a failed answer — it is an unanswered question. Park it and say
+      // so, rather than burning the turn with "say it again": the message Luvish already
+      // sent is exactly the thing he wants finished when capacity comes back.
+      if (error && typeof error === "object" && (error as { deferrable?: boolean }).deferrable === true) {
+        this.thinking = false;
+        stopTyping();
+        await this.deferTurn(item, String((error as Error).message ?? "provider limit"));
+        return;
+      }
       this.counters.failed += 1;
       await this.activity.record("run.failed", "Telegram bridge brain call failed", { telegram: true, error: String(error) }).catch(() => undefined);
     } finally {

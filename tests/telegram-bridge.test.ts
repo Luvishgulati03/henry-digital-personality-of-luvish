@@ -481,3 +481,68 @@ test("bridge: anything needing judgement still goes to the brain", async () => {
   assert.equal(h.asked.length, 1, "the reflex patterns must stay narrow — this one needs a brain");
   assert.equal(h.bridge.stats().reflex, 0);
 });
+
+/**
+ * THE QUOTA WALL (Luvish, live 2026-09-09: Codex ran out mid-conversation).
+ *
+ * Running out of quota is not a failed answer, it is an UNANSWERED QUESTION. It used to
+ * surface as an ordinary empty response, so the bridge replied "say it again" and dropped
+ * the turn — the one thing Luvish had actually asked for was the thing that got lost.
+ */
+test("bridge: a turn killed by a quota wall is kept, and resumes BEFORE the next message", async () => {
+  const store = memoryStore();
+  const config = tempConfig();
+  const activity = await activityFor(config);
+  const sent: string[] = [];
+  const asked: string[] = [];
+  let outOfQuota = true;
+
+  const bridge = new TelegramBridge(config, activity, store, {
+    think: async (prompt) => {
+      asked.push(prompt);
+      if (outOfQuota) throw Object.assign(new Error("every provider is out of quota"), { deferrable: true });
+      return `answered: ${prompt}`;
+    },
+    send: async (_config, text) => { sent.push(text); return true; },
+    fetchImpl: (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch,
+  });
+
+  await bridge.consume([dm(1, "summarise the pricing research")]);
+  await bridge.settled();
+  assert.equal(bridge.stats().deferredByLimit, 1);
+  assert.match(sent[0], /out of provider quota/i, "he should be told plainly, not fobbed off");
+  assert.ok(!/say it again/i.test(sent[0]), "the turn was kept, so do not ask him to retype it");
+  assert.ok(store.map.get("bridge:deferredTurn"), "the parked turn must survive a restart");
+
+  // Quota returns, and the next message arrives.
+  outOfQuota = false;
+  await bridge.consume([dm(2, "also what's the weather")]);
+  await bridge.settled();
+
+  assert.deepEqual(
+    asked,
+    ["summarise the pricing research", "summarise the pricing research", "also what's the weather"],
+    "the parked turn is retried FIRST, then the new message — the order he asked them in",
+  );
+  assert.equal(bridge.stats().resumed, 1);
+  assert.ok(!store.map.get("bridge:deferredTurn"), "and it is cleared once taken, never replayed twice");
+});
+
+test("bridge: an ordinary brain failure is NOT parked — only a quota wall is", async () => {
+  const store = memoryStore();
+  const config = tempConfig();
+  const activity = await activityFor(config);
+  const sent: string[] = [];
+  const bridge = new TelegramBridge(config, activity, store, {
+    think: async () => { throw new Error("the model broke"); },
+    send: async (_config, text) => { sent.push(text); return true; },
+    fetchImpl: (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch,
+  });
+
+  await bridge.consume([dm(1, "do a thing")]);
+  await bridge.settled();
+  assert.equal(bridge.stats().deferredByLimit, 0, "a genuine error must not be queued up for replay");
+  assert.equal(bridge.stats().failed, 1);
+  assert.ok(!store.map.get("bridge:deferredTurn"));
+  assert.match(sent[0], /say it again/i);
+});

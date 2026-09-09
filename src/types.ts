@@ -64,6 +64,13 @@ export interface RunResult {
   firstEventMs?: number | null;
   /** Latency §11.5 round 2: ms from spawn to the first event whose parsed payload carried text; null if none arrived before completion. Absent on synthetic results that never spawned a process. */
   firstTextMs?: number | null;
+  /**
+   * The run produced nothing because every candidate provider was out of quota — NOT because
+   * the work failed. Callers must be able to tell those apart: a limited run is worth keeping
+   * and resuming when capacity returns, while a broken one is not. Without this the refusal
+   * was indistinguishable from an empty answer, and a Telegram turn was silently discarded.
+   */
+  limited?: boolean;
 }
 
 export interface ProviderEvent {

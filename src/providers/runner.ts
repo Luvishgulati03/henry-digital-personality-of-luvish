@@ -578,7 +578,7 @@ export class ProviderRunner {
       const message = this.limitedMessage(state, sequence, { pinned: isPinned, policy });
       const refused: RunResult = {
         runId: randomUUID(), provider: sequence[0], response: "", exitCode: null, durationMs: 0,
-        error: message, events: [],
+        error: message, events: [], limited: true,
       };
       await this.activity.record(
         "run.failed",
@@ -781,9 +781,12 @@ export class ProviderRunner {
           continue;
         }
         // Nothing left to try: say who is down and when the earliest one returns.
+        // `limited` marks this as "out of quota", not "the work broke", so a caller can
+        // keep the task and resume it instead of discarding it as a failed answer.
         last = {
           ...result,
           error: this.limitedMessage(ledger.state(at), sequence, { pinned: isPinned, policy, lastError: result.error }),
+          limited: true,
         };
         break;
       }
