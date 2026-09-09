@@ -23,13 +23,6 @@ resume.md
 /knowledge/
 data/meetings/
 vendor/
-!vendor/
-vendor/*
-!vendor/engram-memory/
-!vendor/engram-memory/**
-vendor/engram-memory/node_modules/
-!vendor/engram-memory/dist/
-!vendor/engram-memory/dist/**
 data/metrics/
 data/job-tracker.md
 data/job-tracker.json
