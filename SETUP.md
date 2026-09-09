@@ -58,6 +58,57 @@ dataless file the syscall blocks forever — the build does not fail, it
 hangs, with no error to search for. A previous copy of this repo died
 exactly this way.
 
+### Step 0b — Which repo is this? (public framework, or somebody's private mirror)
+
+This matters more than it sounds, and it changes several later steps.
+
+```bash
+test -f soul.md && echo "PRIVATE MIRROR — a configured Henry" || echo "PUBLIC FRAMEWORK — a fresh Henry"
+```
+
+**Public framework** (`henry-digital-personality-of-luvish`) — the normal case.
+Nothing personal is in it. Continue straight through the steps below.
+
+**Private mirror** (`henry-private`) — a full backup of somebody's *running*
+Henry: their `soul.md`, `personality.md`, `context.md`, their memories in
+`data/engram.db`, their résumé, job applications, mail drafts and standup
+history. It exists so its owner can restore their own machine.
+
+If you were handed this to set up Henry **for a different person**, two things
+are true at once and you must act on both:
+
+1. **You are holding someone else's personal data.** Say so to your user
+   plainly, and do not read, summarise, or feed those files into any model
+   beyond what setup needs. If they only wanted the *software*, the public
+   framework repo plus [`BOOTSTRAP.md`](BOOTSTRAP.md) is the right starting
+   point and this one is not.
+2. **`cp soul.example.md soul.md` in Step 4 will silently do nothing**, because
+   those files already exist. Skip the reset below and your user's Henry boots
+   up believing it is the original owner — calling them by the wrong name,
+   recalling a stranger's memories, and carrying rails written for someone
+   else's life.
+
+**The reset — run this before Step 1 when the mirror is for a NEW person:**
+
+```bash
+# Identity: replace, never inherit.
+rm -f soul.md personality.md context.md
+cp soul.example.md soul.md
+cp personality.example.md personality.md
+
+# The previous owner's memory, work and history.
+rm -rf data memory knowledge/raw knowledge/cards
+rm -f resume.md application-profile.md
+```
+
+**Verify nothing personal survived:** `grep -ril "<previous owner's name>" . --exclude-dir=node_modules --exclude-dir=.git | head` should come back empty.
+
+Then continue from Step 1 as a fresh install.
+
+**Restoring your OWN machine from the mirror instead?** Keep every file, skip
+Step 4, and rebuild only what the mirror deliberately leaves out — see the
+"restoring from a private mirror" note in Step 8.
+
 ### Step 1 — Prerequisites
 
 ```bash
@@ -306,6 +357,26 @@ set up what your user asks for.
 | **Gmail** | Google Cloud OAuth *desktop* credentials → `data/gmail-credentials.json` | Inbox reading and draft generation. Sending stays approval-gated. |
 | **Jobs pipeline** | A real `resume.md` and `application-profile.md` (both gitignored) | Job scout, tailored resume + cover letter, application tracking. |
 | **Scheduled work** | `henry schedule daemon`, or `henry schedule install` to generate launchd/cron files | Nightly memory consolidation, inbox polling, digests. Review the generated files before installing them. |
+
+**Restoring your own machine from a private mirror.** The mirror carries your
+soul, persona, memories and corpus, but four things are excluded on purpose and
+must be rebuilt by hand. Nothing warns you if you forget — Henry simply comes up
+quieter than it should:
+
+| Missing | Why it is excluded | Rebuild with |
+| --- | --- | --- |
+| `.env` | Secrets never go to GitHub, private repo or not | Recreate it (Step 3); the vault key regenerates but old encrypted values will not open without the original |
+| `data/knowledge.db` | Exceeds GitHub's 100MB limit | `henry knowledge index` — rebuilds the index from `knowledge/raw`, which IS in the mirror |
+| `data/gmail-credentials.json`, `data/gmail-token.json` | OAuth secrets | Re-download the desktop credentials and re-authorise (Step 8) |
+| `data/browser-profile/` | Live logged-in browser sessions | `henry jobs login` to sign in again |
+
+Your **memories survive** — `data/engram.db` is in the mirror and is checkpointed
+before every sync, so it restores intact. It is only the knowledge *index* that
+has to be rebuilt, not the knowledge itself.
+
+**Verify a restore:** `henry memory search "something you know you told it"`
+should return real hits, and `henry knowledge stats` should show a non-zero index
+after re-running the indexer.
 
 ### Step 9 — Hand back
 
