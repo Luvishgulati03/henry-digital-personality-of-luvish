@@ -41,7 +41,7 @@ flowchart LR
 | --- | --- |
 | 🧠 **Remembers** | Hybrid memory (semantic + lexical + activation graph), nightly consolidation, per-person style profiles |
 | 📚 **Learns your corpus** | Index courses, notes, and books you own into a cited, coverage-labeled RAG ([guide](docs/build-your-own-knowledge-rag.md) · [books](build-your-pm-brain.md)) |
-| 💼 **Runs your job hunt** | Morning scout (LinkedIn + X shortlist), one-page tailored resume + cover letter per JD, inbox watch, application tracker + Telegram digests |
+| 💼 **Runs your job hunt** | Morning scout (LinkedIn + X shortlist), one-page tailored resume + cover letter per JD, inbox watch, application tracker + Telegram digests. It can also fill a real application form in a browser and submit it — only for an application you approved, and filling and submitting are two separate approvals |
 | 👥 **Runs team standups** | Telegram group bot: morning plans + evening delivered-vs-planned, style-matched nudges, summaries to your DM |
 | 📋 **Acts as a PM** | `pm on`: PMBOK-grounded decisions with explicit rationale, update processing, gated work assignment |
 | 🔒 **Never freelances outbound** | Email/comments/applications are staged; `approve` ≠ `send`; scope-guarded Telegram surfaces |
