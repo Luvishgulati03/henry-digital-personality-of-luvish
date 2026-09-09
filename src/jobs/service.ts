@@ -10,7 +10,7 @@ import type { HenryMemory } from "../memory/engram.ts";
 import type { ProviderRunner } from "../providers/runner.ts";
 import { assertOutboundExecutionClaim } from "../guardrails.ts";
 import { JobApplicationStore } from "./store.ts";
-import { PlaywrightJobBrowser, SubmissionOutcomeUnknownError, type BrowserSubmitResult, type JobBrowser } from "./browser.ts";
+import { FillIncompleteError, PlaywrightJobBrowser, SubmissionOutcomeUnknownError, type BrowserSubmitResult, type JobBrowser } from "./browser.ts";
 import { renderResumePdf, type ResumeRenderer } from "./resume.ts";
 import { applicationContentHash, runApplicationTeam } from "./team.ts";
 import { numberGuard } from "./tailor.ts";
@@ -26,6 +26,15 @@ interface GeneratedApplication {
 }
 
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }
+
+/**
+ * How many times a submission will re-fill a form that left a required field empty while
+ * Henry HAD the answer — the signature of an ATS that hydrates after the first pass.
+ * Small on purpose: if three fresh page loads cannot place an answer we hold, the page is
+ * not what we think it is, and that is the operator's call rather than a tighter loop.
+ */
+const SUBMIT_FILL_ATTEMPTS = 3;
+const SUBMIT_RETRY_BACKOFF_MS = 1_500;
 
 function reviewedContent(draft: Pick<JobApplicationDraft, "posting" | "answers" | "coverLetter" | "resumePdfPath" | "resumeSha256">): unknown {
   return { url: draft.posting.url, posting: draft.posting.descriptionHash, answers: draft.answers, coverLetter: draft.coverLetter, resume: draft.resumePdfPath, sha256: draft.resumeSha256 };
@@ -298,21 +307,38 @@ export class JobApplicationService {
     if (item.payload.reviewedContentHash !== draft.reviewedContentHash) throw new Error("Application content changed after approval");
     if (item.payload.descriptionHash !== draft.posting.descriptionHash) throw new Error("Job description changed after approval; prepare the application again");
     assertNotLinkedInAutomation(draft.posting.url, "submission");
-    let result: BrowserSubmitResult;
-    try {
-      result = await this.browser.submit(draft.posting.url, draft);
-    } catch (error) {
-      // Only a POST-click failure is uncertain. Every pre-click refusal leaves the
-      // application untouched and stays an ordinary error the operator can retry.
-      if (error instanceof SubmissionOutcomeUnknownError) {
-        await this.store.update(applicationId, { status: "submission-uncertain" }).catch(() => undefined);
+    /**
+     * A form that hydrates late leaves a required field unfilled on the first pass and
+     * fills perfectly on the next, so Henry retries that itself rather than handing the
+     * operator a chore. It retries ONLY an explicitly recognised pre-click failure whose
+     * answers it already holds. Everything else — a missing fact, a page shaped wrong, an
+     * unknown error, and above all anything after the click — leaves the loop immediately.
+     * Defaulting to "do not retry" is the whole safety property here: an error this code
+     * does not recognise might have happened AFTER the submit button was pressed.
+     */
+    let result: BrowserSubmitResult | undefined;
+    for (let attempt = 1; !result; attempt += 1) {
+      try {
+        result = await this.browser.submit(draft.posting.url, draft);
+      } catch (error) {
+        if (error instanceof SubmissionOutcomeUnknownError) {
+          await this.store.update(applicationId, { status: "submission-uncertain" }).catch(() => undefined);
+          await this.activity.record(
+            "job.submission_uncertain",
+            `Clicked submit for ${draft.posting.title} at ${draft.posting.company} but saw no confirmation — verify by hand`,
+            { applicationId, url: draft.posting.url },
+          );
+          throw error;
+        }
+        const worthRetrying = error instanceof FillIncompleteError && error.retryable && attempt < SUBMIT_FILL_ATTEMPTS;
+        if (!worthRetrying) throw error;
         await this.activity.record(
-          "job.submission_uncertain",
-          `Clicked submit for ${draft.posting.title} at ${draft.posting.company} but saw no confirmation — verify by hand`,
-          { applicationId, url: draft.posting.url },
+          "job.fill_retry",
+          `Refilling ${draft.posting.title} at ${draft.posting.company} (attempt ${attempt + 1}/${SUBMIT_FILL_ATTEMPTS}): ${error.fields.join(", ")}`,
+          { applicationId, url: draft.posting.url, attempt: attempt + 1, fields: error.fields },
         );
+        await new Promise((resolve) => setTimeout(resolve, attempt * SUBMIT_RETRY_BACKOFF_MS));
       }
-      throw error;
     }
     await this.store.update(applicationId, { status: "submitted", submittedAt: result.submittedAt, submissionUrl: result.url });
     await this.memory.remember(

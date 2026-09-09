@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { chromium, type Page } from "playwright";
-import { PlaywrightJobBrowser, SubmissionOutcomeUnknownError } from "../src/jobs/browser.ts";
+import { FillIncompleteError, PlaywrightJobBrowser, SiteShapeError, SubmissionOutcomeUnknownError } from "../src/jobs/browser.ts";
 import { ActivityLog } from "../src/activity.ts";
 import { loadConfig } from "../src/config.ts";
 import type { JobApplicationDraft, JobQuestion } from "../src/jobs/types.ts";
@@ -142,7 +142,13 @@ test("submit refuses when a required field was not filled", async () => {
     <label for="name">Name*</label><input id="name">
     <button>Submit application</button></form>`, async (henry, _root, state) => {
     const application = draft([{ ...q("name", "Name*"), required: true }], {});
-    await assert.rejects(henry.submit(url, application), /Required fields were not filled/);
+    // No answer was supplied for this required field, so this is the "needs a person"
+    // case rather than the "try again" one — and either way nothing may be clicked.
+    await assert.rejects(henry.submit(url, application), (error: unknown) => {
+      assert.ok(error instanceof FillIncompleteError);
+      assert.equal(error.retryable, false, "Henry has no answer to place; retrying cannot help");
+      return true;
+    });
     assert.equal(state().submits, "0");
   });
 });
@@ -252,6 +258,54 @@ test("an ambiguous submit control is refused BEFORE clicking, and stays an ordin
       (error: unknown) => {
         assert.ok(!(error instanceof SubmissionOutcomeUnknownError), "nothing was clicked, so this must NOT be an unknown outcome");
         assert.match(String((error as Error).message), /exactly one final application button/i);
+        return true;
+      },
+    );
+  });
+});
+
+/**
+ * A required field Henry HAS an answer for is a placement failure — the form probably
+ * hydrated late — so it is worth another pass. A required field Henry has NO answer for
+ * never will be: another pass cannot invent the fact, and saying so is the point.
+ */
+test("an unfilled required field is retryable only when Henry actually holds the answer", async () => {
+  await fixture(`${formStart}<label for="answered">Answered*</label><input id="answered" disabled>`, async (henry) => {
+    const questions = [{ id: "answered", label: "Answered*", kind: "text" as const, required: true }];
+    await assert.rejects(
+      () => henry.submit(url, draft(questions, { answered: "we have this" })),
+      (error: unknown) => {
+        assert.ok(error instanceof FillIncompleteError);
+        assert.equal(error.retryable, true, "Henry had the answer — another pass is worth trying");
+        assert.deepEqual(error.withoutAnswers, [], "nothing is missing; this was a placement failure");
+        return true;
+      },
+    );
+  });
+
+  await fixture(`${formStart}<label for="unanswered">Unanswered*</label><input id="unanswered" disabled>`, async (henry) => {
+    const questions = [{ id: "unanswered", label: "Unanswered*", kind: "text" as const, required: true }];
+    await assert.rejects(
+      () => henry.submit(url, draft(questions, {})),
+      (error: unknown) => {
+        assert.ok(error instanceof FillIncompleteError);
+        assert.equal(error.retryable, false, "no answer exists, so retrying can only fail again");
+        assert.deepEqual(error.withoutAnswers, ["Unanswered*"]);
+        assert.match(String((error as Error).message), /will not guess|supply the fact/i);
+        return true;
+      },
+    );
+  });
+});
+
+test("a page shaped wrong is the employer's problem, not something to retry", async () => {
+  await fixture(`<h1>Engineer</h1><form><button type="button">Submit</button><button type="button">Submit application</button></form>`, async (henry) => {
+    await assert.rejects(
+      () => henry.submit(url, draft([], {})),
+      (error: unknown) => {
+        assert.ok(error instanceof SiteShapeError, "an ambiguous page must be distinguishable from a fill miss");
+        assert.equal(error.retryable, false, "retrying an unchanged page changes nothing");
+        assert.equal(error.clicked, false, "and nothing was sent");
         return true;
       },
     );

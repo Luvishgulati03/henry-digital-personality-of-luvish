@@ -32,6 +32,7 @@ export type ActivityKind =
   | "job.filled"
   | "job.submitted"
   | "job.submission_uncertain"
+  | "job.fill_retry"
   | "resume.generated"
   | "provider.switched"
   | "task.started"

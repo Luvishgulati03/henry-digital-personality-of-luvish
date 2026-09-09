@@ -29,6 +29,35 @@ export class SubmissionOutcomeUnknownError extends Error {
   }
 }
 
+/**
+ * The form was not completely filled, and NOTHING was clicked. Retrying is safe here —
+ * nothing reached the employer — but it is only *useful* when Henry actually had the
+ * answer and failed to place it, which is what a late-hydrating ATS form looks like.
+ * When the answer was never available, another attempt cannot invent it: that needs a
+ * person, and `retryable` says so.
+ */
+export class FillIncompleteError extends Error {
+  readonly clicked = false;
+  constructor(readonly fields: string[], readonly withoutAnswers: string[], message?: string) {
+    super(message ?? (withoutAnswers.length > 0
+      ? `No answer is available for: ${withoutAnswers.join(", ")} — Henry will not guess; supply the fact and prepare again`
+      : `Required fields were not filled; no submission was made: ${fields.join(", ")}`));
+    this.name = "FillIncompleteError";
+  }
+  get retryable(): boolean { return this.withoutAnswers.length === 0; }
+}
+
+/**
+ * The page is not shaped the way submission needs — e.g. two equally plausible final
+ * buttons. Nothing was clicked, but retrying an unchanged page changes nothing: this is
+ * the employer's site, so it goes to the operator rather than round a retry loop.
+ */
+export class SiteShapeError extends Error {
+  readonly clicked = false;
+  readonly retryable = false;
+  constructor(message: string) { super(message); this.name = "SiteShapeError"; }
+}
+
 export interface BrowserSubmitResult {
   url: string;
   submittedAt: string;
@@ -180,6 +209,20 @@ function skippedRequiredFields(draft: JobApplicationDraft, skipped: string[]): s
   return draft.posting.questions.filter((question) => question.required && skippedLabels.has(question.label)).map((question) => question.label);
 }
 
+/**
+ * Of the required fields that did not get filled, which ones did Henry actually have an
+ * answer for? Those are worth another attempt — a form that hydrates late looks exactly
+ * like this. The ones with no answer never will be: they need a person, not a retry.
+ * Same lookup `fillFields` uses, so the two can never disagree about what an answer is.
+ */
+function requiredFieldsWithoutAnswers(draft: JobApplicationDraft, skipped: string[]): string[] {
+  const skippedLabels = new Set(skipped);
+  return draft.posting.questions
+    .filter((question) => question.required && skippedLabels.has(question.label))
+    .filter((question) => !(draft.answers[question.id] ?? draft.answers[question.label] ?? "").trim())
+    .map((question) => question.label);
+}
+
 function normalizeText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -309,15 +352,19 @@ export class PlaywrightJobBrowser implements JobBrowser {
       assertNotLinkedInAutomation(page.url(), "submission after redirect");
       const { skipped } = await fillFields(page, draft);
       const requiredSkipped = skippedRequiredFields(draft, skipped);
-      if (requiredSkipped.length > 0) throw new Error(`Required fields were not filled; no submission was made: ${requiredSkipped.join(", ")}`);
-      if (draft.resumePdfPath && skipped.includes("resume upload")) throw new Error("Resume upload was not verified; no submission was made");
+      if (requiredSkipped.length > 0) throw new FillIncompleteError(requiredSkipped, requiredFieldsWithoutAnswers(draft, skipped));
+      // The file exists — failing to attach it is a placement problem, not a missing fact,
+      // so it is worth another attempt rather than the operator's attention.
+      if (draft.resumePdfPath && skipped.includes("resume upload")) {
+        throw new FillIncompleteError(["resume upload"], [], "Resume upload was not verified; no submission was made");
+      }
       assertNotLinkedInAutomation(page.url(), "submission after redirect");
       const beforeSubmitText = await page.locator("body").innerText().catch(() => "");
       // Count the UNFILTERED locator (audit 2026-08-09 B-H7): counting after .first()
       // only ever sees 0 or 1, so the exactly-one guard on the irreversible click
       // never fired on ambiguous pages (sticky-footer Submit + in-form Submit).
       const candidates = page.getByRole("button", { name: /^(submit application|submit|send application)$/i });
-      if (await candidates.count() !== 1) throw new Error("Could not identify exactly one final application button; no submission was made");
+      if (await candidates.count() !== 1) throw new SiteShapeError("Could not identify exactly one final application button; no submission was made");
       const submit = candidates.first();
       await submit.click();
       await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => undefined);
