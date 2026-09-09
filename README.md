@@ -44,6 +44,7 @@ flowchart LR
 | 💼 **Runs your job hunt** | Morning scout (LinkedIn + X shortlist), one-page tailored resume + cover letter per JD, inbox watch, application tracker + Telegram digests. It can also fill a real application form in a browser and submit it — only for an application you approved, and filling and submitting are two separate approvals |
 | 👥 **Runs team standups** | Telegram group bot: morning plans + evening delivered-vs-planned, style-matched nudges, summaries to your DM |
 | 📋 **Acts as a PM** | `pm on`: PMBOK-grounded decisions with explicit rationale, update processing, gated work assignment |
+| 🌙 **Dispatches deep research** | Long research asks acknowledge immediately, run through Luna's read-only research specialist, remain visible in the agent registry, and report back when complete |
 | 🔒 **Never freelances outbound** | Email/comments/applications are staged; `approve` ≠ `send`; scope-guarded Telegram surfaces |
 
 ## Chat with it — including from your phone

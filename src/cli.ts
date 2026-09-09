@@ -22,6 +22,7 @@ import {
   type CommandSpec, type PanelRow, banner, clearLine, commandPanel, note, panel,
   prompt as promptFor, spinnerStart, spinnerTick,
 } from "./tui/panel.ts";
+import { isLongResearchAsk } from "./orchestration/luna.ts";
 
 const args = process.argv.slice(2);
 
@@ -206,6 +207,25 @@ async function repl(
       if (label) console.log(dim(label));
       printAgentText(approvalResult);
       return;
+    }
+    if (isLongResearchAsk(value)) {
+      const turn = runtime.startInteractiveTurn(value, { surface: "repl" });
+      if (turn.delegated) {
+        if (label) console.log(dim(label));
+        printAgentText(turn.acknowledgement);
+        void turn.completion.then((result) => {
+          console.log();
+          console.log(dim("Luna research report"));
+          printAgentText(result.exitCode === 0 && result.response.trim()
+            ? result.response
+            : `Research failed: ${result.error ?? `Codex exited ${String(result.exitCode)}`}`);
+          safePrompt(true);
+        }).catch((error) => {
+          console.error(note("err", `Research failed: ${error instanceof Error ? error.message : String(error)}`));
+          safePrompt(true);
+        });
+        return;
+      }
     }
     // Streaming display (latency plan #1/#6): print provider text as it
     // arrives; the spinner shows elapsed seconds until the first token lands.

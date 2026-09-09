@@ -152,7 +152,7 @@ explicitly — there is no global default:
 | Tier | Use for | Cost profile |
 |---|---|---|
 | **T0 — nano/low-effort** | Triage, classification, extraction, formatting, summaries | Cheapest tier available |
-| **T1 — standard** | Routine implementation, test authoring, doc updates | Subscription CLI, default effort |
+| **T1 — standard** | Routine implementation, research, test authoring, doc updates | Subscription CLI; Codex coordinator uses low reasoning |
 | **T2 — frontier/high-effort** | Architecture, hard debugging, review verdicts, final tailored writing | Scarce — budget it, don't default to it |
 
 The rules, compressed to their essence:
@@ -175,6 +175,18 @@ The rules, compressed to their essence:
    inline, even "just to check something."
 10. Capturing outcomes to memory is itself a dispatched task at the end
     of a workflow, not an afterthought.
+
+### Dispatch-and-report
+
+On interactive surfaces, an explicit deep, in-depth, comprehensive, or
+otherwise substantial research request does not occupy Henry's foreground
+brain. A deterministic gate sends it to Luna's read-only `research`
+specialist, immediately replies `Started — I'll report back.`, and delivers
+the sourced result when the worker finishes. The registry exposes both the
+running and settled states to the dashboard. This path pins Codex tier T1:
+the configured `gpt-5.6-sol` coordinator with low reasoning effort. Ordinary
+lookups stay inline, and attachment/vision turns keep their existing provider
+path.
 
 ## 5. What runs where — cost note
 

@@ -58,6 +58,13 @@ test("t1 and an absent tier keep the configured default models", () => {
   assert.deepEqual(codexConfigured.slice(0, 3), ["exec", "-m", "gpt-5-codex"]);
 });
 
+test("Henry's default t1 coordinator is gpt-5.6-sol at low reasoning", () => {
+  const args = codexArgs(PROMPT, { readOnly: true, tier: "t1", model: "gpt-5.6-sol" });
+  assert.deepEqual(args.slice(0, 3), ["exec", "-m", "gpt-5.6-sol"]);
+  assert.ok(args.includes('model_reasoning_effort="low"'));
+  assert.ok(!args.includes('model_reasoning_effort="high"'));
+});
+
 test("t2 routes to opus and high Codex reasoning effort", () => {
   assert.deepEqual(
     claudeArgs(PROMPT, { tier: "t2", model: "sonnet" }),

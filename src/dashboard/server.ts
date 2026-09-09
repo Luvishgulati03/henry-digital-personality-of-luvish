@@ -862,16 +862,35 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
           // Same surface-session model as the REPL, one surface PER CONVERSATION:
           // provider-side context persists across messages in a thread and never
           // bleeds between threads.
-          const result = await runtime.agent.run(composed, {
+          const turn = attachmentPaths.length === 0
+            ? runtime.startInteractiveTurn(composed, {
+              surface: conversation.surface,
+              onEvent: (event) => {
+                const text = event.parsed && typeof (event.parsed as Record<string, unknown>).text === "string"
+                  ? String((event.parsed as Record<string, unknown>).text)
+                  : undefined;
+                if (text?.trim()) sseWrite(response, "token", { text: text.endsWith("\n") ? text : `${text}\n` });
+              },
+            })
+            : { delegated: false as const, completion: runtime.agent.run(composed, {
             surface: conversation.surface,
-            ...(visionPin ? { provider: "claude" as const } : {}),
+            provider: "claude" as const,
             onEvent: (event) => {
               const text = event.parsed && typeof (event.parsed as Record<string, unknown>).text === "string"
                 ? String((event.parsed as Record<string, unknown>).text)
                 : undefined;
               if (text?.trim()) sseWrite(response, "token", { text: text.endsWith("\n") ? text : `${text}\n` });
             },
-          });
+          }) };
+          if (turn.delegated) {
+            // Write the acknowledgement to the socket before the first await.
+            // dispatchAndReport starts on a microtask, so this ordering guarantees
+            // even an instant fake/worker cannot stream a report token first.
+            sseWrite(response, "token", { text: `${turn.acknowledgement}\n\n` });
+            sseWrite(response, "notice", { text: "Luna research · Codex gpt-5.6-sol · low reasoning" });
+            await store.append(conversation.id, [{ role: "henry", text: turn.acknowledgement, at: new Date().toISOString() }], { ifGeneration: generation });
+          }
+          const result = await turn.completion;
           // The transcript records the authoritative final response even if the
           // browser tab bailed mid-stream — reload shows the full reply.
           await store.append(conversation.id, [{ role: "henry", text: result.response, at: new Date().toISOString() }], { ifGeneration: generation });

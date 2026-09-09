@@ -1,7 +1,7 @@
 import type { ActivityLog } from "../activity.ts";
 import type { HenryConfig } from "../config.ts";
 import type { HenryMemory } from "../memory/engram.ts";
-import type { DispatchTier } from "../types.ts";
+import type { DispatchTier, ProviderEvent, ProviderName, RunResult } from "../types.ts";
 import { ProviderRunner } from "../providers/runner.ts";
 import { sharedAdmissionController } from "./admission.ts";
 import { sharedAgentRegistry } from "./agent-registry.ts";
@@ -15,6 +15,7 @@ export const SPECIALISTS = {
   "pr-review": "Own the six-pass PR review workflow, re-review behavior, findings, and staged GitHub comments.",
   "job-application": "Own job posting inspection, truthful tailoring of resumes and answers, form filling for review, and the approval-gated submission boundary. Never invent candidate facts and never bypass site protections.",
   qa: "Own tests, type safety, security boundaries, and verification of the whole agent.",
+  research: "Own long-form, source-grounded research. Use primary sources where possible, distinguish sourced facts from inference, include links and dates, and return a decision-ready report.",
 } as const;
 
 export type SpecialistRole = keyof typeof SPECIALISTS;
@@ -29,7 +30,29 @@ function firstLine(text: string): string | undefined {
 const ROLE_TIER: Partial<Record<SpecialistRole, DispatchTier>> = {
   architect: "t2",
   "pr-review": "t2",
+  // The coordinator is deliberately Sol at low reasoning. Research depth comes
+  // from tool use and source synthesis, not from keeping Henry's foreground
+  // brain occupied or raising every research request to Luna/high.
+  research: "t1",
 };
+
+export const DISPATCH_ACKNOWLEDGEMENT = "Started — I'll report back.";
+
+const EXPLICIT_LONG_RESEARCH = /\b(deep|in[- ]depth|thorough|comprehensive|full[- ]fledged|extensive|detailed)\s+(?:web\s+)?research\b|\bresearch\s+(?:this|it|the\s+topic)?\s*(?:deeply|thoroughly|in[- ]depth)\b/i;
+const RESEARCH_NOUN = /\b(research|literature review|market scan|competitive analysis|source analysis)\b/i;
+const LONG_FORM_OUTPUT = /\b(report|brief|memo|landscape|compare|comparison|recommendation|recommendations|plan|strategy|sources?|citations?)\b/i;
+
+/**
+ * Cheap, auditable routing gate. A plain "look this up" remains a normal Henry
+ * turn; explicit depth language, or a substantial research+deliverable ask,
+ * becomes dispatch-and-report without spending another model call on routing.
+ */
+export function isLongResearchAsk(prompt: string): boolean {
+  const text = prompt.trim();
+  if (!text) return false;
+  if (EXPLICIT_LONG_RESEARCH.test(text)) return true;
+  return text.length >= 180 && RESEARCH_NOUN.test(text) && LONG_FORM_OUTPUT.test(text);
+}
 
 export interface DispatchOptions {
   allowEdits?: boolean;
@@ -38,6 +61,14 @@ export interface DispatchOptions {
   tier?: DispatchTier;
   /** §7 wall-clock envelope for the dispatched worker. */
   timeoutMs?: number;
+  /** Optional provider pin and stream sink for surfaced dispatch-and-report work. */
+  provider?: ProviderName;
+  onEvent?: (event: ProviderEvent) => void;
+}
+
+export interface DispatchReportHandle {
+  acknowledgement: typeof DISPATCH_ACKNOWLEDGEMENT;
+  completion: Promise<RunResult>;
 }
 
 export class LunaOrchestrator {
@@ -68,7 +99,8 @@ export class LunaOrchestrator {
     // every touch point is wrapped and failures are swallowed (fail open).
     const registry = sharedAgentRegistry();
     let agentId: string | null = null;
-    try { agentId = registry.start(selected, task, this.config.provider); } catch { /* best effort */ }
+    const requestedProvider = options.provider ?? this.config.provider;
+    try { agentId = registry.start(selected, task, requestedProvider); } catch { /* best effort */ }
     try {
       const result = await this.runner.run(prompt, {
         cwd: options.cwd || this.config.rootDir,
@@ -78,6 +110,8 @@ export class LunaOrchestrator {
         // the same role resumes the same provider session instead of starting cold.
         surface: `luna::${selected}`,
         readOnly: !options.allowEdits,
+        ...(options.provider ? { provider: options.provider } : {}),
+        ...(options.onEvent ? { onEvent: options.onEvent } : {}),
         ...(tier ? { tier } : {}),
         ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
       });
@@ -97,6 +131,21 @@ export class LunaOrchestrator {
       try { if (agentId) registry.settle(agentId, "failed", { summary: error instanceof Error ? error.message : String(error) }); } catch { /* best effort */ }
       throw error;
     }
+  }
+
+  /**
+   * Starts long research on the next microtask so the caller can render/send
+   * the acknowledgement before any provider event arrives. Pinning Codex+t1
+   * resolves to the configured gpt-5.6-sol model with low reasoning effort.
+   */
+  dispatchAndReport(task: string, options: Omit<DispatchOptions, "tier" | "provider" | "allowEdits"> = {}): DispatchReportHandle {
+    const completion = Promise.resolve().then(() => this.dispatch("research", task, {
+      ...options,
+      allowEdits: false,
+      provider: "codex",
+      tier: "t1",
+    }));
+    return { acknowledgement: DISPATCH_ACKNOWLEDGEMENT, completion };
   }
 
   /**

@@ -129,7 +129,7 @@ export interface BridgeStats {
 
 export interface BridgeDeps {
   /** The ONE brain entry — runtime.ts wires this to HenryAgent.run (readOnly, telegram surface). */
-  think: (prompt: string) => Promise<string>;
+  think: (prompt: string, report: (text: string) => Promise<boolean>) => Promise<string>;
   /** The existing DM sender, already pinned to Luvish's chat id. Injected: the bridge owns no send surface. */
   send: (config: HenryConfig, text: string) => Promise<boolean>;
   fetchImpl?: typeof fetch;
@@ -261,7 +261,10 @@ export class TelegramBridge implements PumpConsumer {
     this.thinking = true;
     let answer = "";
     try {
-      answer = (await this.deps.think(item.text)).trim();
+      // A delegated worker can call `report` later, after this foreground turn
+      // has already acknowledged and released the inbound queue. Reuse reply()
+      // so long reports are chunked safely instead of Telegram-truncated.
+      answer = (await this.deps.think(item.text, (text) => this.reply(text))).trim();
     } catch (error) {
       this.counters.failed += 1;
       await this.activity.record("run.failed", "Telegram bridge brain call failed", { telegram: true, error: String(error) }).catch(() => undefined);

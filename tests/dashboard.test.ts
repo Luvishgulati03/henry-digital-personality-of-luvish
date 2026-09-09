@@ -6,6 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import { HenryRuntime } from "../src/runtime.ts";
 import { startDashboard } from "../src/dashboard/server.ts";
+import { AgentRegistry, setSharedAgentRegistry } from "../src/orchestration/agent-registry.ts";
 
 test("dashboard exposes local health and status APIs", async () => {
   const runtime = await HenryRuntime.create();
@@ -90,6 +91,50 @@ test("web chat: page serves, SSE send streams tokens, transcript persists, clear
 
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   runtime.close();
+});
+
+test("web chat: deep research acknowledges before Luna streams the report", async () => {
+  setSharedAgentRegistry(new AgentRegistry());
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "henry-chat-research-"));
+  fs.cpSync(path.join(process.cwd(), "workflows"), path.join(tempRoot, "workflows"), { recursive: true });
+  const runtime = await HenryRuntime.create(tempRoot);
+  runtime.config.port = 0;
+  runtime.config.host = "127.0.0.1";
+  const calls: Array<Record<string, unknown>> = [];
+  (runtime.luna as unknown as { runner: { run: unknown } }).runner = {
+    run: async (_prompt: string, options: { onEvent?: (event: { timestamp: string; stream: "stdout"; text: string; parsed: { text: string } }) => void } & Record<string, unknown>) => {
+      calls.push(options);
+      options.onEvent?.({ timestamp: "", stream: "stdout", text: "", parsed: { text: "Sourced report." } });
+      return { runId: "research-1", provider: "codex", response: "Sourced report.", exitCode: 0, durationMs: 8, events: [] };
+    },
+  };
+
+  const server = startDashboard(runtime);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const response = await fetch(`${base}/api/chat/send`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "Do an in-depth research report on durable queues with sources." }),
+    });
+    const stream = await response.text();
+    assert.ok(stream.indexOf("Started — I'll report back.") < stream.indexOf("Sourced report."));
+    assert.match(stream, /Luna research · Codex gpt-5\.6-sol · low reasoning/);
+    assert.equal(calls[0].provider, "codex");
+    assert.equal(calls[0].tier, "t1");
+    assert.equal(calls[0].readOnly, true);
+    const history = await (await fetch(`${base}/api/chat/history`)).json() as { messages: Array<{ role: string; text: string }> };
+    assert.deepEqual(history.messages.map((message) => message.text), [
+      "Do an in-depth research report on durable queues with sources.",
+      "Started — I'll report back.",
+      "Sourced report.",
+    ]);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    runtime.close();
+  }
 });
 
 test("logs page serves and /api/logs returns the activity journal newest-first", async () => {
@@ -178,6 +223,7 @@ test("web chat races: overlapping sends both persist; a send finishing after cle
 });
 
 test("dispatch registry: /api/dispatch records an agent, /api/agents returns the contract shape, and /api/events streams an agent event", async () => {
+  setSharedAgentRegistry(new AgentRegistry());
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "henry-agents-"));
   fs.cpSync(path.join(process.cwd(), "workflows"), path.join(tempRoot, "workflows"), { recursive: true });
   const runtime = await HenryRuntime.create(tempRoot);

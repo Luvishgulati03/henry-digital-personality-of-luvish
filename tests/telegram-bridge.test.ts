@@ -67,7 +67,7 @@ interface Harness {
 }
 
 async function bridgeHarness(options: {
-  answer?: (prompt: string) => Promise<string> | string;
+  answer?: (prompt: string, report: (text: string) => Promise<boolean>) => Promise<string> | string;
   sendOk?: boolean;
   config?: HenryConfig;
 } = {}): Promise<Harness> {
@@ -81,7 +81,7 @@ async function bridgeHarness(options: {
     get chatActions() { return chatActions; },
   } as Harness;
   harness.bridge = new TelegramBridge(config, activity, memoryStore(), {
-    think: async (prompt) => { asked.push(prompt); return options.answer ? await options.answer(prompt) : "pong"; },
+    think: async (prompt, report) => { asked.push(prompt); return options.answer ? await options.answer(prompt, report) : "pong"; },
     send: async (_config, text) => { sent.push(text); return options.sendOk !== false; },
     fetchImpl: (async () => { chatActions += 1; return new Response("{}", { status: 200 }); }) as unknown as typeof fetch,
   });
@@ -97,6 +97,26 @@ test("bridge: Luvish's DM runs the brain and the answer comes back in his chat",
   assert.deepEqual(h.sent, ["heard: how's the memory module doing?"]);
   assert.equal(h.bridge.stats().replies, 1);
   assert.ok(h.chatActions >= 1, "a typing indicator must fire while Henry thinks");
+});
+
+test("bridge: delegated work acknowledges first and can report later without blocking intake", async () => {
+  const longReport = "r".repeat(TELEGRAM_MAX_CHARS + 200);
+  let reportDelivered!: () => void;
+  const delivered = new Promise<void>((resolve) => { reportDelivered = resolve; });
+  const h = await bridgeHarness({
+    answer: (_prompt, report) => {
+      setImmediate(() => { void report(longReport).then(() => reportDelivered()); });
+      return "Started — I'll report back.";
+    },
+  });
+
+  await h.bridge.consume([dm(1, "Do deep research on agent queues.")]);
+  await h.bridge.settled();
+  assert.equal(h.sent[0], "Started — I'll report back.");
+  assert.equal(h.bridge.stats().thinking, false, "the foreground queue is released after acknowledgement");
+  await delivered;
+  assert.equal(h.sent.length, 3, "the later report is safely split across Telegram's limit");
+  assert.equal(h.sent.slice(1).join(""), longReport);
 });
 
 test("bridge: any chat that is not Luvish's gets no reply, no brain call, and is never stored", async () => {

@@ -139,3 +139,26 @@ test("registry: changesSince reports new entries once and only once", () => {
   assert.equal(fourth.entries.length, 1);
   assert.equal(fourth.entries[0].status, "done");
 });
+
+test("dispatch-and-report acknowledges immediately and pins research to Sol's low tier", async () => {
+  setSharedAgentRegistry(new AgentRegistry());
+  const { luna, runnerStub } = await setup();
+  let resolveRun!: (value: RunResult) => void;
+  const calls: Array<{ prompt: string; options: Record<string, unknown> }> = [];
+  runnerStub.run = (prompt: unknown, options: unknown) => {
+    calls.push({ prompt: String(prompt), options: options as Record<string, unknown> });
+    return new Promise<RunResult>((resolve) => { resolveRun = resolve; });
+  };
+
+  const handle = luna.dispatchAndReport("Do deep research on durable agent queues.");
+  assert.equal(handle.acknowledgement, "Started — I'll report back.");
+  assert.equal(calls.length, 0, "the caller gets one render/send turn before dispatch starts");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.provider, "codex");
+  assert.equal(calls[0].options.tier, "t1");
+  assert.equal(calls[0].options.role, "research");
+  assert.equal(calls[0].options.readOnly, true);
+  resolveRun({ runId: "research-1", provider: "codex", response: "Report ready.", exitCode: 0, durationMs: 1, events: [] });
+  assert.equal((await handle.completion).response, "Report ready.");
+});

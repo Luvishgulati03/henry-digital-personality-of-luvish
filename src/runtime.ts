@@ -35,6 +35,12 @@ import { TelegramBridge } from "./telegram/bridge.ts";
 import { limitState } from "./providers/limits.ts";
 import { DraftRepliesService } from "./gmail-drafts/service.ts";
 import type { ProviderName, RunResult } from "./types.ts";
+import type { RunOptions } from "./providers/runner.ts";
+import { isLongResearchAsk, type DispatchReportHandle } from "./orchestration/luna.ts";
+
+export type InteractiveTurn =
+  | { delegated: false; completion: Promise<RunResult> }
+  | ({ delegated: true } & DispatchReportHandle);
 
 export class HenryRuntime {
   readonly activity: ActivityLog;
@@ -157,15 +163,51 @@ export class HenryRuntime {
   get telegramBridge(): TelegramBridge {
     if (!this._telegramBridge) {
       this._telegramBridge = new TelegramBridge(this.config, this.activity, this.standupStore, {
-        think: (prompt) => this.agent.run(prompt, {
-          surface: "telegram",
-          readOnly: !this.config.telegramOperatorMode,
-          role: this.config.telegramOperatorMode ? "telegram-operator" : "telegram-bridge",
-        }).then((result) => result.response),
+        think: (prompt, reportToTelegram) => {
+          const turn = this.startInteractiveTurn(prompt, {
+            surface: "telegram",
+            readOnly: !this.config.telegramOperatorMode,
+            role: this.config.telegramOperatorMode ? "telegram-operator" : "telegram-bridge",
+          });
+          if (!turn.delegated) return turn.completion.then((result) => result.response);
+          // The bridge sends this acknowledgement through its normal reply path.
+          // The finished report is a second DM, so the inbound queue is free for
+          // Luvish's next message while the research worker is still running.
+          void turn.completion.then(async (result) => {
+            const report = result.exitCode === 0 && result.response.trim()
+              ? result.response.trim()
+              : `Research failed: ${result.error ?? `Codex exited ${String(result.exitCode)}`}`;
+            const sent = await reportToTelegram(report);
+            await this.activity.record(sent ? "run.completed" : "run.failed", sent ? "Telegram delivered Luna's research report" : "Telegram could not deliver Luna's research report", {
+              telegram: true, dispatchReport: true, chars: report.length,
+            }, { runId: result.runId, role: "research", provider: result.provider });
+          }).catch(async (error) => {
+            const message = `Research failed: ${error instanceof Error ? error.message : String(error)}`;
+            await reportToTelegram(message).catch(() => false);
+            await this.activity.record("run.failed", "Luna research dispatch threw", { telegram: true, dispatchReport: true, error: message }, { role: "research", provider: "codex" });
+          });
+          return Promise.resolve(turn.acknowledgement);
+        },
         send: (config, text) => sendTelegram(config, text),
       });
     }
     return this._telegramBridge;
+  }
+
+  /**
+   * One surface-neutral entry for foreground Henry vs background Luna routing.
+   * Starting a delegated turn is synchronous; its completion runs independently.
+   */
+  startInteractiveTurn(prompt: string, options: RunOptions = {}): InteractiveTurn {
+    if (isLongResearchAsk(prompt)) {
+      const handle = this.luna.dispatchAndReport(prompt, {
+        cwd: options.cwd,
+        timeoutMs: options.timeoutMs,
+        onEvent: options.onEvent,
+      });
+      return { delegated: true, ...handle };
+    }
+    return { delegated: false, completion: this.agent.run(prompt, options) };
   }
 
   /**
