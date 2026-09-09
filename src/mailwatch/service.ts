@@ -142,9 +142,10 @@ export class MailWatchService {
     if (!this.memory) return;
     const weight: Record<string, number> = { offer: 9, interview: 8, assessment: 8, shortlisted: 8, rejected: 6, viewed: 5, applied: 6 };
     for (const event of events) {
+      const action = event.pendingAction ? ` Pending action: ${event.pendingAction.replace(/_/g, " ")}.` : "";
       await this.memory.remember(
-        `Job application ${event.isNew ? "tracked" : "status update"}: ${event.company} — ${event.role} → ${event.status.toUpperCase()} (${event.dateText}). Email subject: "${event.subject}"`,
-        { tier: "semantic", importance: weight[event.status] ?? 5, metadata: { domain: "jobs", kind: "application-update", company: event.company, role: event.role, status: event.status } },
+        `Job application ${event.isNew ? "tracked" : "status update"}: ${event.company} — ${event.role} → ${event.status.toUpperCase()} (${event.dateText}).${action} Email subject: "${event.subject}"`,
+        { tier: "semantic", importance: weight[event.status] ?? 5, metadata: { domain: "jobs", kind: "application-update", company: event.company, role: event.role, status: event.status, ...(event.pendingAction ? { pendingAction: event.pendingAction } : {}) } },
       ).catch(() => "");
     }
   }
@@ -314,6 +315,12 @@ export class MailWatchService {
       "or direct>|<status: applied, viewed, shortlisted, assessment, interview, rejected, or",
       "offer>|<date-ish from the email>|<subject>. One email may produce both an ALERT and an APP",
       "line when it qualifies for both.",
+      "Search results only expose subject/snippet. For every likely lifecycle match, fetch and read",
+      "the full email body before classifying it; never classify a likely match from subject/snippet",
+      "alone. Body-only requests for questionnaires, screening questions, additional details or",
+      "forms, assessments/tests, and referrals are actionable lifecycle updates. Append",
+      "|ACTION=<questionnaire|screening_questions|additional_details|assessment|referral> to its APP",
+      "line when one is pending; omit the suffix when no action is pending.",
       "If nothing matches either category, output exactly NO_ALERTS.",
     ].join(" ");
 
@@ -389,6 +396,13 @@ export class MailWatchService {
       "read-state, labels, drafts). For each match output exactly one line:",
       "APP|<company>|<role>|<source: LinkedIn, Naukri, or direct>|<status: applied, viewed,",
       "shortlisted, assessment, interview, rejected, or offer>|<date-ish from the email>|<subject>.",
+      "Search results only expose subject/snippet. For every likely lifecycle match, fetch and read",
+      "the full email body before classification; do not rely on subject/snippet alone. Detect",
+      "body-only pending questionnaires (including Gemba-style questionnaires), screening questions",
+      "(including Albertsons), requests for additional details/forms (including Swiggy), assessments,",
+      "and referrals (including IRIS). Append |ACTION=<questionnaire|screening_questions|additional_details|assessment|referral>",
+      "to the APP line when pending; omit it otherwise. Use status assessment for an assessment",
+      "request; for other actions use the lifecycle status evidenced by the email (usually shortlisted).",
       "If none, output exactly NO_ALERTS.",
     ].join(" ");
 

@@ -5,6 +5,8 @@ import type { HenryConfig } from "../config.ts";
 
 export const APP_STATUSES = ["applied", "viewed", "shortlisted", "assessment", "interview", "rejected", "offer"] as const;
 export type AppStatus = (typeof APP_STATUSES)[number];
+export const PENDING_ACTIONS = ["questionnaire", "screening_questions", "additional_details", "assessment", "referral"] as const;
+export type PendingAction = (typeof PENDING_ACTIONS)[number];
 
 /**
  * Statuses worth buzzing Luvish's phone about (his rule, 2026-08-15): "don't remind me for
@@ -30,10 +32,11 @@ export interface ParsedApp {
   status: AppStatus;
   dateText: string;
   subject: string;
+  pendingAction?: PendingAction;
 }
 
 /**
- * Defensively parses one `APP|<company>|<role>|<source>|<status>|<date-ish>|<subject>` line —
+ * Defensively parses one `APP|<company>|<role>|<source>|<status>|<date-ish>|<subject>[|ACTION=<kind>]` line —
  * mirrors `parseAlertLine`'s discipline in `service.ts`. The model's raw output is never trusted
  * structurally: missing fields, an unknown status, or a short/garbage line all return `undefined`.
  */
@@ -48,10 +51,12 @@ export function parseAppLine(line: string): ParsedApp | undefined {
   const source = rawSource.trim().replace(/\|/g, "/");
   const status = rawStatus.trim().toLowerCase();
   const dateText = rawDate.trim();
-  const subject = rest.join("|").trim();
+  const actionMatch = rest.at(-1)?.trim().match(/^ACTION=(questionnaire|screening_questions|additional_details|assessment|referral)$/i);
+  const pendingAction = actionMatch?.[1].toLowerCase() as PendingAction | undefined;
+  const subject = (pendingAction ? rest.slice(0, -1) : rest).join("|").trim();
   if (!company || !role || !source || !subject) return undefined;
   if (!isAppStatus(status)) return undefined;
-  return { company, role, source, status, dateText: dateText || "unknown", subject };
+  return { company, role, source, status, dateText: dateText || "unknown", subject, ...(pendingAction ? { pendingAction } : {}) };
 }
 
 export interface TrackerHistoryEntry {
@@ -63,6 +68,7 @@ export interface TrackerHistoryEntry {
   recordedAt: string;
   /** True when recorded by a backfill() seeding sweep — digests must not count these as "today's" news. */
   backfill?: boolean;
+  pendingAction?: PendingAction;
 }
 
 export interface TrackerEntry {
@@ -75,6 +81,7 @@ export interface TrackerEntry {
   appliedAt: string;
   lastUpdate: string;
   history: TrackerHistoryEntry[];
+  pendingAction?: PendingAction;
 }
 
 export interface TrackerState {
@@ -89,6 +96,7 @@ export interface TrackerAppEvent {
   subject: string;
   dateText: string;
   isNew: boolean;
+  pendingAction?: PendingAction;
 }
 
 export interface TrackerUpdateResult {
@@ -161,18 +169,19 @@ export function renderMarkdown(state: TrackerState, now: Date = new Date()): str
     );
     return `${lines.join("\n")}\n`;
   }
-  lines.push("| Company | Role | Source | Current status | Applied | Last update |");
-  lines.push("| --- | --- | --- | --- | --- | --- |");
+  lines.push("| Company | Role | Source | Current status | Pending action | Applied | Last update |");
+  lines.push("| --- | --- | --- | --- | --- | --- | --- |");
   for (const entry of sorted) {
     lines.push(
-      `| ${escapeCell(entry.company)} | ${escapeCell(entry.role)} | ${escapeCell(entry.source)} | ${escapeCell(entry.status)} | ${escapeCell(entry.appliedAt)} | ${escapeCell(entry.lastUpdate)} |`,
+      `| ${escapeCell(entry.company)} | ${escapeCell(entry.role)} | ${escapeCell(entry.source)} | ${escapeCell(entry.status)} | ${escapeCell(entry.pendingAction ?? "")} | ${escapeCell(entry.appliedAt)} | ${escapeCell(entry.lastUpdate)} |`,
     );
   }
   lines.push("", "## History", "");
   for (const entry of sorted) {
     lines.push(`### ${entry.company} — ${entry.role}`);
     for (const item of entry.history) {
-      lines.push(`- ${escapeCell(item.dateText)} — **${item.status}** — "${item.subject}" (${entry.source}, recorded ${item.recordedAt})`);
+      const action = item.pendingAction ? ` — pending **${item.pendingAction.replace(/_/g, " ")}**` : "";
+      lines.push(`- ${escapeCell(item.dateText)} — **${item.status}**${action} — "${item.subject}" (${entry.source}, recorded ${item.recordedAt})`);
     }
     lines.push("");
   }
@@ -205,6 +214,7 @@ export async function updateTracker(config: HenryConfig, lines: string[], option
   const now = new Date().toISOString();
   const stamp = (app: ParsedApp): TrackerHistoryEntry => ({
     status: app.status, dateText: app.dateText, subject: app.subject, recordedAt: now,
+    ...(app.pendingAction ? { pendingAction: app.pendingAction } : {}),
     ...(options.backfill ? { backfill: true } : {}),
   });
 
@@ -219,15 +229,17 @@ export async function updateTracker(config: HenryConfig, lines: string[], option
         // date. A later applied confirmation backfills it below.
         appliedAt: app.status === "applied" ? app.dateText : "",
         lastUpdate: now,
+        ...(app.pendingAction ? { pendingAction: app.pendingAction } : {}),
         history: [stamp(app)],
       });
       created += 1;
       if (NOTIFY_STATUSES.has(app.status)) notifications.push(`📋 Application update: ${app.company} ${app.role} → ${app.status}`);
-      events.push({ company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: true });
+      events.push({ company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: true, ...(app.pendingAction ? { pendingAction: app.pendingAction } : {}) });
       continue;
     }
-    const lastStatus = entry.history[entry.history.length - 1]?.status;
-    if (lastStatus === app.status || entry.status === app.status) continue; // already recorded — no-op, no notify
+    const duplicate = entry.history.some((item) => item.status === app.status
+      && item.subject === app.subject && item.pendingAction === app.pendingAction);
+    if (duplicate) continue; // already recorded — no-op, no notify
     const advances = APP_STATUSES.indexOf(app.status) > APP_STATUSES.indexOf(entry.status)
       || app.status === "rejected" || app.status === "offer";
     if (!advances) {
@@ -235,7 +247,14 @@ export async function updateTracker(config: HenryConfig, lines: string[], option
       // keep it for the audit trail, but never walk "interview" back to "viewed"
       // and never ping Luvish about old news.
       entry.history.push(stamp(app));
+      if (app.pendingAction) entry.pendingAction = app.pendingAction;
       if (app.status === "applied" && !entry.appliedAt) entry.appliedAt = app.dateText; // first applied seen
+      if (app.pendingAction) {
+        entry.lastUpdate = now;
+        changed += 1;
+        notifications.push(`📋 Application action needed: ${app.company} ${app.role} → ${app.pendingAction.replace(/_/g, " ")}`);
+        events.push({ company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: false, pendingAction: app.pendingAction });
+      }
       dirty = true;
       continue;
     }
@@ -245,9 +264,10 @@ export async function updateTracker(config: HenryConfig, lines: string[], option
     entry.status = app.status;
     entry.lastUpdate = now;
     entry.history.push(stamp(app));
+    entry.pendingAction = app.pendingAction;
     changed += 1;
     if (NOTIFY_STATUSES.has(app.status)) notifications.push(`📋 Application update: ${app.company} ${app.role} → ${app.status}`);
-    events.push({ company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: false });
+    events.push({ company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: false, ...(app.pendingAction ? { pendingAction: app.pendingAction } : {}) });
   }
 
   if (created > 0 || changed > 0 || dirty) await writeTrackerState(config, state);

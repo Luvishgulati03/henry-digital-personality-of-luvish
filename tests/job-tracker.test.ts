@@ -49,6 +49,9 @@ test("parseAppLine parses well-formed APP lines and rejects garbage", () => {
   // A subject containing a pipe is preserved via the greedy trailing join.
   const withPipe = parseAppLine("APP|Acme|SWE|LinkedIn|applied|Aug 1|Re: Application | Acme Corp");
   assert.equal(withPipe?.subject, "Re: Application | Acme Corp");
+  const actionable = parseAppLine("APP|Gemba|Engineer|direct|shortlisted|Sep 1|Next steps|ACTION=questionnaire");
+  assert.equal(actionable?.subject, "Next steps");
+  assert.equal(actionable?.pendingAction, "questionnaire");
 });
 
 test("updateTracker: a new application creates an entry and regenerates the markdown ledger", async () => {
@@ -67,8 +70,8 @@ test("updateTracker: a new application creates an entry and regenerates the mark
   assert.equal(summary.byStatus.applied, 1);
 
   const md = await fs.readFile(config.jobTrackerMarkdownPath, "utf8");
-  assert.match(md, /\| Company \| Role \| Source \| Current status \| Applied \| Last update \|/);
-  assert.match(md, /\| Acme Corp \| SWE Intern \| LinkedIn \| applied \| Aug 1 \|/);
+  assert.match(md, /\| Company \| Role \| Source \| Current status \| Pending action \| Applied \| Last update \|/);
+  assert.match(md, /\| Acme Corp \| SWE Intern \| LinkedIn \| applied \| — \| Aug 1 \|/);
   assert.match(md, /### Acme Corp — SWE Intern/);
 });
 
@@ -293,4 +296,59 @@ test("MailWatchService.backfill(): seeds the tracker from a single read-only pro
   const summary = await trackerSummary(config);
   assert.equal(summary.total, 1);
   assert.equal(summary.byStatus.rejected, 1);
+});
+
+test("MailWatchService.backfill(): requires full-body reads and persists body-only pending actions", async () => {
+  const { config, activity } = await setup();
+  let prompt = "";
+  const response = [
+    "APP|Gemba|AI Engineer|direct|shortlisted|Sep 1|Application update|ACTION=questionnaire",
+    "APP|Swiggy|Software Engineer|direct|shortlisted|Sep 2|Your application|ACTION=additional_details",
+    "APP|Albertsons|Software Engineer|direct|shortlisted|Sep 3|Application status|ACTION=screening_questions",
+    "APP|IRIS|AI Product Manager|direct|shortlisted|Sep 4|Following up|ACTION=referral",
+  ].join("\n");
+  const runner = {
+    run: async (value: string): Promise<RunResult> => {
+      prompt = value;
+      return { runId: "r", provider: "codex", response, exitCode: 0, durationMs: 1, events: [] };
+    },
+  } as unknown as ProviderRunner;
+  const result = await new MailWatchService(config, activity, runner).backfill(30);
+  assert.equal(result.created, 4);
+  assert.match(prompt, /fetch and read the full email body/i);
+  assert.match(prompt, /Gemba-style questionnaires/);
+  assert.match(prompt, /Albertsons/);
+  assert.match(prompt, /Swiggy/);
+  assert.match(prompt, /IRIS/);
+
+  const raw = JSON.parse(await fs.readFile(config.jobTrackerPath, "utf8")) as {
+    entries: Array<{ company: string; pendingAction?: string; history: Array<{ pendingAction?: string }> }>;
+  };
+  assert.deepEqual(Object.fromEntries(raw.entries.map((entry) => [entry.company, entry.pendingAction])), {
+    Gemba: "questionnaire", Swiggy: "additional_details",
+    Albertsons: "screening_questions", IRIS: "referral",
+  });
+  assert.ok(raw.entries.every((entry) => entry.history[0]?.pendingAction === entry.pendingAction));
+  const md = await fs.readFile(config.jobTrackerMarkdownPath, "utf8");
+  assert.match(md, /pending \*\*questionnaire\*\*/);
+  assert.match(md, /pending \*\*additional details\*\*/);
+  assert.match(md, /pending \*\*screening questions\*\*/);
+  assert.match(md, /pending \*\*referral\*\*/);
+});
+
+test("updateTracker: a new pending action at the same status is surfaced once", async () => {
+  const { config } = await setup();
+  await updateTracker(config, ["APP|Gemba|AI Engineer|direct|shortlisted|Sep 1|You are shortlisted"]);
+  const actionable = await updateTracker(config, [
+    "APP|Gemba|AI Engineer|direct|shortlisted|Sep 5|Please complete this form|ACTION=questionnaire",
+  ]);
+  assert.equal(actionable.changed, 1);
+  assert.deepEqual(actionable.notifications, ["📋 Application action needed: Gemba AI Engineer → questionnaire"]);
+  assert.equal(actionable.events[0]?.pendingAction, "questionnaire");
+
+  const repeated = await updateTracker(config, [
+    "APP|Gemba|AI Engineer|direct|shortlisted|Sep 5|Please complete this form|ACTION=questionnaire",
+  ]);
+  assert.equal(repeated.changed, 0);
+  assert.deepEqual(repeated.notifications, []);
 });
