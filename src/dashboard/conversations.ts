@@ -171,29 +171,51 @@ export class ConversationStore {
     return (await this.list()).find((conversation) => conversation.id === id);
   }
 
-  async create(title?: string): Promise<ConversationMeta> {
-    return this.locked(async () => {
-      const conversations = await this.loadIndex();
-      const id = `conv_${crypto.randomBytes(6).toString("hex")}`;
-      const now = new Date().toISOString();
-      const meta: ConversationMeta = {
-        id,
-        title: title ? normalizeTitle(title) : "New chat",
-        createdAt: now,
-        updatedAt: now,
-        surface: `${LEGACY_CONVERSATION_ID}:${id}`,
-      };
-      conversations.push(meta);
-      await this.writeJson(this.filePath(id), { messages: [] });
-      await this.saveIndex(conversations);
-      return meta;
-    });
+  /**
+   * The body of `create` WITHOUT taking the lock — the caller must already hold it.
+   * It exists so `ensureActive` can decide-and-create as one atomic step: taking the
+   * lock again from inside a locked block would wait on the chain that is already
+   * running and deadlock.
+   */
+  private async createInternal(title?: string): Promise<ConversationMeta> {
+    const conversations = await this.loadIndex();
+    const id = `conv_${crypto.randomBytes(6).toString("hex")}`;
+    const now = new Date().toISOString();
+    const meta: ConversationMeta = {
+      id,
+      title: title ? normalizeTitle(title) : "New chat",
+      createdAt: now,
+      updatedAt: now,
+      surface: `${LEGACY_CONVERSATION_ID}:${id}`,
+    };
+    conversations.push(meta);
+    await this.writeJson(this.filePath(id), { messages: [] });
+    await this.saveIndex(conversations);
+    return meta;
   }
 
-  /** The conversation a page with no explicit selection should open — most recent, else a fresh one. */
+  async create(title?: string): Promise<ConversationMeta> {
+    return this.locked(() => this.createInternal(title));
+  }
+
+  /**
+   * The conversation a page with no explicit selection should open — most recent, else a fresh one.
+   *
+   * The read and the create are ONE locked step on purpose. As two separate steps, two
+   * concurrent sends both observed an empty index and each minted their own conversation;
+   * their replies then landed in different transcripts, and the history endpoint — which
+   * reads one — looked as though it had dropped a reply outright.
+   */
   async ensureActive(): Promise<ConversationMeta> {
-    const conversations = await this.list();
-    return conversations[0] ?? await this.create();
+    return this.locked(async () => {
+      const conversations = await this.loadIndex();
+      const newestFirst = conversations
+        .map((conversation, index) => ({ conversation, index }))
+        .sort((a, b) => (a.conversation.updatedAt < b.conversation.updatedAt ? 1
+          : a.conversation.updatedAt > b.conversation.updatedAt ? -1
+          : b.index - a.index));
+      return newestFirst[0]?.conversation ?? await this.createInternal();
+    });
   }
 
   async rename(id: string, title: string): Promise<ConversationMeta | undefined> {

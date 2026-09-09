@@ -687,10 +687,21 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
           } catch { /* resource sampling hiccup; skip this tick's resources push */ }
         };
 
+        // Disconnect is tracked BEFORE the first await. Registering these listeners after
+        // it meant a client that dropped during that tick had already fired 'close' by the
+        // time the poll interval existed, so nothing ever cleared it: one leaked timer per
+        // such reconnect, forever. It also kept the process alive, which is what hung the
+        // test suite after the dashboard tests.
+        let closed = false;
+        let interval: NodeJS.Timeout | undefined;
+        const stop = (): void => { closed = true; if (interval) clearInterval(interval); };
+        request.on("close", stop);
+        response.on("close", stop);
+
         await tick();
-        const interval = setInterval(() => { void tick(); }, EVENTS_POLL_MS);
-        request.on("close", () => clearInterval(interval));
-        response.on("close", () => clearInterval(interval));
+        if (closed) return;                       // dropped mid-tick: never arm the timer
+        interval = setInterval(() => { void tick(); }, EVENTS_POLL_MS);
+        interval.unref?.();                       // a poll timer must never hold the process open
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/agents") { json(response, 200, sharedAgentRegistry().snapshot()); return; }
