@@ -61,8 +61,22 @@ const OFFSET_KEY = "poller:lastUpdateId";
 const LOCK_KEY = "poller:lock";
 /** Refuse to poll when another live process refreshed the lock this recently. */
 export const PUMP_LOCK_STALE_MS = 120_000;
-const POLL_TIMEOUT_MS = 15_000;
-export const DEFAULT_PUMP_INTERVAL_MS = 60_000;
+/**
+ * LONG POLL. Telegram holds `getUpdates` open until a message arrives (or this many
+ * seconds pass), so a reply starts the moment Luvish hits send instead of waiting for the
+ * next tick. It used to poll with `timeout=0` on a 60s interval, which meant ~30s of dead
+ * air on average before Henry had even READ a message — far more than the thinking it was
+ * blamed on.
+ */
+const LONG_POLL_SECONDS = 25;
+/** Must comfortably exceed the long poll, or the abort fires mid-wait every single time. */
+const POLL_TIMEOUT_MS = (LONG_POLL_SECONDS + 10) * 1_000;
+/**
+ * Only a gap between poll ATTEMPTS that returned nothing to wait on — a held lock, an
+ * unconfigured token, a network error. A successful long poll re-arms immediately, because
+ * the waiting already happened inside Telegram.
+ */
+export const DEFAULT_PUMP_INTERVAL_MS = 5_000;
 
 export interface PumpResult {
   polled: boolean;
@@ -83,7 +97,8 @@ function isPidAlive(pid: number): boolean {
 }
 
 export class TelegramPump {
-  private interval?: ReturnType<typeof setInterval>;
+  private timer?: ReturnType<typeof setTimeout>;
+  private running = false;
   private loggedConflict = false;
   private loggedFailure = false;
   private ignoredTotal = 0;
@@ -148,7 +163,7 @@ export class TelegramPump {
 
     const lastId = Number(this.store.getMeta(OFFSET_KEY) ?? NaN);
     const params = new URLSearchParams({
-      timeout: "0",
+      timeout: String(LONG_POLL_SECONDS),
       allowed_updates: JSON.stringify(["message", "edited_message"]),
       ...(Number.isFinite(lastId) ? { offset: String(lastId + 1) } : {}),
     });
@@ -233,20 +248,35 @@ export class TelegramPump {
   get ignoredCount(): number { return this.ignoredTotal; }
 
   /** Arms the interval poll inside a long-lived process (repl / scheduler daemon). No-op when unconfigured. */
+  /**
+   * Arms a self-rescheduling long poll. A fixed interval cannot work with long polling:
+   * the poll itself already blocks for up to LONG_POLL_SECONDS, so a timer would either
+   * stack overlapping requests or leave dead air after each one. Instead each cycle
+   * schedules the next when it finishes — immediately after a real poll (the waiting
+   * happened inside Telegram), and after `intervalMs` when there was nothing to wait on,
+   * so a held lock or a missing token cannot become a hot loop.
+   */
   start(intervalMs = DEFAULT_PUMP_INTERVAL_MS): boolean {
-    if (!this.configured || this.interval) return false;
-    // .catch is load-bearing: pollOnce's internal try only guards the fetch — a
-    // SQLITE_BUSY from the store would otherwise be an unhandled rejection that
-    // kills the host repl/daemon (audit 2026-08-09 L3).
-    void this.pollOnce().catch(() => undefined);
-    this.interval = setInterval(() => void this.pollOnce().catch(() => undefined), intervalMs);
-    this.interval.unref?.();
+    if (!this.configured || this.running) return false;
+    this.running = true;
+    const cycle = async (): Promise<void> => {
+      if (!this.running) return;
+      // .catch is load-bearing: pollOnce's internal try only guards the fetch — a
+      // SQLITE_BUSY from the store would otherwise be an unhandled rejection that
+      // kills the host repl/daemon (audit 2026-08-09 L3).
+      const result = await this.pollOnce().catch(() => undefined);
+      if (!this.running) return;
+      this.timer = setTimeout(() => void cycle(), result?.polled ? 0 : intervalMs);
+      this.timer.unref?.();
+    };
+    void cycle();
     return true;
   }
 
   stop(): void {
-    if (this.interval) clearInterval(this.interval);
-    this.interval = undefined;
+    this.running = false;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
     this.releaseLock();
   }
 }

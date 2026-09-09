@@ -119,6 +119,8 @@ export function bridgeEnabled(settingsPath: string): boolean {
 
 export interface BridgeStats {
   replies: number;
+  /** Answered from local state with no provider call — see the reflex lane below. */
+  reflex: number;
   deferred: number;
   dropped: number;
   stale: number;
@@ -127,13 +129,83 @@ export interface BridgeStats {
   thinking: boolean;
 }
 
+/**
+ * Everything the reflex lane can answer WITHOUT a provider call. Supplied by the runtime,
+ * because the bridge owns no stores (doctrine rule 7) — and kept deliberately small: this
+ * is the set of questions whose answer is already sitting in local state.
+ */
+export interface ReflexSnapshot {
+  running: Array<{ role: string; task: string; startedAt: string }>;
+  recentDone: number;
+  pendingApprovals: number;
+  provider: string;
+  uptimeSec?: number;
+}
+
 export interface BridgeDeps {
   /** The ONE brain entry — runtime.ts wires this to HenryAgent.run (readOnly, telegram surface). */
   think: (prompt: string, report: (text: string) => Promise<boolean>) => Promise<string>;
   /** The existing DM sender, already pinned to Luvish's chat id. Injected: the bridge owns no send surface. */
   send: (config: HenryConfig, text: string) => Promise<boolean>;
+  /**
+   * Local state for the reflex lane. Optional: without it every message simply takes the
+   * ordinary path, so an older wiring keeps working unchanged.
+   */
+  snapshot?: () => Promise<ReflexSnapshot>;
   fetchImpl?: typeof fetch;
   now?: () => number;
+}
+
+/**
+ * THE REFLEX LANE.
+ *
+ * "What are you working on?" is not a question for a language model — the answer is sitting
+ * in the dispatch registry and the approval store. Routing it through the brain meant it
+ * queued behind whatever long turn was in flight and then cost a CLI spawn to read back
+ * local state.
+ *
+ * These are answered inline, concurrently, and NEVER enter the sequential queue, so Henry
+ * stays reachable as an orchestrator while a heavy turn runs. Kept narrow on purpose: a
+ * pattern here must be one whose answer is entirely local and unambiguous. Anything with a
+ * hint of interpretation belongs to the brain.
+ */
+type ReflexKind = "working" | "pending" | "alive";
+const REFLEX_PATTERNS: Array<[RegExp, ReflexKind]> = [
+  [/^\s*(what(?:'?s| is| are you)?\s+(you\s+)?(doing|working on|up to)|any\s+agents?\s+running|agent\s+status|what'?s\s+running)\s*\??\s*$/i, "working"],
+  [/^\s*(anything\s+)?(pending|waiting|to\s+approve|approvals?)\s*\??\s*$/i, "pending"],
+  [/^\s*(are\s+you\s+(there|up|alive|awake)|you\s+(there|up|alive)|status|ping)\s*\??\s*$/i, "alive"],
+];
+
+export function reflexKind(text: string): ReflexKind | undefined {
+  for (const [pattern, kind] of REFLEX_PATTERNS) if (pattern.test(text)) return kind;
+  return undefined;
+}
+
+function agoLabel(iso: string, now: number): string {
+  const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (!Number.isFinite(seconds)) return "just now";
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h`;
+}
+
+export function renderReflex(kind: ReflexKind, snapshot: ReflexSnapshot, now: number): string {
+  if (kind === "working") {
+    if (snapshot.running.length === 0) {
+      return snapshot.recentDone > 0
+        ? `Nothing running right now — ${snapshot.recentDone} finished recently.`
+        : "Nothing running right now.";
+    }
+    const lines = snapshot.running.map((agent) => `• ${agent.role} — ${agent.task} (${agoLabel(agent.startedAt, now)})`);
+    return [`Running ${snapshot.running.length}:`, ...lines].join("\n");
+  }
+  if (kind === "pending") {
+    return snapshot.pendingApprovals === 0
+      ? "Nothing waiting on you."
+      : `${snapshot.pendingApprovals} waiting on your approval.`;
+  }
+  const busy = snapshot.running.length > 0 ? `, ${snapshot.running.length} running` : "";
+  return `Here — on ${snapshot.provider}${busy}.`;
 }
 
 interface Pending { updateId: number; text: string }
@@ -143,7 +215,9 @@ export class TelegramBridge implements PumpConsumer {
   private readonly queue: Pending[] = [];
   private draining?: Promise<void>;
   private droppedSinceLastReply = 0;
-  private counters = { replies: 0, deferred: 0, dropped: 0, stale: 0, failed: 0 };
+  private counters = { replies: 0, deferred: 0, dropped: 0, stale: 0, failed: 0, reflex: 0 };
+  /** Reflex answers run outside the sequential queue; `settled()` still has to wait for them. */
+  private readonly reflexInFlight = new Set<Promise<void>>();
   private thinking = false;
 
   constructor(
@@ -200,6 +274,15 @@ export class TelegramBridge implements PumpConsumer {
       if (now - message.date * 1000 > BRIDGE_STALE_MS) { this.counters.stale += 1; continue; }
       const text = message.text.trim();
       if (!text) continue;
+      // REFLEX FIRST, and deliberately outside the queue: a question about local state
+      // must not wait behind a brain call that may run for a minute. This is what keeps
+      // Henry answerable while he is busy.
+      const reflex = this.deps.snapshot ? reflexKind(text) : undefined;
+      if (reflex) {
+        const pending = this.answerReflex(reflex).catch(() => undefined).finally(() => { this.reflexInFlight.delete(pending); });
+        this.reflexInFlight.add(pending);
+        continue;
+      }
       this.enqueue({ updateId: update.update_id, text });
     }
 
@@ -208,6 +291,24 @@ export class TelegramBridge implements PumpConsumer {
     if (maxSeen >= 0) this.store.setMeta(HANDLED_KEY, String(maxSeen));
     void this.drain().catch(() => undefined);
     return {};
+  }
+
+  /**
+   * Answers from local state and replies straight away. Runs concurrently with whatever the
+   * sequential lane is doing, and touches no provider, so it costs nothing but a Telegram
+   * send. A snapshot failure falls back to the ordinary lane rather than going silent.
+   */
+  private async answerReflex(kind: ReflexKind): Promise<void> {
+    try {
+      const snapshot = await this.deps.snapshot!();
+      const sent = await this.reply(renderReflex(kind, snapshot, this.deps.now?.() ?? Date.now()));
+      this.counters.reflex += 1;
+      if (sent) this.counters.replies += 1;
+      await this.activity.record("run.completed", `Telegram bridge answered a ${kind} ask from local state`, { telegram: true, reflex: kind });
+    } catch (error) {
+      this.counters.failed += 1;
+      await this.activity.record("run.failed", "Telegram reflex answer failed", { telegram: true, error: String(error) }).catch(() => undefined);
+    }
   }
 
   private enqueue(item: Pending): void {
@@ -219,9 +320,16 @@ export class TelegramBridge implements PumpConsumer {
     }
   }
 
-  /** Resolves once the queue is empty and nothing is in flight. Exists for tests and `telegram status`. */
+  /**
+   * Resolves once the queue is empty and nothing is in flight — INCLUDING reflex answers,
+   * which run outside the queue. "Settled" has to mean settled, or `telegram status` and
+   * every test would report done while a reply was still on its way out.
+   */
   async settled(): Promise<void> {
-    while (this.draining) await this.draining.catch(() => undefined);
+    while (this.draining || this.reflexInFlight.size > 0) {
+      if (this.draining) await this.draining.catch(() => undefined);
+      if (this.reflexInFlight.size > 0) await Promise.allSettled([...this.reflexInFlight]);
+    }
   }
 
   private drain(): Promise<void> {
