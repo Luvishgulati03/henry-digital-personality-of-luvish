@@ -53,7 +53,7 @@ test("t1 and an absent tier keep the configured default models", () => {
   );
   const codexDefault = codexArgs(PROMPT, { readOnly: false });
   assert.equal(codexDefault[1], "--json", "no -m flag when nothing is configured");
-  assert.ok(codexDefault.includes('model_reasoning_effort="medium"'), "t1 must not inherit a global xhigh setting");
+  assert.ok(codexDefault.includes('model_reasoning_effort="low"'), "t1 must keep the Sol coordinator token-efficient");
   const codexConfigured = codexArgs(PROMPT, { readOnly: false, tier: "t1", model: "gpt-5-codex" });
   assert.deepEqual(codexConfigured.slice(0, 3), ["exec", "-m", "gpt-5-codex"]);
 });

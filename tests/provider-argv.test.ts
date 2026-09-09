@@ -109,11 +109,11 @@ test("buildProviderArgs carries the claude tier models through", () => {
 test("codex argv sandbox follows readOnly, and nothing else", () => {
   assert.deepEqual(codexArgs("p", { readOnly: false }), [
     "exec", "--json", "--ephemeral", "--sandbox", "danger-full-access",
-    "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="medium"', "--skip-git-repo-check", "p",
+    "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="low"', "--skip-git-repo-check", "p",
   ]);
   assert.deepEqual(codexArgs("p", { readOnly: true }), [
     "exec", "--json", "--ephemeral", "--sandbox", "read-only",
-    "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="medium"', "--skip-git-repo-check", "p",
+    "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="low"', "--skip-git-repo-check", "p",
   ]);
   // The operator's own environment is never stripped out from under a run.
   const args = codexArgs("p", { readOnly: false });
@@ -224,7 +224,7 @@ test("a real spawned codex run keeps danger-full-access when not readOnly", asyn
   assert.equal(result.exitCode, 0);
   assert.deepEqual(argvOf(result), [
     "exec", "-m", "gpt-5.6-sol", "--json", "--ephemeral", "--sandbox", "danger-full-access",
-    "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="medium"', "--skip-git-repo-check", "hi",
+    "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="low"', "--skip-git-repo-check", "hi",
   ]);
 });
 

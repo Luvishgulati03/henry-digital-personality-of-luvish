@@ -49,7 +49,7 @@ async function mockedRunner(provider: ProviderName = "codex"): Promise<{
   return { runner: new ProviderRunner(config, activity, admission, deps), calls, activity };
 }
 
-test("Codex job roles force their configured role models at medium t1", async () => {
+test("Codex job roles force their configured role models at low t1", async () => {
   const { runner, calls, activity } = await mockedRunner("codex");
 
   await runner.run("tailor", { role: "resume-tailor", tier: "t2", timeoutMs: 20_000 });
@@ -60,9 +60,9 @@ test("Codex job roles force their configured role models at medium t1", async ()
   assert.deepEqual(calls.map((call) => modelArg(call.args)), ["gpt-5.5", "gpt-5.5", "gpt-5.6-sol"]);
   for (const call of calls) {
     assert.equal(call.command, "codex");
-    assert.ok(call.args.includes('model_reasoning_effort="medium"'));
+    assert.ok(call.args.includes('model_reasoning_effort="low"'));
     assert.ok(!call.args.includes('model_reasoning_effort="high"'));
-    assert.ok(!call.args.includes('model_reasoning_effort="low"'));
+    assert.ok(!call.args.includes('model_reasoning_effort="medium"'));
   }
 
   const started = (await activity.list(20)).filter((event) => event.kind === "run.started").reverse();

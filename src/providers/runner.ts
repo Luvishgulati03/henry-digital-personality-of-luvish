@@ -83,7 +83,8 @@ function collectText(value: unknown, output: string[]): void {
 /**
  * Codex argv for one dispatch. Exported as the testable seam for tier flags.
  * t0 pins a cheap model, t1 (and no tier) keeps the configured/default model,
- * t2 raises reasoning effort.
+ * t1 keeps the Sol coordinator at low reasoning for token-efficient everyday
+ * orchestration; t2 raises reasoning effort for genuinely complex work.
  *
  * The sandbox follows `readOnly` and nothing else: Henry is agentic by design —
  * its brain (repl, telegram, dashboard chat, jobs, standup, the scheduler)
@@ -99,7 +100,7 @@ export function codexArgs(
   // cheap dispatch, while deployments may still choose their own t0 worker.
   const model = options.tier === "t0" ? (options.t0Model || CODEX_T0_MODEL) : options.model;
   const isResume = options.session !== undefined && !options.session.fresh;
-  const effort = options.tier === "t0" ? "low" : options.tier === "t2" ? "high" : "medium";
+  const effort = options.tier === "t2" ? "high" : "low";
   const config = [
     "-c", 'approval_policy="never"',
     // `codex exec resume` does not accept `--sandbox`; its equivalent must be a
