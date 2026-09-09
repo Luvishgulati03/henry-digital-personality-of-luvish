@@ -263,14 +263,14 @@ test("promptDay is idempotent per day and honest when unconfigured", async () =>
 });
 
 test("addressedText: mention-at-start (stripped, case-insensitive) or reply-to-bot; everything else undefined", () => {
-  const identity = { id: 42, username: "Henry_luv_bot" };
+  const identity = { id: 42, username: "Henry_test_bot" };
   const msg = (text: string) => ({ message_id: 1, date: 0, text });
-  assert.equal(addressedText(msg("@Henry_luv_bot yday: shipped auth"), identity), "yday: shipped auth");
-  assert.equal(addressedText(msg("@henry_luv_bot: today metrics"), identity), "today metrics", "case-insensitive + separator stripped");
+  assert.equal(addressedText(msg("@henry_test_bot yday: shipped auth"), identity), "yday: shipped auth");
+  assert.equal(addressedText(msg("@HENRY_TEST_BOT: today metrics"), identity), "today metrics", "case-insensitive + separator stripped");
   assert.equal(addressedText(msg("morning all, working on payments"), identity), undefined, "untagged chatter is invisible");
-  assert.equal(addressedText(msg("thanks @Henry_luv_bot"), identity), undefined, "mention must START the message");
-  assert.equal(addressedText(msg("@Henry_luv_bottle is my mug"), identity), undefined, "word boundary — no prefix-matching other names");
-  assert.equal(addressedText(msg("@Henry_luv_bot"), identity), undefined, "bare mention with no content is nothing to store");
+  assert.equal(addressedText(msg("thanks @henry_test_bot"), identity), undefined, "mention must START the message");
+  assert.equal(addressedText(msg("@henry_test_bottle is my mug"), identity), undefined, "word boundary — no prefix-matching other names");
+  assert.equal(addressedText(msg("@henry_test_bot"), identity), undefined, "bare mention with no content is nothing to store");
   assert.equal(
     addressedText({ message_id: 2, date: 0, text: "the payments API, sorry", reply_to_message: { from: { id: 42, is_bot: true } } }, identity),
     "the payments API, sorry",

@@ -86,7 +86,7 @@ notification exactly as before; only the Telegram leg is skipped.
 ## 5. Two-way DM bridge (Luvish texts the bot, Henry answers)
 
 Once steps 1–3 are done the bridge is ON by default — nothing else to install.
-Text `@Henry_luv_bot` and Henry replies in the chat, using the same brain the
+Text your configured Telegram bot and Henry replies in the chat, using the same brain the
 REPL and the dashboard chat use (memory, intent tiers, sessions).
 
 It runs inside a long-lived process, so exactly one of these must be open:

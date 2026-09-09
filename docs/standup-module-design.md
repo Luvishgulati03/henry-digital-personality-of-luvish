@@ -2,7 +2,7 @@
 
 Status: **BUILT 2026-08-08** (src/standup/: store, poller, service, send; scheduler kinds
 + crons armed as safe no-ops; `henry standup` CLI; 10 tests). Awaiting only the group
-connection: create group → add @Henry_luv_bot → BotFather Group Privacy off → someone
+connection: create group → add your configured bot → BotFather Group Privacy off → someone
 posts → `henry standup discover` → put the negative id in `.env` as
 `HENRY_TELEGRAM_STANDUP_CHAT_ID` → restart Henry. Implementation notes vs this design:
 transport is interval short-polling (60s) instead of a held long-poll — this laptop
@@ -39,7 +39,7 @@ Henry runs the team's daily standup inside a Telegram group:
   It's a display layer — it cannot listen to group messages. Possible v2 nicety
   (a "today's summary" button), not a transport. Rejected as the base.
 - **Bot in the group** (chosen): official, free, no ban risk, we already own
-  @Henry_luv_bot and the outbound pipe. With privacy mode disabled the bot receives
+  the configured Henry bot and the outbound pipe. With privacy mode disabled the bot receives
   every group message via `getUpdates` — long-polling works from a home machine with
   no server, webhook, or public IP.
 
@@ -125,8 +125,8 @@ Henry talks to multiple humans in the group, and each should feel talked *to*:
 
 ## Luvish's setup steps (only he can do these)
 
-1. Create the team group; add **@Henry_luv_bot**.
-2. BotFather → `/mybots` → @Henry_luv_bot → Bot Settings → **Group Privacy →
+1. Create the team group; add **your configured bot**.
+2. BotFather → `/mybots` → your bot → Bot Settings → **Group Privacy →
    Turn off** (so the bot sees all group messages, not just commands).
 3. Have anyone post one message in the group; Henry fishes the group chat id from
    `getUpdates` and it goes into `.env` as `TELEGRAM_STANDUP_CHAT_ID`.

@@ -824,7 +824,7 @@ async function main(): Promise<void> {
       if (sub === "status") print(runtime.standup.status(date));
       else if (sub === "discover") {
         const chats = await runtime.standupPoller.discoverChats();
-        if (chats.length === 0) console.log("No pending updates seen. Add @Henry_luv_bot to the group, have someone post one message, then rerun.");
+        if (chats.length === 0) console.log("No pending updates seen. Add your configured bot to the group, have someone post one message, then rerun.");
         else {
           print(chats);
           console.log("\nPut the group's id into .env as HENRY_TELEGRAM_STANDUP_CHAT_ID (group ids are negative), then restart Henry.");

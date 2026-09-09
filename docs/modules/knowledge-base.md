@@ -18,7 +18,7 @@ personal memory.
 Commands it adds (`src/cli.ts`, `knowledge` branch):
 
 ```
-henry knowledge export                    # organization-specific: pulls raw corpus from a reference backend Mongo instance
+henry knowledge export                    # optional: pulls a compatible raw corpus from a configured Mongo instance
 henry knowledge index [--limit N]         # indexes knowledge/raw/{chunks.jsonl,transcripts/,texts/} with LOCAL embeddings, zero LLM calls
 henry knowledge distill [--limit N]       # LLM pass: raw chunks -> strategy cards (provider call per module, budgeted)
 henry knowledge search <query> [--domain gtm]
@@ -46,12 +46,13 @@ arbitrary markdown. `KnowledgeIngestor.collectRawEntries()` reads exactly:
 - `knowledge/raw/transcripts/*.md` and `knowledge/raw/texts/*.md` — markdown
   with a `key: value` frontmatter block (a `module:` field at minimum).
 
-`henry knowledge export` is an internal adapter for the organization's own
-Mongo instance: it reads credentials from `ORG_BACKEND_DIR/apps/migrations/.env`
-(required — point it at your own reference backend checkout) and writes the
-corpus above into
-`knowledge/raw/`. Forks without access to that Mongo instance should populate
-`knowledge/raw/` by hand in the same shape instead of running `export`.
+`henry knowledge export` is an optional adapter for a compatible Mongo instance.
+It reads credentials from `ORG_BACKEND_DIR/apps/migrations/.env` and writes the
+corpus above into `knowledge/raw/`. Collection names default to `modules`,
+`learningchunks`, and `awsmediajobs`; deployments can override them with
+`HENRY_KNOWLEDGE_MODULES_COLLECTION`, `HENRY_KNOWLEDGE_CHUNKS_COLLECTION`, and
+`HENRY_KNOWLEDGE_TRANSCRIPTS_COLLECTION`. Forks without a compatible Mongo source
+should use `henry knowledge add <file-or-folder>` instead.
 
 ## 3. How it wires to the brain
 

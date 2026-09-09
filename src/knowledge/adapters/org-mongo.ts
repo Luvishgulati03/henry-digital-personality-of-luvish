@@ -3,12 +3,15 @@ import path from "node:path";
 import dotenv from "dotenv";
 
 /**
- * Read-only export of the organization's Learn corpus from Mongo into knowledge/raw/.
- * Credentials are read from the reference backend repo's own .env at run time and never stored.
- * Member notes (private user data) are deliberately NOT exported.
+ * Read-only export of a configured learning corpus from Mongo into knowledge/raw/.
+ * Credentials are read from the source checkout's own .env at run time and never stored.
+ * Only the explicitly projected learning fields below are exported.
  */
 
-const ORG_BACKEND = process.env.ORG_BACKEND_DIR || process.env.GX_BACKEND_DIR;
+const ORG_BACKEND = process.env.ORG_BACKEND_DIR;
+const MODULES_COLLECTION = process.env.HENRY_KNOWLEDGE_MODULES_COLLECTION || "modules";
+const CHUNKS_COLLECTION = process.env.HENRY_KNOWLEDGE_CHUNKS_COLLECTION || "learningchunks";
+const TRANSCRIPTS_COLLECTION = process.env.HENRY_KNOWLEDGE_TRANSCRIPTS_COLLECTION || "awsmediajobs";
 
 interface ExportCounts { chunks: number; transcripts: number; texts: number; modules: number }
 
@@ -50,7 +53,7 @@ function frontmatter(fields: Record<string, unknown>): string {
 }
 
 export async function exportOrgKnowledge(rawDir: string): Promise<ExportCounts> {
-  if (!ORG_BACKEND) throw new Error("ORG_BACKEND_DIR not set — point it at your reference backend checkout (its apps/migrations/.env must hold DB_STRING)");
+  if (!ORG_BACKEND) throw new Error("ORG_BACKEND_DIR not set — point it at your source checkout (its apps/migrations/.env must hold DB_STRING)");
   const env = dotenv.parse(await fs.readFile(path.join(ORG_BACKEND, "apps/migrations/.env"), "utf8"));
   const uri = env.DB_STRING;
   if (!uri) throw new Error("DB_STRING not found in the backend repo's apps/migrations/.env");
@@ -64,7 +67,7 @@ export async function exportOrgKnowledge(rawDir: string): Promise<ExportCounts> 
     await fs.mkdir(path.join(rawDir, "texts"), { recursive: true, mode: 0o700 });
 
     // 1. Module catalog (names, taxonomy, hierarchy) for attribution + domains.
-    const modules = await db.collection("modules").find(
+    const modules = await db.collection(MODULES_COLLECTION).find(
       { active: { $ne: false } },
       { projection: { name: 1, subtitle: 1, description: 1, type: 1, resource_type: 1, filters: 1, slug: 1, keywords: 1, ancestry: 1 } },
     ).toArray();
@@ -73,7 +76,7 @@ export async function exportOrgKnowledge(rawDir: string): Promise<ExportCounts> 
     counts.modules = modules.length;
 
     // 2. Cleaned learning chunks (best-quality corpus; excludes stored embeddings).
-    const chunkCursor = db.collection("learningchunks").find({ active: { $ne: false } }, { projection: { embedding: 0 } });
+    const chunkCursor = db.collection(CHUNKS_COLLECTION).find({ active: { $ne: false } }, { projection: { embedding: 0 } });
     const chunkLines: string[] = [];
     const chunkedModuleIds = new Set<string>();
     for await (const chunk of chunkCursor) {
@@ -88,7 +91,7 @@ export async function exportOrgKnowledge(rawDir: string): Promise<ExportCounts> 
     for (const module of modules) {
       const id = String(module._id);
       if (module.type !== "video" || chunkedModuleIds.has(id)) continue;
-      const job = await db.collection("awsmediajobs").find(
+      const job = await db.collection(TRANSCRIPTS_COLLECTION).find(
         { module_id: module._id, service: "TRANSCRIBE", status: "COMPLETED", transcript: { $exists: true, $ne: "" } },
         { projection: { transcript: 1, created_at: 1 }, sort: { created_at: -1 }, limit: 1 },
       ).next();
@@ -105,7 +108,7 @@ export async function exportOrgKnowledge(rawDir: string): Promise<ExportCounts> 
     // 4. Authored text content (preread/postread/text modules).
     for (const module of modules) {
       if (!["preread", "postread", "text"].includes(String(module.type))) continue;
-      const full = await db.collection("modules").findOne({ _id: module._id }, { projection: { content: 1, preread_content: 1 } });
+      const full = await db.collection(MODULES_COLLECTION).findOne({ _id: module._id }, { projection: { content: 1, preread_content: 1 } });
       const content = [richTextToPlain(String(full?.content || "")), full?.preread_content ? richTextToPlain(JSON.stringify(full.preread_content)) : ""].filter(Boolean).join("\n\n");
       if (!content.trim()) continue;
       await fs.writeFile(
