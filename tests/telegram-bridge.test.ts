@@ -70,6 +70,7 @@ async function bridgeHarness(options: {
   answer?: (prompt: string, report: (text: string) => Promise<boolean>) => Promise<string> | string;
   sendOk?: boolean;
   config?: HenryConfig;
+  snapshot?: () => Promise<import("../src/telegram/bridge.ts").ReflexSnapshot>;
 } = {}): Promise<Harness> {
   const config = options.config ?? tempConfig();
   const activity = await activityFor(config);
@@ -84,6 +85,7 @@ async function bridgeHarness(options: {
     think: async (prompt, report) => { asked.push(prompt); return options.answer ? await options.answer(prompt, report) : "pong"; },
     send: async (_config, text) => { sent.push(text); return options.sendOk !== false; },
     fetchImpl: (async () => { chatActions += 1; return new Response("{}", { status: 200 }); }) as unknown as typeof fetch,
+    ...(options.snapshot ? { snapshot: options.snapshot } : {}),
   });
   return harness;
 }
@@ -351,7 +353,9 @@ test("pump: the offset persists and confirms past the batch — nothing is proce
   await h.pump.pollOnce();
   await h.bridge.settled();
   assert.equal(h.store.getMeta("poller:lastUpdateId"), "20");
-  assert.match(h.urls[0], /timeout=0/);
+  // LONG POLL, not a busy tick: Telegram holds the request open until a message arrives,
+  // which is what removed the ~30s of average dead air before Henry even read a DM.
+  assert.match(h.urls[0], /timeout=(?!0\b)\d+/, "getUpdates must long-poll");
   assert.ok(!h.urls[0].includes("offset="), "the first ever poll has no offset to confirm");
 
   await h.pump.pollOnce();
@@ -415,4 +419,65 @@ test("pump: refuses to poll behind a live lock holder, and no-ops with no config
   assert.match(result.reason!, /no telegram consumers/);
   h.pump.stop();
   h.store.close();
+});
+
+/**
+ * THE REFLEX LANE. "What are you working on?" is answered from the dispatch registry and
+ * the approval queue — no provider, and crucially NOT through the sequential queue, so it
+ * lands while a long turn is still thinking. That is what keeps Henry usable as an
+ * orchestrator instead of going mute for the length of whatever he is doing.
+ */
+test("bridge: a status question is answered from local state without waking the brain", async () => {
+  const h = await bridgeHarness({
+    snapshot: async () => ({
+      running: [{ role: "researcher", task: "read the pricing page", startedAt: new Date(Date.now() - 90_000).toISOString() }],
+      recentDone: 2,
+      pendingApprovals: 3,
+      provider: "claude",
+    }),
+  });
+
+  await h.bridge.consume([dm(1, "what are you working on?")]);
+  await h.bridge.settled();
+
+  assert.deepEqual(h.asked, [], "a local-state question must never reach the provider");
+  assert.equal(h.sent.length, 1);
+  assert.match(h.sent[0], /researcher/, "it should name what is actually running");
+  assert.match(h.sent[0], /read the pricing page/);
+  assert.equal(h.bridge.stats().reflex, 1);
+});
+
+test("bridge: reflex answers arrive WHILE a long turn is still thinking", async () => {
+  let releaseLongTurn = (): void => {};
+  const blocked = new Promise<void>((resolve) => { releaseLongTurn = resolve; });
+  const h = await bridgeHarness({
+    answer: async () => { await blocked; return "the long answer"; },
+    snapshot: async () => ({ running: [], recentDone: 0, pendingApprovals: 4, provider: "codex" }),
+  });
+
+  // A heavy turn starts and stays in flight...
+  await h.bridge.consume([dm(1, "write me a full plan for the quarter")]);
+  // ...and a status question arrives behind it.
+  await h.bridge.consume([dm(2, "anything pending?")]);
+
+  // It is answered NOW, without waiting for the brain to finish.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(h.sent, ["4 waiting on your approval."], "the reflex reply must not queue behind the brain");
+  assert.equal(h.bridge.stats().thinking, true, "and the long turn is genuinely still running");
+
+  releaseLongTurn();
+  await h.bridge.settled();
+  assert.equal(h.sent.length, 2);
+  assert.equal(h.sent[1], "the long answer");
+});
+
+test("bridge: anything needing judgement still goes to the brain", async () => {
+  const h = await bridgeHarness({
+    answer: () => "thought about it",
+    snapshot: async () => ({ running: [], recentDone: 0, pendingApprovals: 0, provider: "claude" }),
+  });
+  await h.bridge.consume([dm(1, "what do you think we should do about the pricing page?")]);
+  await h.bridge.settled();
+  assert.equal(h.asked.length, 1, "the reflex patterns must stay narrow — this one needs a brain");
+  assert.equal(h.bridge.stats().reflex, 0);
 });

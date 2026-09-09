@@ -31,6 +31,7 @@ import { StandupStore } from "./standup/store.ts";
 import { StandupService } from "./standup/service.ts";
 import { StandupPoller } from "./standup/poller.ts";
 import { TelegramPump } from "./telegram/pump.ts";
+import { sharedAgentRegistry } from "./orchestration/agent-registry.ts";
 import { TelegramBridge } from "./telegram/bridge.ts";
 import { limitState } from "./providers/limits.ts";
 import { DraftRepliesService } from "./gmail-drafts/service.ts";
@@ -189,6 +190,19 @@ export class HenryRuntime {
           return Promise.resolve(turn.acknowledgement);
         },
         send: (config, text) => sendTelegram(config, text),
+        // Local state for the reflex lane, so "what are you working on?" is answered from
+        // the dispatch registry and the approval queue instead of costing a provider run
+        // and waiting behind whatever turn is already in flight.
+        snapshot: async () => {
+          const agents = sharedAgentRegistry().snapshot();
+          return {
+            running: agents.running.map((agent) => ({ role: agent.role, task: agent.task, startedAt: agent.startedAt })),
+            recentDone: agents.recent.filter((agent) => agent.status === "done").length,
+            pendingApprovals: (await this.approvals.list("pending")).length,
+            provider: this.config.provider,
+            uptimeSec: Math.round(process.uptime()),
+          };
+        },
       });
     }
     return this._telegramBridge;
