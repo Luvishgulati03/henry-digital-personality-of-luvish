@@ -98,7 +98,7 @@ export interface WorkflowDefinition {
   id: string;
   name: string;
   cron: string;
-  kind: "memory.dream" | "gmail.inbox" | "agent.prompt" | "knowledge.distill" | "mail.watch" | "standup.prompt" | "standup.scan" | "standup.summary" | "portfolio.stats" | "mail.digest" | "jobs.scout" | "social.tweet";
+  kind: "memory.dream" | "gmail.inbox" | "agent.prompt" | "knowledge.distill" | "mail.watch" | "standup.prompt" | "standup.scan" | "standup.summary" | "portfolio.stats" | "mail.digest" | "jobs.scout" | "social.tweet" | "backup.private";
   /** Standup kinds only: which daily cycle this entry drives (default "morning"). */
   session?: "morning" | "evening";
   enabled: boolean;

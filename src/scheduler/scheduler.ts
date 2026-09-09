@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import { Cron } from "croner";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
@@ -124,6 +125,7 @@ export class WorkflowScheduler {
       else if (definition.kind === "mail.digest") result = await this.runJobDigest();
       else if (definition.kind === "jobs.scout") result = await this.runJobScout();
       else if (definition.kind === "social.tweet") result = await this.runDailyTweet();
+      else if (definition.kind === "backup.private") result = await this.runPrivateBackup();
       else result = { skipped: true, reason: "agent.prompt workflows require an orchestrator callback" };
       await this.activity.record("workflow.completed", `Workflow ${definition.id} completed`, { result });
       return result;
@@ -239,6 +241,37 @@ export class WorkflowScheduler {
    * account whose contribution graph is refreshed (HENRY_GITHUB_LOGIN) are configuration, and
    * an unset one skips the run with a reason rather than touching somebody else's repo/account.
    */
+  /**
+   * Refreshes the private full mirror (scripts/private-backup.sh). Without this the mirror is a
+   * SNAPSHOT taken whenever someone remembers — the whole point of a backup is that nobody has to.
+   *
+   * Skips rather than fails when there is no mirror to push to: the public framework ships this
+   * enabled, and a stranger who cloned Henry has no ~/henry-private and should see one honest
+   * "not configured" line, not a daily red failure. The script itself is the authority on what is
+   * excluded (secrets, the >100MB knowledge.db, the browser profile) — this only decides WHEN.
+   */
+  private async runPrivateBackup(): Promise<unknown> {
+    const dest = process.env.HENRY_PRIVATE_DIR || path.join(os.homedir(), "henry-private");
+    if (!(await fs.access(path.join(dest, ".git")).then(() => true, () => false))) {
+      return { skipped: true, reason: `no private mirror at ${dest} — see PRIVATE-README.md in the mirror to initialize one` };
+    }
+    const script = path.join(this.config.rootDir, "scripts", "private-backup.sh");
+    if (!(await fs.access(script).then(() => true, () => false))) {
+      return { skipped: true, reason: "scripts/private-backup.sh is missing" };
+    }
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    try {
+      // Generous envelope: the sync is an rsync plus a git push over a ~150MB mirror, and a
+      // backup that is killed halfway is worse than one that takes a minute.
+      const { stdout } = await promisify(execFile)("bash", [script], { timeout: 10 * 60_000, cwd: this.config.rootDir });
+      return { ok: true, output: stdout.trim().slice(-500) };
+    } catch (error) {
+      // Never throw: a failed backup must not take the whole scheduler daemon down with it.
+      return { ok: false, error: error instanceof Error ? error.message.slice(0, 500) : String(error) };
+    }
+  }
+
   private async runPortfolioStats(): Promise<unknown> {
     const dir = this.config.portfolioDir;
     if (!dir) return { skipped: true, reason: "HENRY_PORTFOLIO_DIR is not set — no portfolio repo configured" };

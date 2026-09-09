@@ -88,3 +88,51 @@ test("portfolio stats workflow skips when the repo or the GitHub login is unconf
   assert.equal(noLogin.skipped, true);
   assert.match(noLogin.reason ?? "", /HENRY_GITHUB_LOGIN/);
 });
+
+/**
+ * The private mirror was only ever as fresh as the last time somebody remembered to run the
+ * script — a snapshot, not a backup. It is a scheduled workflow now, and these pin the two
+ * properties that make an unattended backup safe to ship enabled: it SKIPS honestly when there
+ * is nothing to back up to, and a failure can never take the scheduler daemon down.
+ */
+test("private backup workflow skips when no mirror is configured, and never throws on failure", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "henry-backup-job-"));
+  const config = {
+    rootDir: root,
+    dataDir: path.join(root, "data"),
+    workflowsPath: path.join(root, "workflows.json"),
+  } as HenryConfig;
+  const activity = new ActivityLog(path.join(root, "data", "activity.jsonl"));
+  await activity.init();
+  const scheduler = new WorkflowScheduler(
+    config, activity, undefined as unknown as HenryMemory, undefined as unknown as GmailService,
+  );
+  const definition: WorkflowDefinition = {
+    id: "private-mirror-backup", name: "Private mirror backup", cron: "30 22 * * *", kind: "backup.private", enabled: true,
+  };
+
+  // Point at a directory that is deliberately NOT a git mirror: a stranger who cloned Henry has
+  // no ~/henry-private and must get one honest line, not a daily red failure.
+  const previous = process.env.HENRY_PRIVATE_DIR;
+  process.env.HENRY_PRIVATE_DIR = path.join(root, "not-a-mirror");
+  try {
+    const skipped = await scheduler.run(definition) as { skipped?: boolean; reason?: string };
+    assert.equal(skipped.skipped, true);
+    assert.match(skipped.reason ?? "", /no private mirror/i);
+
+    // A real mirror directory, but no backup script — the failure path must still RESOLVE.
+    await fs.mkdir(path.join(root, "not-a-mirror", ".git"), { recursive: true });
+    const result = await scheduler.run(definition) as { skipped?: boolean; ok?: boolean };
+    assert.ok(result.skipped === true || result.ok === false, "a missing script is reported, never thrown");
+  } finally {
+    if (previous === undefined) delete process.env.HENRY_PRIVATE_DIR;
+    else process.env.HENRY_PRIVATE_DIR = previous;
+  }
+});
+
+test("the shipped defaults schedule a daily private backup", async () => {
+  const defaults = JSON.parse(await fs.readFile(path.join(process.cwd(), "workflows", "defaults.json"), "utf8")) as WorkflowDefinition[];
+  const backup = defaults.find((entry) => entry.kind === "backup.private");
+  assert.ok(backup, "a backup nobody scheduled is a snapshot");
+  assert.equal(backup?.enabled, true);
+});

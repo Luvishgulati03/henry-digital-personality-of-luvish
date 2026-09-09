@@ -96,16 +96,23 @@
   },
   {
     "id": "job-scout-morning",
-    "name": "Morning job scout (LinkedIn+X search → scored shortlist; never applies — Easy Apply stays human)",
+    "name": "Morning job scout (LinkedIn+X search \u2192 scored shortlist; never applies \u2014 Easy Apply stays human)",
     "cron": "0 9 * * 1-5",
     "kind": "jobs.scout",
     "enabled": true
   },
   {
     "id": "daily-tech-tweet",
-    "name": "Daily tech tweet (heartbeat across the afternoon; the service posts at one random minute inside it — no-op while social.tweets.enabled is off)",
+    "name": "Daily tech tweet (heartbeat across the afternoon; the service posts at one random minute inside it \u2014 no-op while social.tweets.enabled is off)",
     "cron": "*/20 13-17 * * *",
     "kind": "social.tweet",
+    "enabled": true
+  },
+  {
+    "id": "private-mirror-backup",
+    "name": "Private mirror backup (full local state \u2192 henry-private)",
+    "cron": "30 22 * * *",
+    "kind": "backup.private",
     "enabled": true
   }
 ]
