@@ -20,9 +20,29 @@ import {
 } from "./attachments.ts";
 import { CHAT_COMMANDS, parseCommand, unescapeMessage, unknownCommandMessage } from "./chat-commands.ts";
 import type { HenryRuntime } from "../runtime.ts";
-import type { ActivityEvent, ProviderName } from "../types.ts";
+import type { ActivityEvent, ProviderEvent, ProviderName } from "../types.ts";
+import { classifyIntentTier } from "../agent/intent.ts";
+import { isLongResearchAsk } from "../orchestration/luna.ts";
+import { reflexKind, renderReflex } from "../reflex.ts";
 
 const EVENTS_POLL_MS = 2000;
+
+// Provider sessions are stateful. Two substantive sends in the same web
+// conversation must never resume one CLI session concurrently; independent
+// conversations, t0 ephemeral turns, and local reflexes stay concurrent. The
+// chain is process-local because provider sessions are too.
+const conversationRunChains = new Map<string, Promise<void>>();
+
+function serializeConversationRun<T>(conversationId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = conversationRunChains.get(conversationId) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(operation);
+  const settled = run.then(() => undefined, () => undefined);
+  conversationRunChains.set(conversationId, settled);
+  void settled.finally(() => {
+    if (conversationRunChains.get(conversationId) === settled) conversationRunChains.delete(conversationId);
+  });
+  return run;
+}
 
 function sseWrite(response: http.ServerResponse, event: string, data: unknown): void {
   if (response.writableEnded) return;
@@ -818,86 +838,126 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
           ? await store.get(requestedConversation)
           : await store.ensureActive();
         if (!conversation) { json(response, 404, { error: "conversation not found" }); return; }
-        // Recorded BEFORE any work: if the conversation is cleared or deleted while this
-        // send is running, the final append below must notice and drop the reply.
         const generation = store.generation(conversation.id);
-        // Append BEFORE committing SSE headers (audit 2026-08-09 B-H1): a failed
-        // write after writeHead made the outer catch call json() on a headers-sent
-        // response, and that second throw killed the whole process (repl included).
-        await store.append(conversation.id, [{
+        const userMessage = {
           role: "user",
           text: prompt,
           at: new Date().toISOString(),
           ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
           ...(skill ? { skill: skill.name } : {}),
-        }]);
-        response.writeHead(200, {
-          "content-type": "text/event-stream; charset=utf-8",
-          "cache-control": "no-store",
-          "connection": "keep-alive",
-        });
-        try {
-          const approvalResult = await executeExplicitApproval(runtime, prompt);
-          if (approvalResult !== undefined) {
-            await store.append(conversation.id, [{ role: "henry", text: approvalResult, at: new Date().toISOString() }], { ifGeneration: generation });
-            sseWrite(response, "done", { response: approvalResult, provider: "local", durationMs: 0, conversationId: conversation.id });
-            response.end();
+        } as const;
+        const startSse = (): void => {
+          if (response.headersSent) return;
+          response.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-store",
+            "connection": "keep-alive",
+          });
+        };
+        const appendUser = async (): Promise<boolean> => {
+          if (store.generation(conversation.id) !== generation) return false;
+          // Append BEFORE committing SSE headers (audit 2026-08-09 B-H1): a failed
+          // write after writeHead made the outer catch call json() on a headers-sent
+          // response, and that second throw killed the whole process (repl included).
+          await store.append(conversation.id, [userMessage], { ifGeneration: generation });
+          return store.generation(conversation.id) === generation;
+        };
+        const composed = [
+          skill ? skillGuidanceBlock(skill) : "",
+          attachmentPromptBlock(attachmentPaths),
+          prompt,
+        ].filter(Boolean).join("\n\n");
+        const reflex = attachmentPaths.length === 0 && !skill ? reflexKind(prompt) : undefined;
+        if (reflex) {
+          if (!await appendUser()) { json(response, 409, { error: "conversation changed; send again" }); return; }
+          startSse();
+          try {
+            const localAnswer = renderReflex(reflex, await runtime.reflexSnapshot(), Date.now());
+            await store.append(conversation.id, [{ role: "henry", text: localAnswer, at: new Date().toISOString() }], { ifGeneration: generation });
+            sseWrite(response, "token", { text: localAnswer });
+            sseWrite(response, "done", { response: localAnswer, provider: "local", durationMs: 0, conversationId: conversation.id });
+          } catch (error) {
+            sseWrite(response, "error", { error: error instanceof Error ? error.message : String(error) });
+          }
+          response.end();
+          return;
+        }
+        await serializeConversationRun(conversation.id, async () => {
+          if (!await appendUser()) {
+            startSse();
+            sseWrite(response, "error", { error: "Conversation changed before this turn could start; send again." });
             return;
           }
-          // Images ride the EXISTING vision path: local file paths in the prompt with the
-          // provider pinned to claude (same mechanism as src/screenshots/service.ts). The pin
-          // is stated out loud rather than applied silently — if the active provider is codex
-          // it cannot read images, and the user is told which model actually saw them.
-          const visionPin = attachmentPaths.length > 0;
-          if (visionPin && runtime.config.provider !== "claude") {
-            sseWrite(response, "notice", {
-              text: `${runtime.config.provider} can't read images — this turn was routed to Claude so the attachment could be seen.`,
-            });
-          }
-          const composed = [
-            skill ? skillGuidanceBlock(skill) : "",
-            attachmentPromptBlock(attachmentPaths),
-            prompt,
-          ].filter(Boolean).join("\n\n");
-          // Same surface-session model as the REPL, one surface PER CONVERSATION:
-          // provider-side context persists across messages in a thread and never
-          // bleeds between threads.
-          const turn = attachmentPaths.length === 0
-            ? runtime.startInteractiveTurn(composed, {
+          startSse();
+          try {
+            const approvalResult = await executeExplicitApproval(runtime, prompt);
+            if (approvalResult !== undefined) {
+              await store.append(conversation.id, [{ role: "henry", text: approvalResult, at: new Date().toISOString() }], { ifGeneration: generation });
+              sseWrite(response, "done", { response: approvalResult, provider: "local", durationMs: 0, conversationId: conversation.id });
+              return;
+            }
+            // Images ride the EXISTING vision path: local file paths in the prompt with the
+            // provider pinned to claude (same mechanism as src/screenshots/service.ts). The pin
+            // is stated out loud rather than applied silently — if the active provider is codex
+            // it cannot read images, and the user is told which model actually saw them.
+            const visionPin = attachmentPaths.length > 0;
+            if (visionPin && runtime.config.provider !== "claude") {
+              sseWrite(response, "notice", {
+                text: `${runtime.config.provider} can't read images — this turn was routed to Claude so the attachment could be seen.`,
+              });
+            }
+            // Same surface-session model as the REPL, one surface PER CONVERSATION:
+            // provider-side context persists across messages in a thread and never
+            // bleeds between threads.
+            const runOptions = {
+                surface: conversation.surface,
+                onEvent: (event: ProviderEvent) => {
+                  const text = event.parsed && typeof (event.parsed as Record<string, unknown>).text === "string"
+                    ? String((event.parsed as Record<string, unknown>).text)
+                    : undefined;
+                  if (text?.trim()) sseWrite(response, "token", { text: text.endsWith("\n") ? text : `${text}\n` });
+                },
+              };
+            const turn = attachmentPaths.length === 0
+              ? isLongResearchAsk(composed) || classifyIntentTier(composed) === "t0"
+                ? runtime.startInteractiveTurn(composed, runOptions)
+                : { delegated: false as const, completion: runtime.agent.run(composed, runOptions) }
+              : { delegated: false as const, completion: runtime.agent.run(composed, {
               surface: conversation.surface,
+              provider: "claude" as const,
               onEvent: (event) => {
                 const text = event.parsed && typeof (event.parsed as Record<string, unknown>).text === "string"
                   ? String((event.parsed as Record<string, unknown>).text)
                   : undefined;
                 if (text?.trim()) sseWrite(response, "token", { text: text.endsWith("\n") ? text : `${text}\n` });
               },
-            })
-            : { delegated: false as const, completion: runtime.agent.run(composed, {
-            surface: conversation.surface,
-            provider: "claude" as const,
-            onEvent: (event) => {
-              const text = event.parsed && typeof (event.parsed as Record<string, unknown>).text === "string"
-                ? String((event.parsed as Record<string, unknown>).text)
-                : undefined;
-              if (text?.trim()) sseWrite(response, "token", { text: text.endsWith("\n") ? text : `${text}\n` });
-            },
-          }) };
-          if (turn.delegated) {
-            // Write the acknowledgement to the socket before the first await.
-            // dispatchAndReport starts on a microtask, so this ordering guarantees
-            // even an instant fake/worker cannot stream a report token first.
-            sseWrite(response, "token", { text: `${turn.acknowledgement}\n\n` });
-            sseWrite(response, "notice", { text: "Luna research · Codex gpt-5.6-sol · low reasoning" });
-            await store.append(conversation.id, [{ role: "henry", text: turn.acknowledgement, at: new Date().toISOString() }], { ifGeneration: generation });
+            }) };
+            if (turn.delegated) {
+              // Write the acknowledgement to the socket before the first await.
+              // dispatchAndReport starts on a microtask, so this ordering guarantees
+              // even an instant fake/worker cannot stream a report token first.
+              sseWrite(response, "token", { text: `${turn.acknowledgement}\n\n` });
+              sseWrite(response, "notice", { text: "Luna research · Codex gpt-5.6-sol · low reasoning" });
+            }
+            const result = await turn.completion;
+            if (result.limited) {
+              // Quota exhaustion means unanswered, not an empty Henry reply and
+              // not a broken task. Preserve the user's turn and surface a typed
+              // retryable state to the web client; never append blank assistant text.
+              sseWrite(response, "error", { error: result.error ?? "Every configured provider is out of quota.", limited: true });
+              return;
+            }
+            // The transcript records the authoritative final response even if the
+            // browser tab bailed mid-stream — reload shows the full reply.
+            await store.append(conversation.id, [
+              ...(turn.delegated ? [{ role: "henry" as const, text: turn.acknowledgement, at: new Date().toISOString() }] : []),
+              { role: "henry", text: result.response, at: new Date().toISOString() },
+            ], { ifGeneration: generation });
+            sseWrite(response, "done", { response: result.response, provider: result.provider, durationMs: result.durationMs, conversationId: conversation.id });
+          } catch (error) {
+            sseWrite(response, "error", { error: error instanceof Error ? error.message : String(error) });
           }
-          const result = await turn.completion;
-          // The transcript records the authoritative final response even if the
-          // browser tab bailed mid-stream — reload shows the full reply.
-          await store.append(conversation.id, [{ role: "henry", text: result.response, at: new Date().toISOString() }], { ifGeneration: generation });
-          sseWrite(response, "done", { response: result.response, provider: result.provider, durationMs: result.durationMs, conversationId: conversation.id });
-        } catch (error) {
-          sseWrite(response, "error", { error: error instanceof Error ? error.message : String(error) });
-        }
+        });
         response.end();
         return;
       }

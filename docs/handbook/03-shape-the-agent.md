@@ -8,6 +8,7 @@ Read the persona guide and examples:
 
 ```bash
 sed -n '1,220p' docs/design-your-soul.md
+sed -n '1,260p' docs/persona-design-guide.md
 sed -n '1,180p' soul.example.md
 sed -n '1,180p' personality.example.md
 ```

@@ -38,6 +38,7 @@ import { DraftRepliesService } from "./gmail-drafts/service.ts";
 import type { ProviderName, RunResult } from "./types.ts";
 import type { RunOptions } from "./providers/runner.ts";
 import { isLongResearchAsk, type DispatchReportHandle } from "./orchestration/luna.ts";
+import type { ReflexSnapshot } from "./reflex.ts";
 
 export type InteractiveTurn =
   | { delegated: false; completion: Promise<RunResult> }
@@ -201,19 +202,22 @@ export class HenryRuntime {
         // Local state for the reflex lane, so "what are you working on?" is answered from
         // the dispatch registry and the approval queue instead of costing a provider run
         // and waiting behind whatever turn is already in flight.
-        snapshot: async () => {
-          const agents = sharedAgentRegistry().snapshot();
-          return {
-            running: agents.running.map((agent) => ({ role: agent.role, task: agent.task, startedAt: agent.startedAt })),
-            recentDone: agents.recent.filter((agent) => agent.status === "done").length,
-            pendingApprovals: (await this.approvals.list("pending")).length,
-            provider: this.config.provider,
-            uptimeSec: Math.round(process.uptime()),
-          };
-        },
+        snapshot: () => this.reflexSnapshot(),
       });
     }
     return this._telegramBridge;
+  }
+
+  /** Shared local-state snapshot used by every provider-free reflex surface. */
+  async reflexSnapshot(): Promise<ReflexSnapshot> {
+    const agents = sharedAgentRegistry().snapshot();
+    return {
+      running: agents.running.map((agent) => ({ role: agent.role, task: agent.task, startedAt: agent.startedAt })),
+      recentDone: agents.recent.filter((agent) => agent.status === "done").length,
+      pendingApprovals: (await this.approvals.list("pending")).length,
+      provider: this.config.provider,
+      uptimeSec: Math.round(process.uptime()),
+    };
   }
 
   /**

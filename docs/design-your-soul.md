@@ -6,6 +6,10 @@ they do, how to write them well, and shows a few good-vs-vague examples.
 Start from `soul.example.md` and `personality.example.md` — copy them,
 fill in the placeholders, and delete the instructional comments.
 
+For a structured, consent-based interview and reusable question bank, use
+`docs/persona-design-guide.md`. It turns observable preferences into editable
+rules without diagnosis or hidden psychological profiling.
+
 ## What these files actually do
 
 Both files are plain markdown, and both are **injected into every

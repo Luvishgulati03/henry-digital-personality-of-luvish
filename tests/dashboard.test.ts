@@ -137,6 +137,118 @@ test("web chat: deep research acknowledges before Luna streams the report", asyn
   }
 });
 
+test("web chat: shared reflex bypasses providers and limited runs never become empty answers", async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "henry-chat-reflex-"));
+  fs.cpSync(path.join(process.cwd(), "workflows"), path.join(tempRoot, "workflows"), { recursive: true });
+  const runtime = await HenryRuntime.create(tempRoot);
+  runtime.config.port = 0;
+  runtime.config.host = "127.0.0.1";
+  let providerCalls = 0;
+  (runtime.agent as unknown as { run: unknown }).run = async () => {
+    providerCalls += 1;
+    return { runId: "limited-1", provider: "codex", response: "", exitCode: null, durationMs: 0, error: "Codex quota resets later", events: [], limited: true };
+  };
+  let researchCalls = 0;
+  (runtime.luna as unknown as { runner: { run: unknown } }).runner = {
+    run: async () => {
+      researchCalls += 1;
+      return { runId: "research-limited-1", provider: "codex", response: "", exitCode: null, durationMs: 0, error: "Codex quota resets later", events: [], limited: true };
+    },
+  };
+  const server = startDashboard(runtime);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const local = await fetch(`${base}/api/chat/send`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "what are you working on?" }),
+    }).then((response) => response.text());
+    assert.match(local, /provider":"local"/);
+    assert.equal(providerCalls, 0, "the shared reflex lane must not wake Codex or Claude");
+
+    const limited = await fetch(`${base}/api/chat/send`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "who is the president of Germany and what are they up to?" }),
+    }).then((response) => response.text());
+    assert.equal(providerCalls, 1, "external/current questions still reach the brain");
+    assert.match(limited, /"limited":true/);
+    const history = await fetch(`${base}/api/chat/history`).then((response) => response.json()) as { messages: Array<{ role: string; text: string }> };
+    assert.equal(history.messages.at(-1)?.role, "user");
+    assert.ok(!history.messages.some((message) => message.role === "henry" && message.text === ""), "quota refusal must not persist as an empty answer");
+
+    const delegatedLimited = await fetch(`${base}/api/chat/send`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "Do an in-depth research report on durable queues with sources." }),
+    }).then((response) => response.text());
+    assert.equal(researchCalls, 1, "delegated research still reaches Luna");
+    assert.match(delegatedLimited, /Started/);
+    assert.match(delegatedLimited, /"limited":true/);
+    const afterDelegated = await fetch(`${base}/api/chat/history`).then((response) => response.json()) as { messages: Array<{ role: string; text: string }> };
+    assert.equal(afterDelegated.messages.at(-1)?.role, "user");
+    assert.ok(!afterDelegated.messages.some((message) => message.text === "Started — I'll report back."), "limited delegated work must not leave a stale acknowledgement in history");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    runtime.close();
+  }
+});
+
+test("web chat: same-conversation delegated research serializes", async () => {
+  setSharedAgentRegistry(new AgentRegistry());
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "henry-chat-research-serialize-"));
+  fs.cpSync(path.join(process.cwd(), "workflows"), path.join(tempRoot, "workflows"), { recursive: true });
+  const runtime = await HenryRuntime.create(tempRoot);
+  runtime.config.port = 0;
+  runtime.config.host = "127.0.0.1";
+  const gates: Array<() => void> = [];
+  let calls = 0;
+  (runtime.luna as unknown as { runner: { run: unknown } }).runner = {
+    run: async () => {
+      const index = ++calls;
+      await new Promise<void>((resolve) => { gates[index] = resolve; });
+      return { runId: `research-${index}`, provider: "codex", response: `report:${index}`, exitCode: 0, durationMs: 1, events: [] };
+    },
+  };
+
+  const server = startDashboard(runtime);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const waitForCalls = async (count: number): Promise<void> => {
+    const deadline = Date.now() + 5_000;
+    while (calls < count && Date.now() < deadline) await sleep(10);
+    assert.equal(calls, count, `${count} research run(s) should be started`);
+  };
+  const send = (prompt: string): Promise<Response> => fetch(`${base}/api/chat/send`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt }),
+  });
+
+  try {
+    const firstPrompt = "Do an in-depth research report on alpha durable queues with sources.";
+    const secondPrompt = "Do an in-depth research report on beta durable queues with sources.";
+    const first = send(firstPrompt);
+    const second = send(secondPrompt);
+    await waitForCalls(1);
+    assert.equal(calls, 1, "the second research turn must wait for the first provider session");
+    gates[1]!();
+    await waitForCalls(2);
+    gates[2]!();
+    await Promise.all([first, second].map(async (pending) => (await pending).text()));
+    const history = await (await fetch(`${base}/api/chat/history`)).json() as { messages: Array<{ role: string; text: string }> };
+    assert.deepEqual(history.messages.map((message) => message.text), [
+      firstPrompt,
+      "Started — I'll report back.",
+      "report:1",
+      secondPrompt,
+      "Started — I'll report back.",
+      "report:2",
+    ]);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    runtime.close();
+  }
+});
+
 test("logs page serves and /api/logs returns the activity journal newest-first", async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "henry-logs-"));
   fs.cpSync(path.join(process.cwd(), "workflows"), path.join(tempRoot, "workflows"), { recursive: true });
@@ -168,7 +280,7 @@ test("logs page serves and /api/logs returns the activity journal newest-first",
   runtime.close();
 });
 
-test("web chat races: overlapping sends both persist; a send finishing after clear never resurrects its reply", async () => {
+test("web chat races: same-conversation provider sessions serialize, both replies persist, and clear rejects late replies", async () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "henry-chat-race-"));
   fs.cpSync(path.join(process.cwd(), "workflows"), path.join(tempRoot, "workflows"), { recursive: true });
   const runtime = await HenryRuntime.create(tempRoot);
@@ -197,16 +309,24 @@ test("web chat races: overlapping sends both persist; a send finishing after cle
     assert.equal(gates.size, count, `${count} send(s) should be blocked in flight`);
   };
 
-  // Overlapping sends: release in reverse order so the final appends race hardest.
+  // Same-conversation sends must not concurrently resume one provider session.
   const alpha = send("alpha");
   const beta = send("beta");
+  await waitForGates(1);
+  assert.equal(gates.has("beta"), false, "the second turn waits outside the shared provider session");
+  gates.get("alpha")!();
   await waitForGates(2);
   gates.get("beta")!();
-  gates.get("alpha")!();
   await Promise.all([alpha, beta].map(async (pending) => (await pending).text()));
   const history = await (await fetch(`${base}/api/chat/history`)).json() as { messages: Array<{ role: string; text: string }> };
   assert.equal(history.messages.filter((m) => m.role === "henry").length, 2, "neither overlapping reply may be dropped by the other's write");
   assert.equal(history.messages.length, 4);
+  assert.deepEqual(history.messages.map((message) => `${message.role}:${message.text}`), [
+    "user:alpha",
+    "henry:reply:alpha",
+    "user:beta",
+    "henry:reply:beta",
+  ]);
 
   // Clear while a send is still running: its reply must not reappear afterwards.
   gates.clear();
