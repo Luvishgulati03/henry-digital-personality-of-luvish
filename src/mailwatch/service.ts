@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import type { ProviderRunner } from "../providers/runner.ts";
-import { updateTracker, type TrackerAppEvent } from "./tracker.ts";
+import { parseAppLine, updateTracker, type TrackerAppEvent } from "./tracker.ts";
 import type { HenryMemory } from "../memory/engram.ts";
 
 /** Same shape as reminders' `ReminderNotifier` — kept local so this module never imports the reminders module directly (doctrine rule 7). */
@@ -10,12 +11,22 @@ export type MailWatchNotifier = (message: string, title?: string) => Promise<voi
 
 const SEEN_ID_CAP = 500;
 const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+const CHECK_LOCK_POLL_MS = 25;
+const CHECK_LOCK_WAIT_MS = 10 * 60 * 1000;
+const MALFORMED_CHECK_LOCK_STALE_MS = 10 * 60 * 1000;
 
 interface MailWatchState {
   lastCheckIso: string;
   seenIds: string[];
   /** Normalized alert subjects with last-seen time — blast-dedupe window (7 days). */
   recentSubjects?: Array<{ key: string; at: string }>;
+  /** Alerts durably committed with the cursor but not yet acknowledged by the notifier. */
+  pendingAlerts?: PendingAlert[];
+}
+
+interface PendingAlert extends ParsedAlert {
+  message: string;
+  createdAt: string;
 }
 
 /**
@@ -134,6 +145,98 @@ export class MailWatchService {
   ) {}
 
   /**
+   * Serializes the complete mailbox transaction across service instances and processes. This
+   * intentionally does NOT use scheduler's `data/mailwatch.lock`: scheduler may already hold
+   * that outer lock while calling tick(), so reusing it here would self-deadlock. A live PID is
+   * never evicted merely for being old; dead holders are reclaimed, while a malformed lock gets
+   * a generous grace period in case another process has created but not populated it yet.
+   */
+  private async withCheckLock<T>(work: () => Promise<T>): Promise<T> {
+    await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
+    const lockPath = `${this.config.mailwatchPath}.check.lock`;
+    const token = `${process.pid}:${randomUUID()}`;
+    const body = JSON.stringify({ pid: process.pid, token });
+    const deadline = Date.now() + CHECK_LOCK_WAIT_MS;
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+
+    while (!handle) {
+      try {
+        handle = await fs.open(lockPath, "wx", 0o600);
+        await handle.writeFile(body, "utf8");
+      } catch (error) {
+        if (handle) {
+          await handle.close().catch(() => undefined);
+          handle = undefined;
+          await fs.rm(lockPath, { force: true }).catch(() => undefined);
+        }
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+
+        const [raw, stat] = await Promise.all([
+          fs.readFile(lockPath, "utf8").catch(() => ""),
+          fs.stat(lockPath).catch(() => undefined),
+        ]);
+        let pid: number | undefined;
+        try {
+          const owner = JSON.parse(raw) as { pid?: unknown };
+          if (typeof owner.pid === "number" && Number.isInteger(owner.pid) && owner.pid > 0) pid = owner.pid;
+        } catch { pid = undefined; }
+        let alive = false;
+        if (pid !== undefined) {
+          try { process.kill(pid, 0); alive = true; }
+          catch (killError) { alive = (killError as NodeJS.ErrnoException).code !== "ESRCH"; }
+        }
+        const malformedAndStale = pid === undefined && !!stat && Date.now() - stat.mtimeMs > MALFORMED_CHECK_LOCK_STALE_MS;
+        if ((pid !== undefined && !alive) || malformedAndStale) {
+          await this.quarantineStaleCheckLock(lockPath, raw, stat);
+          continue;
+        }
+        if (Date.now() >= deadline) throw new Error(`Timed out waiting for mailwatch check lock at ${lockPath}`);
+        await new Promise<void>((resolve) => setTimeout(resolve, CHECK_LOCK_POLL_MS));
+      }
+    }
+
+    try {
+      return await work();
+    } finally {
+      await handle.close().catch(() => undefined);
+      const current = await fs.readFile(lockPath, "utf8").catch(() => "");
+      if (current === body) await fs.rm(lockPath, { force: true }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Pins the observed stale inode with a hard link before unlinking the public lock name. If an
+   * owner released and another process replaced the lock after our observation, its inode will
+   * differ and is left untouched. The unique quarantine link is always cleaned up afterwards.
+   */
+  private async quarantineStaleCheckLock(
+    lockPath: string,
+    observedRaw: string,
+    observedStat: Awaited<ReturnType<typeof fs.stat>> | undefined,
+  ): Promise<boolean> {
+    if (!observedStat) return false;
+    const quarantinePath = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.link(lockPath, quarantinePath);
+      const [quarantinedStat, currentStat, currentRaw] = await Promise.all([
+        fs.stat(quarantinePath),
+        fs.stat(lockPath).catch(() => undefined),
+        fs.readFile(lockPath, "utf8").catch(() => undefined),
+      ]);
+      const observedWasPinned = quarantinedStat.dev === observedStat.dev && quarantinedStat.ino === observedStat.ino;
+      const pathStillPinned = !!currentStat && currentStat.dev === quarantinedStat.dev && currentStat.ino === quarantinedStat.ino;
+      if (!observedWasPinned || !pathStillPinned || currentRaw !== observedRaw) return false;
+      await fs.unlink(lockPath);
+      return true;
+    } catch (error) {
+      if (["ENOENT", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+      throw error;
+    } finally {
+      await fs.unlink(quarantinePath).catch(() => undefined);
+    }
+  }
+
+  /**
    * Every tracker event becomes a durable Engram memory, so "have I applied to X?"
    * recalls the application trail by company name. Semantic tier (facts, no decay);
    * importance follows the stakes of the status.
@@ -159,6 +262,11 @@ export class MailWatchService {
         recentSubjects: Array.isArray(raw.recentSubjects)
           ? raw.recentSubjects.filter((entry): entry is { key: string; at: string } => !!entry && typeof entry.key === "string" && typeof entry.at === "string")
           : [],
+        pendingAlerts: Array.isArray(raw.pendingAlerts)
+          ? raw.pendingAlerts.filter((entry): entry is PendingAlert => !!entry && typeof entry.id === "string"
+            && typeof entry.from === "string" && typeof entry.subject === "string" && typeof entry.what === "string"
+            && typeof entry.message === "string" && typeof entry.createdAt === "string")
+          : [],
       };
     } catch {
       return { lastCheckIso: new Date(Date.now() - FIRST_RUN_LOOKBACK_MS).toISOString(), seenIds: [] };
@@ -167,7 +275,12 @@ export class MailWatchService {
 
   private async writeState(state: MailWatchState): Promise<void> {
     await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
-    const capped: MailWatchState = { lastCheckIso: state.lastCheckIso, seenIds: state.seenIds.slice(-SEEN_ID_CAP), recentSubjects: state.recentSubjects?.slice(-100) };
+    const capped: MailWatchState = {
+      lastCheckIso: state.lastCheckIso,
+      seenIds: state.seenIds.slice(-SEEN_ID_CAP),
+      recentSubjects: state.recentSubjects?.slice(-100),
+      pendingAlerts: state.pendingAlerts ?? [],
+    };
     // tmp+rename (audit 2026-08-09 B-H5): a torn read of this file re-notifies a whole day.
     const tmp = `${this.config.mailwatchPath}.tmp-${process.pid}`;
     await fs.writeFile(tmp, `${JSON.stringify(capped, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -290,8 +403,12 @@ export class MailWatchService {
    * writing the same JSON) applies here too.
    */
   async check(): Promise<MailWatchResult> {
+    return this.withCheckLock(() => this.checkLocked());
+  }
+
+  private async checkLocked(): Promise<MailWatchResult> {
     const checkedAt = new Date().toISOString();
-    const state = await this.readState();
+    const state = await this.deliverPendingAlerts(await this.readState());
     const prompt = [
       "Read-only task. Search my Gmail inbox for messages received after", state.lastCheckIso,
       "that relate to job applications: shortlisting, resume selected, interview",
@@ -325,12 +442,22 @@ export class MailWatchService {
     ].join(" ");
 
     const result = await this.runner.run(prompt, { provider: "codex", readOnly: true, role: "mailwatch" });
+    if (result.limited) throw new Error(`Mailwatch check failed closed: provider limited${result.error ? ` (${result.error})` : ""}`);
+    if (result.error !== undefined) throw new Error(`Mailwatch check failed closed: provider error (${result.error || "unknown error"})`);
+    if (result.exitCode !== 0) throw new Error(`Mailwatch check failed closed: provider exit code ${result.exitCode ?? "null"}`);
+
+    const response = result.response.trim();
     const parsed: ParsedAlert[] = [];
     const appLines: string[] = [];
-    for (const line of result.response.split(/\r?\n/)) {
-      const alert = parseAlertLine(line);
-      if (alert) parsed.push(alert);
-      if (line.trim().startsWith("APP|")) appLines.push(line);
+    if (response !== "NO_ALERTS") {
+      if (!response) throw new Error("Mailwatch check failed closed: empty provider response");
+      for (const line of response.split(/\r?\n/)) {
+        const alert = parseAlertLine(line);
+        const app = parseAppLine(line);
+        if (alert) parsed.push(alert);
+        else if (app) appLines.push(line.trim());
+        else throw new Error(`Mailwatch check failed closed: malformed provider response line (${line.trim() || "empty line"})`);
+      }
     }
 
     // Re-read right before writing — never trust the copy read at the top of this call.
@@ -342,7 +469,7 @@ export class MailWatchService {
     const normalize = (subject: string) => subject.toLowerCase().replace(/[^a-z]+/g, " ").replace(/\d+/g, "#").trim().slice(0, 80);
     const recent = new Map((fresh.recentSubjects ?? []).map((entry) => [entry.key, entry.at]));
     const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
-    const alerts: string[] = [];
+    const newAlerts: Array<{ alert: ParsedAlert; message: string }> = [];
     for (const alert of parsed) {
       if (seen.has(alert.id)) continue;
       seen.add(alert.id);
@@ -351,32 +478,65 @@ export class MailWatchService {
       if (lastSeenAt && new Date(lastSeenAt).getTime() > cutoff) continue;
       recent.set(key, new Date().toISOString());
       const message = `${alert.subject} — from ${alert.from} (${alert.what})`;
-      alerts.push(message);
-      if (this.notify) await this.notify(message, "Henry — job mail").catch(() => undefined);
-      await this.activity.record("workflow.completed", `Job-mail alert: ${alert.subject}`, {
-        mailwatch: true, id: alert.id, from: alert.from, subject: alert.subject, what: alert.what,
-      });
+      newAlerts.push({ alert, message });
     }
 
-    await this.writeState({
-      lastCheckIso: checkedAt,
-      seenIds: Array.from(seen),
-      recentSubjects: [...recent.entries()].filter(([, at]) => new Date(at).getTime() > cutoff)
-        .slice(-100).map(([key, at]) => ({ key, at })),
-    });
+    // Tracker persistence is part of the scan transaction. If it fails, leave lastCheckIso at
+    // the previous cursor so the same mailbox window is retried instead of silently discarded.
+    const tracker = appLines.length ? await updateTracker(this.config, appLines) : undefined;
 
-    // APP lines feed the job-application tracker (data/job-tracker.json + .md). Deduped via the
-    // tracker's own status-history — never via seenIds above, which only guards ALERT lines.
-    if (appLines.length) {
-      const tracker = await updateTracker(this.config, appLines);
+    // Tracker dedupe is the durable delivery marker. Deliver these effects after its commit but
+    // before advancing the mail cursor: if cursor persistence fails, the retry sees the same
+    // APP lines, updateTracker returns no events/notifications, and these are not emitted twice.
+    if (tracker) {
       for (const message of tracker.notifications) {
         if (this.notify) await this.notify(message, "Henry — job tracker").catch(() => undefined);
-        await this.activity.record("workflow.completed", message, { jobTracker: true });
+        await this.activity.record("workflow.completed", message, { jobTracker: true }).catch(() => undefined);
       }
       await this.memorizeAppEvents(tracker.events);
     }
 
-    return { alerts, checkedAt };
+    const freshCursorMs = new Date(fresh.lastCheckIso).getTime();
+    const nextCursor = Number.isFinite(freshCursorMs) && freshCursorMs > new Date(checkedAt).getTime()
+      ? fresh.lastCheckIso
+      : checkedAt;
+    const pendingById = new Map((fresh.pendingAlerts ?? []).map((alert) => [alert.id, alert]));
+    for (const { alert, message } of newAlerts) {
+      if (!pendingById.has(alert.id)) pendingById.set(alert.id, { ...alert, message, createdAt: checkedAt });
+    }
+    const committedState: MailWatchState = {
+      lastCheckIso: nextCursor,
+      seenIds: Array.from(seen),
+      recentSubjects: [...recent.entries()].filter(([, at]) => new Date(at).getTime() > cutoff)
+        .slice(-100).map(([key, at]) => ({ key, at })),
+      pendingAlerts: [...pendingById.values()],
+    };
+    await this.writeState(committedState);
+
+    await this.deliverPendingAlerts(committedState);
+
+    return { alerts: newAlerts.map(({ message }) => message), checkedAt: nextCursor };
+  }
+
+  /**
+   * Drains the durable alert outbox in order. An item is removed only after notify resolves and
+   * that acknowledgement is persisted. If notify or the state write fails, the item remains on
+   * disk for a later check; a post-delivery write failure may duplicate it, which is the intended
+   * at-least-once safety tradeoff for interview/offer alerts.
+   */
+  private async deliverPendingAlerts(state: MailWatchState): Promise<MailWatchState> {
+    if (!this.notify || !state.pendingAlerts?.length) return state;
+    let current = { ...state, pendingAlerts: [...state.pendingAlerts] };
+    while (current.pendingAlerts.length) {
+      const pending = current.pendingAlerts[0];
+      await this.notify(pending.message, "Henry — job mail");
+      await this.activity.record("workflow.completed", `Job-mail alert: ${pending.subject}`, {
+        mailwatch: true, id: pending.id, from: pending.from, subject: pending.subject, what: pending.what,
+      }).catch(() => undefined);
+      current = { ...current, pendingAlerts: current.pendingAlerts.slice(1) };
+      await this.writeState(current);
+    }
+    return current;
   }
 
   /**

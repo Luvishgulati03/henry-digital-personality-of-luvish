@@ -29,16 +29,9 @@
     "enabled": true
   },
   {
-    "id": "job-digest-afternoon",
-    "name": "Job index to Telegram (counts only, afternoon)",
-    "cron": "0 14 * * *",
-    "kind": "mail.digest",
-    "enabled": true
-  },
-  {
     "id": "job-digest-night",
-    "name": "Job index to Telegram (counts only, night)",
-    "cron": "30 21 * * *",
+    "name": "Daily change-only job index to Telegram (counts only)",
+    "cron": "40 23 * * *",
     "kind": "mail.digest",
     "enabled": true
   },

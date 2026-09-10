@@ -6,6 +6,7 @@ import path from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { ActivityLog } from "../src/activity.ts";
 import { MailWatchService, parseAlertLine, type MailWatchNotifier } from "../src/mailwatch/service.ts";
+import type { HenryMemory } from "../src/memory/engram.ts";
 import type { ProviderRunner } from "../src/providers/runner.ts";
 import type { RunResult } from "../src/types.ts";
 
@@ -21,6 +22,14 @@ function fakeRunner(response: string): ProviderRunner {
   return {
     run: async (): Promise<RunResult> => ({
       runId: "r1", provider: "codex", response, exitCode: 0, durationMs: 1, events: [],
+    }),
+  } as unknown as ProviderRunner;
+}
+
+function resultRunner(partial: Partial<RunResult>): ProviderRunner {
+  return {
+    run: async (): Promise<RunResult> => ({
+      runId: "r1", provider: "codex", response: "NO_ALERTS", exitCode: 0, durationMs: 1, events: [], ...partial,
     }),
   } as unknown as ProviderRunner;
 }
@@ -50,7 +59,6 @@ test("check() parses ALERT lines, notifies, records activity, and persists state
   const response = [
     "ALERT|msg-1|recruiter@acme.com|You've been shortlisted|Shortlisting notice",
     "ALERT|msg-2|jobs@foo.com|Interview invitation|Interview scheduled for next week",
-    "some stray line the model should not have emitted",
   ].join("\n");
   const { notify, messages } = fakeNotifier();
   const service = new MailWatchService(config, activity, fakeRunner(response), notify);
@@ -80,6 +88,227 @@ test("check() returns no alerts on NO_ALERTS and writes an updated lastCheckIso"
   const after = await service.status();
   assert.equal(after.seenCount, 0);
   assert.notEqual(after.lastCheckIso, before.lastCheckIso);
+});
+
+test("check() fails closed without advancing lastCheckIso on provider or response failures", async (t) => {
+  const cases: Array<{ name: string; result: Partial<RunResult> }> = [
+    { name: "limited", result: { response: "", exitCode: null, limited: true, error: "quota exhausted" } },
+    { name: "error", result: { error: "provider exploded" } },
+    { name: "nonzero exit", result: { response: "NO_ALERTS", exitCode: 1 } },
+    { name: "null exit", result: { response: "NO_ALERTS", exitCode: null } },
+    { name: "empty response", result: { response: "" } },
+    { name: "malformed response", result: { response: "ALERT|msg-1|recruiter@acme.com|Interview scheduled|Thursday\nstray prose" } },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const { config, activity } = await setup();
+      const baseline = new MailWatchService(config, activity, fakeRunner("NO_ALERTS"));
+      await baseline.check();
+      const before = await baseline.status();
+      const failing = new MailWatchService(config, activity, resultRunner(fixture.result));
+
+      await assert.rejects(() => failing.check(), /Mailwatch check failed closed/);
+      const after = await failing.status();
+      assert.equal(after.lastCheckIso, before.lastCheckIso);
+      assert.equal(after.seenCount, before.seenCount);
+    });
+  }
+});
+
+test("check() does not advance the cursor when tracker persistence fails", async () => {
+  const { config, activity } = await setup();
+  const baseline = new MailWatchService(config, activity, fakeRunner("NO_ALERTS"));
+  await baseline.check();
+  const before = await baseline.status();
+
+  await fs.mkdir(config.jobTrackerPath, { recursive: true });
+  const service = new MailWatchService(
+    config,
+    activity,
+    fakeRunner("APP|Acme Corp|SWE Intern|LinkedIn|applied|Aug 1|Application received"),
+  );
+  await assert.rejects(() => service.check());
+
+  const after = await service.status();
+  assert.equal(after.lastCheckIso, before.lastCheckIso);
+  assert.equal(after.seenCount, before.seenCount);
+});
+
+test("check() serializes concurrent service instances without regressing the cursor or duplicating alerts", async () => {
+  const { config, activity } = await setup();
+  const prompts: string[] = [];
+  let calls = 0;
+  let releaseFirst!: () => void;
+  let firstEntered!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+  const runner = {
+    run: async (prompt: string): Promise<RunResult> => {
+      calls += 1;
+      prompts.push(prompt);
+      if (calls === 1) {
+        firstEntered();
+        await firstGate;
+      }
+      return {
+        runId: `r${calls}`, provider: "codex",
+        response: "ALERT|same-message|recruiter@acme.com|Interview scheduled|Interview on Thursday",
+        exitCode: 0, durationMs: 1, events: [],
+      };
+    },
+  } as unknown as ProviderRunner;
+  const { notify, messages } = fakeNotifier();
+  const firstService = new MailWatchService(config, activity, runner, notify);
+  const secondService = new MailWatchService(config, activity, runner, notify);
+
+  const firstCheck = firstService.check();
+  await entered;
+  const secondCheck = secondService.check();
+  await new Promise<void>((resolve) => setTimeout(resolve, 75));
+  assert.equal(calls, 1, "the second process-equivalent service must wait on the file lock");
+
+  releaseFirst();
+  const [first, second] = await Promise.all([firstCheck, secondCheck]);
+  assert.equal(calls, 2);
+  assert.equal(first.alerts.length, 1);
+  assert.deepEqual(second.alerts, [], "the serialized later check sees the first check's dedupe state");
+  assert.equal(messages.length, 1, "the same alert is delivered exactly once");
+  assert.ok(new Date(second.checkedAt).getTime() >= new Date(first.checkedAt).getTime());
+  assert.match(prompts[1], new RegExp(`after ${first.checkedAt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} that relate`));
+  await assert.rejects(() => fs.access(`${config.mailwatchPath}.check.lock`), "the dedicated check lock is released");
+});
+
+test("check() uses a dedicated lock and does not deadlock behind scheduler's mailwatch.lock", async () => {
+  const { config, activity } = await setup();
+  const schedulerLock = path.join(config.dataDir, "mailwatch.lock");
+  await fs.writeFile(schedulerLock, String(process.pid), "utf8");
+
+  const result = await new MailWatchService(config, activity, fakeRunner("NO_ALERTS")).check();
+  assert.deepEqual(result.alerts, []);
+  assert.equal(await fs.readFile(schedulerLock, "utf8"), String(process.pid));
+});
+
+test("stale check-lock quarantine cannot delete a replacement lock with a different inode", async () => {
+  const { config, activity } = await setup();
+  const service = new MailWatchService(config, activity, fakeRunner("NO_ALERTS"));
+  const lockPath = `${config.mailwatchPath}.check.lock`;
+  const staleBody = JSON.stringify({ pid: 2_147_483_647, token: "stale" });
+  await fs.writeFile(lockPath, staleBody, "utf8");
+  const observedStat = await fs.stat(lockPath);
+
+  await fs.unlink(lockPath);
+  const replacementBody = JSON.stringify({ pid: process.pid, token: "replacement" });
+  await fs.writeFile(lockPath, replacementBody, "utf8");
+  const quarantined = await (service as unknown as {
+    quarantineStaleCheckLock: (path: string, raw: string, stat: typeof observedStat) => Promise<boolean>;
+  }).quarantineStaleCheckLock(lockPath, staleBody, observedStat);
+
+  assert.equal(quarantined, false);
+  assert.equal(await fs.readFile(lockPath, "utf8"), replacementBody, "an outdated stale observer must leave the replacement intact");
+  assert.deepEqual((await fs.readdir(config.dataDir)).filter((name) => name.includes(".check.lock.stale-")), []);
+});
+
+test("check() reclaims a genuinely stale dead-process lock through quarantine", async () => {
+  const { config, activity } = await setup();
+  const lockPath = `${config.mailwatchPath}.check.lock`;
+  await fs.writeFile(lockPath, JSON.stringify({ pid: 2_147_483_647, token: "dead" }), "utf8");
+
+  const result = await new MailWatchService(config, activity, fakeRunner("NO_ALERTS")).check();
+  assert.deepEqual(result.alerts, []);
+  await assert.rejects(() => fs.access(lockPath));
+});
+
+test("check() preserves a newer stored cursor instead of regressing it", async () => {
+  const { config, activity } = await setup();
+  const futureCursor = "2099-01-01T00:00:00.000Z";
+  await fs.writeFile(config.mailwatchPath, `${JSON.stringify({ lastCheckIso: futureCursor, seenIds: [] })}\n`, "utf8");
+
+  const result = await new MailWatchService(config, activity, fakeRunner("NO_ALERTS")).check();
+  assert.equal(result.checkedAt, futureCursor);
+  assert.equal((await new MailWatchService(config, activity, fakeRunner("NO_ALERTS")).status()).lastCheckIso, futureCursor);
+});
+
+test("tracker delivery happens exactly once when cursor persistence fails and the check retries", async () => {
+  const { config, activity } = await setup();
+  const baseline = new MailWatchService(config, activity, fakeRunner("NO_ALERTS"));
+  await baseline.check();
+  const before = await baseline.status();
+  const backupPath = `${config.mailwatchPath}.test-backup`;
+  const remembered: string[] = [];
+  const memory = {
+    remember: async (content: string): Promise<string> => { remembered.push(content); return `m${remembered.length}`; },
+  } as unknown as HenryMemory;
+  const { notify: collectNotification, messages } = fakeNotifier();
+  let sabotageCursorWrite = true;
+  const notify: MailWatchNotifier = async (message, title) => {
+    await collectNotification(message, title);
+    if (title === "Henry — job tracker" && sabotageCursorWrite) {
+      sabotageCursorWrite = false;
+      await fs.rename(config.mailwatchPath, backupPath);
+      await fs.mkdir(config.mailwatchPath);
+    }
+  };
+  const response = "APP|Acme Corp|SWE Intern|LinkedIn|shortlisted|Aug 5|You've been shortlisted";
+  const service = new MailWatchService(config, activity, fakeRunner(response), notify, memory);
+
+  await assert.rejects(() => service.check());
+  await fs.rmdir(config.mailwatchPath);
+  await fs.rename(backupPath, config.mailwatchPath);
+  assert.equal((await service.status()).lastCheckIso, before.lastCheckIso, "failed cursor write leaves the prior window intact");
+  assert.equal(messages.filter((item) => item.title === "Henry — job tracker").length, 1);
+  assert.equal(remembered.length, 1);
+
+  await service.check();
+  assert.equal(messages.filter((item) => item.title === "Henry — job tracker").length, 1, "tracker dedupe suppresses retry delivery");
+  assert.equal(remembered.length, 1, "tracker memory is also recorded exactly once");
+  assert.notEqual((await service.status()).lastCheckIso, before.lastCheckIso);
+});
+
+test("alert outbox commits cursor and seen state before delivery, then retries a failed notifier", async () => {
+  const { config, activity } = await setup();
+  const baseline = new MailWatchService(config, activity, fakeRunner("NO_ALERTS"));
+  await baseline.check();
+  const before = await baseline.status();
+  let attempts = 0;
+  const delivered: string[] = [];
+  const failingNotifier: MailWatchNotifier = async () => {
+    attempts += 1;
+    throw new Error("notification channel unavailable");
+  };
+  const alert = "ALERT|interview-1|recruiter@acme.com|Interview scheduled|Interview on Thursday";
+
+  await assert.rejects(
+    () => new MailWatchService(config, activity, fakeRunner(alert), failingNotifier).check(),
+    /notification channel unavailable/,
+  );
+  const committed = JSON.parse(await fs.readFile(config.mailwatchPath, "utf8")) as {
+    lastCheckIso: string; seenIds: string[]; pendingAlerts: Array<{ id: string; message: string }>;
+  };
+  assert.notEqual(committed.lastCheckIso, before.lastCheckIso, "cursor commits before delivery is attempted");
+  assert.deepEqual(committed.seenIds, ["interview-1"]);
+  assert.equal(committed.pendingAlerts.length, 1, "failed delivery remains durable");
+  assert.equal(attempts, 1);
+
+  const order: string[] = [];
+  const retryRunner = {
+    run: async (): Promise<RunResult> => {
+      order.push("scan");
+      return { runId: "retry", provider: "codex", response: "NO_ALERTS", exitCode: 0, durationMs: 1, events: [] };
+    },
+  } as unknown as ProviderRunner;
+  const retryNotifier: MailWatchNotifier = async (message) => {
+    order.push("notify");
+    attempts += 1;
+    delivered.push(message);
+  };
+  await new MailWatchService(config, activity, retryRunner, retryNotifier).check();
+
+  assert.deepEqual(order, ["notify", "scan"], "pending delivery is retried before the later mailbox scan");
+  assert.equal(attempts, 2);
+  assert.deepEqual(delivered, ["Interview scheduled — from recruiter@acme.com (Interview on Thursday)"]);
+  const drained = JSON.parse(await fs.readFile(config.mailwatchPath, "utf8")) as { pendingAlerts: unknown[] };
+  assert.deepEqual(drained.pendingAlerts, [], "only a resolved notifier removes the outbox item");
 });
 
 test("first run defaults lastCheckIso to now-24h", async () => {
@@ -201,6 +430,18 @@ test("tick() runs the real check exactly once when a planned time is due, then d
     reason: "no planned mailwatch check due yet",
     nextPlannedAt: plan.times[1],
   });
+});
+
+test("tick() retains a due planned slot when check() fails validation", async () => {
+  const { config, activity } = await setup();
+  const service = new MailWatchService(config, activity, resultRunner({ response: "unexpected prose" }));
+  const morning = new Date(2026, 0, 15, 8, 0, 0);
+  const plan = await service.plan(morning, () => 0);
+  const due = new Date(plan.times[0]);
+
+  await assert.rejects(() => service.tick(due), /malformed provider response/);
+  const retained = await service.plan(due);
+  assert.deepEqual(retained.fired, [], "the failed check's slot must remain available for retry");
 });
 
 test("status() surfaces today's plan alongside the existing fields", async () => {

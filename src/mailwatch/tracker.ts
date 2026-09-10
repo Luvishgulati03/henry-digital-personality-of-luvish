@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import type { HenryConfig } from "../config.ts";
 
 /** Same rails as `service.ts`'s `MailWatchNotifier` — no shared type, kept local (doctrine rule 7). */
@@ -25,7 +26,9 @@ function isAppStatus(value: string): value is AppStatus {
   return (APP_STATUSES as readonly string[]).includes(value);
 }
 
-export interface ParsedApp {
+export interface StructuredTrackerEvent {
+  /** Stable Henry draft ID. Present for browser submissions; absent for email-derived fallback events. */
+  applicationId?: string;
   company: string;
   role: string;
   source: string;
@@ -34,6 +37,8 @@ export interface ParsedApp {
   subject: string;
   pendingAction?: PendingAction;
 }
+
+export interface ParsedApp extends StructuredTrackerEvent {}
 
 /**
  * Defensively parses one `APP|<company>|<role>|<source>|<status>|<date-ish>|<subject>[|ACTION=<kind>]` line —
@@ -72,8 +77,9 @@ export interface TrackerHistoryEntry {
 }
 
 export interface TrackerEntry {
-  /** `company::role`, lowercased — the identity key applications are deduped and updated on. */
+  /** Draft-backed records use `application:<id>`; email fallback keeps `company::role`. */
   key: string;
+  applicationId?: string;
   company: string;
   role: string;
   source: string;
@@ -90,6 +96,7 @@ export interface TrackerState {
 
 /** One concrete application event (new application or status transition) — the unit the memory layer records. */
 export interface TrackerAppEvent {
+  applicationId?: string;
   company: string;
   role: string;
   status: AppStatus;
@@ -115,7 +122,8 @@ export interface TrackerSummary {
   byStatus: Record<AppStatus, number>;
 }
 
-function entryKey(company: string, role: string): string {
+function entryKey(company: string, role: string, applicationId?: string): string {
+  if (applicationId) return `application:${applicationId}`;
   return `${company.trim().toLowerCase()}::${role.trim().toLowerCase()}`;
 }
 
@@ -124,6 +132,7 @@ function isTrackerEntry(value: unknown): value is TrackerEntry {
   const candidate = value as Partial<TrackerEntry>;
   return (
     typeof candidate.key === "string" &&
+    (candidate.applicationId === undefined || typeof candidate.applicationId === "string") &&
     typeof candidate.company === "string" &&
     typeof candidate.role === "string" &&
     typeof candidate.source === "string" &&
@@ -152,6 +161,80 @@ async function writeTrackerState(config: HenryConfig, state: TrackerState): Prom
   await fs.chmod(config.jobTrackerPath, 0o600).catch(() => undefined);
   // The .md is the artifact Luvish actually reads — no restrictive mode, same as cover letters / linkedin drafts.
   await fs.writeFile(config.jobTrackerMarkdownPath, renderMarkdown(state), "utf8");
+}
+
+function isPidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+/** Serializes the canonical ledger's read-modify-write transaction across Henry processes. */
+async function withTrackerLock<T>(config: HenryConfig, operation: () => Promise<T>): Promise<T> {
+  await fs.mkdir(config.dataDir, { recursive: true, mode: 0o700 });
+  const lockPath = `${config.jobTrackerPath}.lock`;
+  const token = `${process.pid}:${randomUUID()}`;
+  let acquired = false;
+  for (let attempt = 0; attempt < 200 && !acquired; attempt += 1) {
+    try {
+      await fs.writeFile(lockPath, token, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      acquired = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let stale = false;
+      let observedToken = "";
+      try {
+        const [holder, stat] = await Promise.all([fs.readFile(lockPath, "utf8"), fs.stat(lockPath)]);
+        observedToken = holder;
+        const holderPid = Number(holder.split(":", 1)[0]);
+        stale = Number.isFinite(holderPid)
+          ? holderPid !== process.pid && !isPidAlive(holderPid)
+          : Date.now() - stat.mtimeMs > 30_000;
+      } catch { /* The holder may be releasing the lock. */ }
+      if (stale) await quarantineStaleLock(lockPath, observedToken);
+      else await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  if (!acquired) throw new Error("Timed out waiting to update the canonical job tracker");
+  try { return await operation(); }
+  finally {
+    const holder = await fs.readFile(lockPath, "utf8").catch(() => "");
+    if (holder === token) await fs.rm(lockPath, { force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Claims stale-lock breaking with a fixed hard-link quarantine. Only one contender can
+ * create that link; inode verification ensures it cannot unlink a fresh replacement lock.
+ */
+async function quarantineStaleLock(lockPath: string, observedToken: string): Promise<void> {
+  const quarantinePath = `${lockPath}.stale-break`;
+  try {
+    await fs.link(lockPath, quarantinePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      const stat = await fs.stat(quarantinePath).catch(() => undefined);
+      if (stat && Date.now() - stat.mtimeMs > 30_000) await fs.rm(quarantinePath, { force: true }).catch(() => undefined);
+      return;
+    }
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  try {
+    const [quarantinedToken, currentToken, quarantinedStat, currentStat] = await Promise.all([
+      fs.readFile(quarantinePath, "utf8"),
+      fs.readFile(lockPath, "utf8").catch(() => ""),
+      fs.stat(quarantinePath),
+      fs.stat(lockPath).catch(() => undefined),
+    ]);
+    if (quarantinedToken === observedToken && currentToken === observedToken && currentStat
+      && currentStat.dev === quarantinedStat.dev && currentStat.ino === quarantinedStat.ino) {
+      await fs.unlink(lockPath).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      });
+    }
+  } finally {
+    await fs.rm(quarantinePath, { force: true }).catch(() => undefined);
+  }
 }
 
 function escapeCell(value: string): string {
@@ -201,8 +284,28 @@ export function renderMarkdown(state: TrackerState, now: Date = new Date()): str
  */
 export async function updateTracker(config: HenryConfig, lines: string[], options: { backfill?: boolean } = {}): Promise<TrackerUpdateResult> {
   const parsed = lines.map(parseAppLine).filter((item): item is ParsedApp => item !== undefined);
+  return recordTrackerEvents(config, parsed, options);
+}
+
+/** Records one trusted structured event without converting it to or reparsing model-oriented APP text. */
+export async function recordTrackerEvent(config: HenryConfig, event: StructuredTrackerEvent, options: { backfill?: boolean } = {}): Promise<TrackerUpdateResult> {
+  return recordTrackerEvents(config, [event], options);
+}
+
+/** Atomically applies structured evidence events to the canonical ledger. */
+export async function recordTrackerEvents(config: HenryConfig, input: StructuredTrackerEvent[], options: { backfill?: boolean } = {}): Promise<TrackerUpdateResult> {
+  const parsed = input.map((event): ParsedApp | undefined => {
+    const applicationId = event.applicationId?.trim();
+    const company = event.company.trim();
+    const role = event.role.trim();
+    const source = event.source.trim();
+    const subject = event.subject.trim();
+    if (!company || !role || !source || !subject || !isAppStatus(event.status)) return undefined;
+    return { ...event, ...(applicationId ? { applicationId } : {}), company, role, source, subject, dateText: event.dateText.trim() || "unknown" };
+  }).filter((item): item is ParsedApp => item !== undefined);
   if (parsed.length === 0) return { notifications: [], created: 0, changed: 0, events: [] };
 
+  return withTrackerLock(config, async () => {
   const state = await readTrackerState(config);
   const notifications: string[] = [];
   const events: TrackerAppEvent[] = [];
@@ -219,11 +322,32 @@ export async function updateTracker(config: HenryConfig, lines: string[], option
   });
 
   for (const app of parsed) {
-    const key = entryKey(app.company, app.role);
-    const entry = state.entries.find((candidate) => candidate.key === key);
+    let key = entryKey(app.company, app.role, app.applicationId);
+    const sameCompanyRole = state.entries.filter((candidate) => entryKey(candidate.company, candidate.role) === entryKey(app.company, app.role));
+    let entry = state.entries.find((candidate) => candidate.key === key);
+    if (!entry && app.applicationId) {
+      const legacyMatches = sameCompanyRole.filter((candidate) => !candidate.applicationId);
+      const identifiedMatches = sameCompanyRole.filter((candidate) => candidate.applicationId);
+      if (legacyMatches.length === 1 && identifiedMatches.length === 0) {
+        // Deterministically upgrade the sole legacy email record instead of duplicating it
+        // when a persisted Henry submission is reconciled later.
+        entry = legacyMatches[0];
+        entry.applicationId = app.applicationId;
+        entry.key = key;
+        dirty = true;
+      }
+    } else if (!entry && !app.applicationId) {
+      const browserMatches = sameCompanyRole.filter((candidate) => candidate.applicationId);
+      if (browserMatches.length === 1) {
+        // Email has no draft ID. One browser record is unambiguous; two are not, so the
+        // legacy company-role fallback remains a separate record in the ambiguous case.
+        entry = browserMatches[0];
+        key = entry.key;
+      }
+    }
     if (!entry) {
       state.entries.push({
-        key, company: app.company, role: app.role, source: app.source, status: app.status,
+        key, ...(app.applicationId ? { applicationId: app.applicationId } : {}), company: app.company, role: app.role, source: app.source, status: app.status,
         // appliedAt only ever comes from an "applied" email (audit M20): an entry first
         // seen through a rejection must not claim the rejection's date as its application
         // date. A later applied confirmation backfills it below.
@@ -234,11 +358,11 @@ export async function updateTracker(config: HenryConfig, lines: string[], option
       });
       created += 1;
       if (NOTIFY_STATUSES.has(app.status)) notifications.push(`📋 Application update: ${app.company} ${app.role} → ${app.status}`);
-      events.push({ company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: true, ...(app.pendingAction ? { pendingAction: app.pendingAction } : {}) });
+      events.push({ ...(app.applicationId ? { applicationId: app.applicationId } : {}), company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: true, ...(app.pendingAction ? { pendingAction: app.pendingAction } : {}) });
       continue;
     }
     const duplicate = entry.history.some((item) => item.status === app.status
-      && item.subject === app.subject && item.pendingAction === app.pendingAction);
+      && (app.applicationId !== undefined || (item.subject === app.subject && item.pendingAction === app.pendingAction)));
     if (duplicate) continue; // already recorded — no-op, no notify
     const advances = APP_STATUSES.indexOf(app.status) > APP_STATUSES.indexOf(entry.status)
       || app.status === "rejected" || app.status === "offer";
@@ -253,7 +377,7 @@ export async function updateTracker(config: HenryConfig, lines: string[], option
         entry.lastUpdate = now;
         changed += 1;
         notifications.push(`📋 Application action needed: ${app.company} ${app.role} → ${app.pendingAction.replace(/_/g, " ")}`);
-        events.push({ company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: false, pendingAction: app.pendingAction });
+        events.push({ ...(app.applicationId ? { applicationId: app.applicationId } : {}), company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: false, pendingAction: app.pendingAction });
       }
       dirty = true;
       continue;
@@ -267,11 +391,48 @@ export async function updateTracker(config: HenryConfig, lines: string[], option
     entry.pendingAction = app.pendingAction;
     changed += 1;
     if (NOTIFY_STATUSES.has(app.status)) notifications.push(`📋 Application update: ${app.company} ${app.role} → ${app.status}`);
-    events.push({ company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: false, ...(app.pendingAction ? { pendingAction: app.pendingAction } : {}) });
+    events.push({ ...(app.applicationId ? { applicationId: app.applicationId } : {}), company: app.company, role: app.role, status: app.status, subject: app.subject, dateText: app.dateText, isNew: false, ...(app.pendingAction ? { pendingAction: app.pendingAction } : {}) });
   }
 
   if (created > 0 || changed > 0 || dirty) await writeTrackerState(config, state);
   return { notifications, created, changed, events };
+  });
+}
+
+interface SubmittedApplicationRecord {
+  id: string;
+  status: string;
+  submittedAt?: string;
+  posting?: { company?: string; title?: string; source?: string };
+}
+
+export interface TrackerReconciliationResult extends TrackerUpdateResult {
+  submittedRecords: number;
+}
+
+/** Replays locally persisted submitted drafts into the tracker. No provider or network is used. */
+export async function reconcileSubmittedApplications(config: HenryConfig): Promise<TrackerReconciliationResult> {
+  let records: unknown;
+  try { records = JSON.parse(await fs.readFile(config.jobApplicationsPath, "utf8")); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { notifications: [], created: 0, changed: 0, events: [], submittedRecords: 0 };
+    throw error;
+  }
+  if (!Array.isArray(records)) throw new Error("Job application store is not an array; cannot reconcile tracker");
+  const submitted = (records as SubmittedApplicationRecord[]).filter((record) => record?.status === "submitted"
+    && typeof record.id === "string" && typeof record.submittedAt === "string"
+    && typeof record.posting?.company === "string" && typeof record.posting?.title === "string"
+    && typeof record.posting?.source === "string").sort((a, b) => a.id.localeCompare(b.id));
+  const update = await recordTrackerEvents(config, submitted.map((record) => ({
+    applicationId: record.id,
+    company: record.posting!.company!,
+    role: record.posting!.title!,
+    source: record.posting!.source!,
+    status: "applied",
+    dateText: record.submittedAt!,
+    subject: `Henry submitted application ${record.id}`,
+  })));
+  return { ...update, submittedRecords: submitted.length };
 }
 
 /** Read-only summary for `henry mailwatch tracker` — never writes. */
@@ -284,9 +445,9 @@ export async function trackerSummary(config: HenryConfig): Promise<TrackerSummar
 
 export interface TrackerDigest {
   date: string;
-  appliedToday: number;
-  updatesToday: number;
-  total: number;
+  newlyIndexed: number;
+  indexedUpdates: number;
+  indexedJobRecords: number;
   byStatus: Record<AppStatus, number>;
   /** One compact Telegram-ready line — "just the index", no per-application detail. */
   line: string;
@@ -299,14 +460,14 @@ function isLocalDay(iso: string, now: Date): boolean {
 }
 
 /**
- * The twice-daily "job index" (Luvish, 2026-08-09: "just the index, telegram me the
- * index"): counts only, computed locally from the tracker ledger — zero provider spend.
+ * The scheduled "job index": counts only, computed locally from recordedAt evidence in the
+ * tracker ledger — zero provider spend. It describes indexing activity, not event dates.
  */
 export async function trackerDigest(config: HenryConfig, now: Date = new Date()): Promise<TrackerDigest> {
   const state = await readTrackerState(config);
   const byStatus = Object.fromEntries(APP_STATUSES.map((status) => [status, 0])) as Record<AppStatus, number>;
-  let appliedToday = 0;
-  let updatesToday = 0;
+  let newlyIndexed = 0;
+  let indexedUpdates = 0;
   for (const entry of state.entries) {
     byStatus[entry.status] += 1;
     for (const item of entry.history) {
@@ -314,12 +475,12 @@ export async function trackerDigest(config: HenryConfig, now: Date = new Date())
       // counting them would make a seeding sweep read as a monster application day.
       if (item.backfill) continue;
       if (!isLocalDay(item.recordedAt, now)) continue;
-      if (item.status === "applied") appliedToday += 1;
-      else updatesToday += 1;
+      if (item.status === "applied") newlyIndexed += 1;
+      else indexedUpdates += 1;
     }
   }
   const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
   const statusBits = APP_STATUSES.filter((status) => byStatus[status] > 0).map((status) => `${status} ${byStatus[status]}`).join(" · ");
-  const line = `📊 Job index ${date} — today: ${appliedToday} applied, ${updatesToday} update${updatesToday === 1 ? "" : "s"} · tracked ${state.entries.length} (${statusBits || "none yet"})`;
-  return { date, appliedToday, updatesToday, total: state.entries.length, byStatus, line };
+  const line = `📊 Job index — newly indexed: ${newlyIndexed} confirmation record${newlyIndexed === 1 ? "" : "s"}, ${indexedUpdates} status update${indexedUpdates === 1 ? "" : "s"} · ${state.entries.length} indexed job records (${statusBits || "none yet"})`;
+  return { date, newlyIndexed, indexedUpdates, indexedJobRecords: state.entries.length, byStatus, line };
 }

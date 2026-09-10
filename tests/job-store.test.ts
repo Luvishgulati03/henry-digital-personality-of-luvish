@@ -51,3 +51,31 @@ test("mutations re-read the file first — a second instance's stale in-memory c
 
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test("summary reports the persisted submitting retry fence", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "henry-jobstore-summary-"));
+  const store = new JobApplicationStore(path.join(dir, "applications.json"));
+  await store.init();
+  const item = await store.create(draft(1));
+  await store.update(item.id, { status: "submitting" });
+
+  const summary = await store.summary();
+  assert.equal(summary.total, 1);
+  assert.equal(summary.submitting, 1);
+  assert.equal(summary.submitted, 0);
+});
+
+test("beginSubmission is an atomic compare-and-set", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "henry-jobstore-submit-"));
+  const store = new JobApplicationStore(path.join(dir, "applications.json"));
+  await store.init();
+  const item = await store.create(draft(1));
+
+  const results = await Promise.allSettled([
+    store.beginSubmission(item.id, "discovered"),
+    store.beginSubmission(item.id, "discovered"),
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+  assert.equal((await store.get(item.id))?.status, "submitting");
+});

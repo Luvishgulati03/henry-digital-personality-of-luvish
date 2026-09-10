@@ -79,6 +79,21 @@ export class JobApplicationStore {
     });
   }
 
+  /** Atomic compare-and-set for the durable pre-browser duplicate-submission fence. */
+  async beginSubmission(id: string, expectedStatus: ApplicationStatus): Promise<JobApplicationDraft> {
+    return this.mutate(async () => {
+      const item = this.items.find((candidate) => candidate.id === id);
+      if (!item) throw new Error(`Job application not found: ${id}`);
+      if (item.status !== expectedStatus) {
+        throw new Error(`Application ${id} status changed from ${expectedStatus} to ${item.status}; refusing a possible duplicate`);
+      }
+      item.status = "submitting";
+      item.updatedAt = new Date().toISOString();
+      await this.save();
+      return item;
+    });
+  }
+
   async summary(): Promise<JobApplicationSummary> {
     const items = await this.list();
     return {
@@ -87,6 +102,7 @@ export class JobApplicationStore {
       drafted: items.filter((item) => item.status === "drafted").length,
       readyForReview: items.filter((item) => item.status === "ready-for-review").length,
       filled: items.filter((item) => item.status === "filled").length,
+      submitting: items.filter((item) => item.status === "submitting").length,
       submitted: items.filter((item) => item.status === "submitted").length,
       rejected: items.filter((item) => item.status === "rejected").length,
       failed: items.filter((item) => item.status === "failed").length,

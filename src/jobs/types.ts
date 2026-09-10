@@ -5,11 +5,13 @@ export type ApplicationStatus =
   | "drafted"
   | "ready-for-review"
   | "filled"
+  /** Persisted before browser submission starts; blocks retries unless a proven pre-click fill failure restores the prior state. */
+  | "submitting"
   | "submitted"
   /**
-   * The submit control was clicked but no confirmation was observed. The application may
-   * or may not have reached the employer, so this is deliberately NOT `failed`: a retry
-   * could submit a second time. Terminal until a human checks and resolves it.
+   * Browser submission started and no confirmed safe pre-click outcome was observed. The
+   * application may or may not have reached the employer, so this is deliberately NOT
+   * `failed`: a retry could submit a second time. Terminal until a human resolves it.
    */
   | "submission-uncertain"
   | "rejected"
@@ -65,6 +67,7 @@ export interface JobApplicationSummary {
   drafted: number;
   readyForReview: number;
   filled: number;
+  submitting: number;
   submitted: number;
   rejected: number;
   failed: number;

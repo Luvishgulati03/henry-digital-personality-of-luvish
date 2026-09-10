@@ -6,7 +6,7 @@ import path from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { ActivityLog } from "../src/activity.ts";
 import { MailWatchService, type MailWatchNotifier } from "../src/mailwatch/service.ts";
-import { parseAppLine, updateTracker, trackerSummary, trackerDigest, renderMarkdown } from "../src/mailwatch/tracker.ts";
+import { parseAppLine, reconcileSubmittedApplications, recordTrackerEvent, updateTracker, trackerSummary, trackerDigest, renderMarkdown } from "../src/mailwatch/tracker.ts";
 import type { ProviderRunner } from "../src/providers/runner.ts";
 import type { RunResult } from "../src/types.ts";
 
@@ -88,6 +88,125 @@ test("updateTracker: a repeated identical status line does not duplicate history
   const raw = JSON.parse(await fs.readFile(config.jobTrackerPath, "utf8")) as { entries: Array<{ history: unknown[] }> };
   assert.equal(raw.entries.length, 1);
   assert.equal(raw.entries[0].history.length, 1);
+});
+
+test("recordTrackerEvent atomically records structured evidence without APP serialization", async () => {
+  const { config } = await setup();
+  const [acme, beta] = await Promise.all([
+    recordTrackerEvent(config, {
+      company: "Acme|Labs", role: "SWE|Platform", source: "generic", status: "applied",
+      dateText: "2026-09-10T10:00:00.000Z", subject: "Henry browser confirmation | Application submitted",
+    }),
+    recordTrackerEvent(config, {
+      company: "Beta", role: "PM", source: "generic", status: "applied",
+      dateText: "2026-09-10T10:01:00.000Z", subject: "Henry browser confirmation: received",
+    }),
+  ]);
+  assert.equal(acme.created, 1);
+  assert.equal(beta.created, 1);
+  const raw = JSON.parse(await fs.readFile(config.jobTrackerPath, "utf8")) as {
+    entries: Array<{ company: string; role: string; history: Array<{ subject: string }> }>;
+  };
+  assert.equal(raw.entries.length, 2, "concurrent structured writes must not clobber one another");
+  assert.ok(raw.entries.some((entry) => entry.company === "Acme|Labs" && entry.role === "SWE|Platform"));
+  assert.ok(raw.entries.some((entry) => entry.history[0]?.subject.includes("| Application submitted")));
+});
+
+test("structured draft IDs keep repeat company-role applications separate while email fallback still dedupes", async () => {
+  const { config } = await setup();
+  for (const applicationId of ["draft-one", "draft-two"]) {
+    await recordTrackerEvent(config, {
+      applicationId, company: "Acme", role: "Engineer", source: "generic", status: "applied",
+      dateText: "2026-09-10T10:00:00.000Z", subject: `Confirmed ${applicationId}`,
+    });
+  }
+  const email = "APP|Beta|PM|direct|applied|Sep 10|Application received";
+  await updateTracker(config, [email]);
+  await updateTracker(config, [email]);
+
+  const raw = JSON.parse(await fs.readFile(config.jobTrackerPath, "utf8")) as {
+    entries: Array<{ key: string; applicationId?: string; company: string; history: unknown[] }>;
+  };
+  assert.equal(raw.entries.filter((entry) => entry.company === "Acme").length, 2);
+  assert.deepEqual(raw.entries.filter((entry) => entry.company === "Acme").map((entry) => entry.applicationId).sort(), ["draft-one", "draft-two"]);
+  assert.equal(raw.entries.filter((entry) => entry.company === "Beta").length, 1);
+  assert.equal(raw.entries.find((entry) => entry.company === "Beta")?.history.length, 1);
+});
+
+test("email status merges into one unambiguous browser record", async () => {
+  const { config } = await setup();
+  await recordTrackerEvent(config, {
+    applicationId: "draft-one", company: "Acme", role: "Engineer", source: "generic", status: "applied",
+    dateText: "Sep 10", subject: "Browser confirmed",
+  });
+  await updateTracker(config, ["APP|Acme|Engineer|direct|interview|Sep 12|Interview invitation"]);
+
+  const raw = JSON.parse(await fs.readFile(config.jobTrackerPath, "utf8")) as {
+    entries: Array<{ applicationId?: string; status: string; history: Array<{ status: string }> }>;
+  };
+  assert.equal(raw.entries.length, 1);
+  assert.equal(raw.entries[0]?.applicationId, "draft-one");
+  assert.equal(raw.entries[0]?.status, "interview");
+  assert.deepEqual(raw.entries[0]?.history.map((item) => item.status), ["applied", "interview"]);
+});
+
+test("reconciliation upgrades one matching legacy email record instead of duplicating it", async () => {
+  const { config } = await setup();
+  await updateTracker(config, ["APP|Acme|Engineer|direct|applied|Sep 10|Application received"]);
+  await fs.writeFile(config.jobApplicationsPath, JSON.stringify([{
+    id: "draft-one", status: "submitted", submittedAt: "2026-09-10T10:00:00.000Z",
+    posting: { company: "Acme", title: "Engineer", source: "generic" },
+  }]));
+
+  const reconciliation = await reconcileSubmittedApplications(config);
+  const raw = JSON.parse(await fs.readFile(config.jobTrackerPath, "utf8")) as {
+    entries: Array<{ key: string; applicationId?: string; history: unknown[] }>;
+  };
+  assert.equal(reconciliation.created, 0);
+  assert.equal(raw.entries.length, 1);
+  assert.equal(raw.entries[0]?.applicationId, "draft-one");
+  assert.equal(raw.entries[0]?.key, "application:draft-one");
+  assert.equal(raw.entries[0]?.history.length, 1);
+});
+
+test("concurrent writers quarantine one stale lock without deleting a fresh replacement", async () => {
+  const { config } = await setup();
+  const lockPath = `${config.jobTrackerPath}.lock`;
+  await fs.mkdir(config.dataDir, { recursive: true });
+  await fs.writeFile(lockPath, `999999999:stale-owner`);
+
+  await Promise.all([
+    recordTrackerEvent(config, {
+      applicationId: "draft-a", company: "Acme", role: "Engineer", source: "generic", status: "applied",
+      dateText: "Sep 10", subject: "Confirmed A",
+    }),
+    recordTrackerEvent(config, {
+      applicationId: "draft-b", company: "Beta", role: "Engineer", source: "generic", status: "applied",
+      dateText: "Sep 10", subject: "Confirmed B",
+    }),
+  ]);
+
+  const raw = JSON.parse(await fs.readFile(config.jobTrackerPath, "utf8")) as { entries: Array<{ applicationId?: string }> };
+  assert.deepEqual(raw.entries.map((entry) => entry.applicationId).sort(), ["draft-a", "draft-b"]);
+  await assert.rejects(fs.access(lockPath));
+  await assert.rejects(fs.access(`${lockPath}.stale-break`));
+});
+
+test("submitted application records deterministically reconcile by draft ID without a provider", async () => {
+  const { config } = await setup();
+  const submitted = ["draft-one", "draft-two"].map((id) => ({
+    id, status: "submitted", submittedAt: "2026-09-10T10:00:00.000Z",
+    posting: { company: "Acme", title: "Engineer", source: "generic" },
+  }));
+  await fs.writeFile(config.jobApplicationsPath, JSON.stringify(submitted));
+
+  const first = await reconcileSubmittedApplications(config);
+  const second = await reconcileSubmittedApplications(config);
+  assert.equal(first.submittedRecords, 2);
+  assert.equal(first.created, 2);
+  assert.equal(second.created, 0);
+  assert.equal(second.changed, 0);
+  assert.equal((await trackerSummary(config)).total, 2);
 });
 
 test("updateTracker: a status transition appends history and notifies", async () => {
@@ -225,14 +344,17 @@ test("trackerDigest excludes backfilled history from today's counts while live e
     "APP|Gamma LLC|Backend Engineer|direct|interview|Jul 25|Interview invite",
   ], { backfill: true });
   const seeded = await trackerDigest(config);
-  assert.equal(seeded.appliedToday, 0, "backfilled applied events are weeks-old history, not today's news");
-  assert.equal(seeded.updatesToday, 0);
-  assert.equal(seeded.total, 1);
+  assert.equal(seeded.newlyIndexed, 0, "backfilled events are not newly indexed digest activity");
+  assert.equal(seeded.indexedUpdates, 0);
+  assert.equal(seeded.indexedJobRecords, 1);
 
   await updateTracker(config, ["APP|Delta Co|PM|LinkedIn|applied|today|Application sent"]);
   const live = await trackerDigest(config);
-  assert.equal(live.appliedToday, 1, "a live applied event today still counts");
-  assert.equal(live.updatesToday, 0);
+  assert.equal(live.newlyIndexed, 1, "a live confirmation newly indexed on this local day counts");
+  assert.equal(live.indexedUpdates, 0);
+  assert.match(live.line, /newly indexed: 1 confirmation record/);
+  assert.match(live.line, /2 indexed job records/);
+  assert.doesNotMatch(live.line, /today:|tracked \d+|\d+ applications?/i, "wording must not infer event dates or real application totals");
 });
 
 test("MailWatchService.check(): APP lines update the tracker and notify only on new/changed status", async () => {

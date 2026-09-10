@@ -10,6 +10,7 @@ import { loadConfig, type HenryConfig } from "../src/config.ts";
 import type { HenryMemory } from "../src/memory/engram.ts";
 import type { GmailService } from "../src/integrations/gmail.ts";
 import type { WorkflowDefinition } from "../src/types.ts";
+import { recordTrackerEvent } from "../src/mailwatch/tracker.ts";
 
 /** Runs `body` with the portfolio/GitHub variables (both env spellings) cleared, then restores them. */
 async function withoutPortfolioEnv<T>(body: () => Promise<T>): Promise<T> {
@@ -135,4 +136,67 @@ test("the shipped defaults schedule a daily private backup", async () => {
   const backup = defaults.find((entry) => entry.kind === "backup.private");
   assert.ok(backup, "a backup nobody scheduled is a snapshot");
   assert.equal(backup?.enabled, true);
+});
+
+test("job digest skips zero activity without notifying and sends only after a newly indexed record", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "henry-job-digest-"));
+  const config = loadConfig(root);
+  const activity = new ActivityLog(config.activityPath);
+  await activity.init();
+  const notifications: string[] = [];
+  const scheduler = new WorkflowScheduler(
+    config, activity, undefined as unknown as HenryMemory, undefined as unknown as GmailService,
+    undefined, async (message) => { notifications.push(message); },
+  );
+  const definition: WorkflowDefinition = {
+    id: "job-digest-night", name: "Job digest", cron: "30 21 * * *", kind: "mail.digest", enabled: true,
+  };
+
+  const empty = await scheduler.run(definition) as { skipped?: boolean; reason?: string };
+  assert.equal(empty.skipped, true);
+  assert.match(empty.reason ?? "", /no newly indexed job records/i);
+  assert.deepEqual(notifications, []);
+
+  await recordTrackerEvent(config, {
+    company: "Acme", role: "Engineer", source: "generic", status: "applied",
+    dateText: "2026-09-10T10:00:00.000Z", subject: "Henry browser confirmation: submitted",
+  });
+  const active = await scheduler.run(definition) as { skipped?: boolean };
+  assert.notEqual(active.skipped, true);
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0] ?? "", /newly indexed/);
+  assert.match(notifications[0] ?? "", /indexed job records/);
+});
+
+test("the shipped defaults contain one daily job digest", async () => {
+  const defaults = JSON.parse(await fs.readFile(path.join(process.cwd(), "workflows", "defaults.json"), "utf8")) as WorkflowDefinition[];
+  const digests = defaults.filter((entry) => entry.kind === "mail.digest" && entry.enabled);
+  assert.equal(digests.length, 1);
+  assert.equal(digests[0]?.cron, "40 23 * * *", "digest runs after the mailwatch window");
+});
+
+test("scheduled digest reconciles submitted records before counting, with zero provider spend", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "henry-job-digest-reconcile-"));
+  const config = loadConfig(root);
+  const activity = new ActivityLog(config.activityPath);
+  await activity.init();
+  await fs.writeFile(config.jobApplicationsPath, JSON.stringify([{
+    id: "submitted-draft", status: "submitted", submittedAt: "2026-09-09T10:00:00.000Z",
+    posting: { company: "Acme", title: "Engineer", source: "generic" },
+  }]));
+  const notifications: string[] = [];
+  const scheduler = new WorkflowScheduler(
+    config, activity,
+    { dream: async () => { throw new Error("provider-like memory work must not run"); } } as unknown as HenryMemory,
+    { inbox: async () => { throw new Error("Gmail must not run"); } } as unknown as GmailService,
+    undefined, async (message) => { notifications.push(message); },
+  );
+  const result = await scheduler.run({
+    id: "job-digest-night", name: "Job digest", cron: "40 23 * * *", kind: "mail.digest", enabled: true,
+  }) as { reconciliation?: { submittedRecords: number; created: number }; indexedJobRecords?: number };
+
+  assert.equal(result.reconciliation?.submittedRecords, 1);
+  assert.equal(result.reconciliation?.created, 1);
+  assert.equal(result.indexedJobRecords, 1);
+  assert.equal(notifications.length, 1);
 });

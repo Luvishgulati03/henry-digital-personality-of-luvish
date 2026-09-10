@@ -15,6 +15,7 @@ import { renderResumePdf, type ResumeRenderer } from "./resume.ts";
 import { applicationContentHash, runApplicationTeam } from "./team.ts";
 import { numberGuard } from "./tailor.ts";
 import type { JobApplicationDraft, JobPageSnapshot, JobPosting, JobSource } from "./types.ts";
+import { recordTrackerEvent } from "../mailwatch/tracker.ts";
 
 interface GeneratedApplication {
   coverLetter: string;
@@ -150,6 +151,7 @@ export class JobApplicationService {
     private readonly runner: ProviderRunner,
     browser?: JobBrowser,
     renderResume?: ResumeRenderer,
+    private readonly trackerRecorder: typeof recordTrackerEvent = recordTrackerEvent,
   ) {
     this.store = new JobApplicationStore(config.jobApplicationsPath);
     this.browser = browser || new PlaywrightJobBrowser(config, activity);
@@ -296,17 +298,24 @@ export class JobApplicationService {
     if (!applicationId) throw new Error("Job application approval is missing its application ID");
     const draft = await this.store.get(applicationId);
     if (!draft) throw new Error(`Job application not found: ${applicationId}`);
-    await this.assertReviewed(draft);
     if (draft.status === "submitted") throw new Error("Application was already submitted; refusing duplicate");
+    if (draft.status === "submitting") {
+      throw new Error(`Application ${applicationId} is already submitting or awaiting reconciliation; refusing a possible duplicate`);
+    }
     // A previous attempt clicked submit and never saw a confirmation. Retrying could be the
     // second application this employer receives, so only a human who has checked can clear it.
     if (draft.status === "submission-uncertain") {
       throw new Error(`Application ${applicationId} was clicked through but never confirmed; check with the employer and resolve it by hand before any retry`);
     }
+    await this.assertReviewed(draft);
     if (draft.missingFacts.length) throw new Error("Application has unresolved facts; do not submit");
     if (item.payload.reviewedContentHash !== draft.reviewedContentHash) throw new Error("Application content changed after approval");
     if (item.payload.descriptionHash !== draft.posting.descriptionHash) throw new Error("Job description changed after approval; prepare the application again");
     assertNotLinkedInAutomation(draft.posting.url, "submission");
+    const preSubmitStatus = draft.status;
+    // This durable fence is written before opening the outbound browser path. If Henry dies
+    // or any later local write fails, another execution sees `submitting` and cannot retry.
+    await this.store.beginSubmission(applicationId, preSubmitStatus);
     /**
      * A form that hydrates late leaves a required field unfilled on the first pass and
      * fills perfectly on the next, so Henry retries that itself rather than handing the
@@ -321,17 +330,30 @@ export class JobApplicationService {
       try {
         result = await this.browser.submit(draft.posting.url, draft);
       } catch (error) {
-        if (error instanceof SubmissionOutcomeUnknownError) {
+        const worthRetrying = error instanceof FillIncompleteError && error.retryable && attempt < SUBMIT_FILL_ATTEMPTS;
+        if (error instanceof FillIncompleteError && !worthRetrying) {
+          // This is the only browser failure proven to occur before a click. Restore the
+          // exact prior state; if restoration fails, `submitting` remains the safer fence.
+          await this.store.update(applicationId, { status: preSubmitStatus }).catch(async (persistError) => {
+            await this.activity.record(
+              "job.submission_uncertain",
+              `Pre-click fill failed for ${draft.posting.title}, but the submitting fence could not be cleared`,
+              { applicationId, url: draft.posting.url, error: String(persistError) },
+            ).catch(() => undefined);
+          });
+          throw error;
+        }
+        if (!worthRetrying) {
           await this.store.update(applicationId, { status: "submission-uncertain" }).catch(() => undefined);
           await this.activity.record(
             "job.submission_uncertain",
-            `Clicked submit for ${draft.posting.title} at ${draft.posting.company} but saw no confirmation — verify by hand`,
-            { applicationId, url: draft.posting.url },
-          );
+            error instanceof SubmissionOutcomeUnknownError
+              ? `Clicked submit for ${draft.posting.title} at ${draft.posting.company} but saw no confirmation — verify by hand`
+              : `Submission outcome for ${draft.posting.title} at ${draft.posting.company} is unknown — verify by hand`,
+            { applicationId, url: draft.posting.url, error: String(error) },
+          ).catch(() => undefined);
           throw error;
         }
-        const worthRetrying = error instanceof FillIncompleteError && error.retryable && attempt < SUBMIT_FILL_ATTEMPTS;
-        if (!worthRetrying) throw error;
         await this.activity.record(
           "job.fill_retry",
           `Refilling ${draft.posting.title} at ${draft.posting.company} (attempt ${attempt + 1}/${SUBMIT_FILL_ATTEMPTS}): ${error.fields.join(", ")}`,
@@ -340,11 +362,46 @@ export class JobApplicationService {
         await new Promise((resolve) => setTimeout(resolve, attempt * SUBMIT_RETRY_BACKOFF_MS));
       }
     }
-    await this.store.update(applicationId, { status: "submitted", submittedAt: result.submittedAt, submissionUrl: result.url });
-    await this.memory.remember(
-      `Submitted job application ${applicationId} for ${draft.posting.title} at ${draft.posting.company} on ${result.submittedAt}. Confirmation: ${result.confirmationText.slice(0, 500)}`,
-      { source: `jobs/applications/${applicationId}.md`, tier: "episodic", importance: 8, metadata: { domain: "jobs", applicationId, status: "submitted", company: draft.posting.company, url: result.url } },
-    );
+    try {
+      await this.store.update(applicationId, { status: "submitted", submittedAt: result.submittedAt, submissionUrl: result.url });
+    } catch (error) {
+      await this.activity.record(
+        "job.submitted",
+        `Browser confirmed ${draft.posting.title} at ${draft.posting.company}, but the submitted record could not be persisted`,
+        { applicationId, submittedAt: result.submittedAt, url: result.url, localPersistence: "application-store", error: String(error) },
+      ).catch(() => undefined);
+    }
+    try {
+      await this.trackerRecorder(this.config, {
+        applicationId,
+        company: draft.posting.company,
+        role: draft.posting.title,
+        source: draft.posting.source,
+        status: "applied",
+        dateText: result.submittedAt,
+        subject: `Henry browser confirmation: ${result.confirmationText.slice(0, 500)}`,
+      });
+    } catch (error) {
+      // Submission is already confirmed and persisted. Reconciliation failure must never
+      // turn that success into a failed approval whose retry could submit a duplicate.
+      await this.activity.record(
+        "job.submitted",
+        `Submitted ${draft.posting.title} at ${draft.posting.company}, but canonical tracker reconciliation failed`,
+        { applicationId, submittedAt: result.submittedAt, url: result.url, trackerReconciliation: "failed", error: String(error) },
+      ).catch(() => undefined);
+    }
+    try {
+      await this.memory.remember(
+        `Submitted job application ${applicationId} for ${draft.posting.title} at ${draft.posting.company} on ${result.submittedAt}. Confirmation: ${result.confirmationText.slice(0, 500)}`,
+        { source: `jobs/applications/${applicationId}.md`, tier: "episodic", importance: 8, metadata: { domain: "jobs", applicationId, status: "submitted", company: draft.posting.company, url: result.url } },
+      );
+    } catch (error) {
+      await this.activity.record(
+        "job.submitted",
+        `Browser confirmed ${draft.posting.title} at ${draft.posting.company}, but submission memory could not be persisted`,
+        { applicationId, submittedAt: result.submittedAt, url: result.url, localPersistence: "memory", error: String(error) },
+      ).catch(() => undefined);
+    }
     return result.url;
   }
 }

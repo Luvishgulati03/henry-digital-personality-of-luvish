@@ -377,12 +377,16 @@ export class WorkflowScheduler {
     return await service.run({ trigger: "cron" });
   }
 
-  /** Twice-daily job index to Telegram — counts from the tracker ledger, zero provider spend. */
+  /** Change-only job index to Telegram — counts from the tracker ledger, zero provider spend. */
   private async runJobDigest(): Promise<unknown> {
-    const { trackerDigest } = await import("../mailwatch/tracker.ts");
+    const { reconcileSubmittedApplications, trackerDigest } = await import("../mailwatch/tracker.ts");
+    const reconciliation = await reconcileSubmittedApplications(this.config);
     const digest = await trackerDigest(this.config);
+    if (digest.newlyIndexed === 0 && digest.indexedUpdates === 0) {
+      return { ...digest, reconciliation, skipped: true, reason: "no newly indexed job records or indexed status changes" };
+    }
     await this.notifyReminderFn(digest.line, "Henry — job index");
-    return digest;
+    return { ...digest, reconciliation };
   }
 
   stop(): void {
