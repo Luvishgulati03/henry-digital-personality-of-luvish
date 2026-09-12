@@ -13,6 +13,15 @@ sed -n '1,180p' soul.example.md
 sed -n '1,180p' personality.example.md
 ```
 
+If this is a published fork, also read the explicit rename guide:
+
+```bash
+sed -n '1,260p' docs/rename-your-agent.md
+```
+
+It distinguishes a private persona rename from a complete product rebrand of
+the CLI, dashboard, environment prefix, package, documentation, and code symbols.
+
 For a private setup, create local persona files:
 
 ```bash
@@ -43,6 +52,10 @@ Before the first personal conversation, replace every example value for:
 - which local folders and accounts are in scope;
 - channel rules for terminal, dashboard, Telegram, email, and social actions;
 - the non-negotiable rule that drafting, approval, and execution are separate.
+
+Use the public question bank in `docs/persona-design-guide.md`. Ask a relevant
+12–20 questions in short conversational rounds; do not dump all 63 questions on
+the user or infer a psychological profile.
 
 Confirm the private files cannot be committed:
 

@@ -95,8 +95,11 @@ STEP 3 — Generate the persona files
      `docs/design-your-soul.md` — trim before adding.
 
 STEP 4 — Configure providers and modules
-  1. In `.env`, set the agent name/user name env vars and the chosen
-     default provider.
+  1. Set the chosen default provider in `.env`. Agent and operator names
+     belong in the private `soul.md` and `personality.md`; this framework
+     does not implement agent-name environment variables. If the user wants
+     the CLI, dashboard, package, and `HENRY_` prefix renamed too, follow
+     `docs/rename-your-agent.md` as a separate rebrand after setup.
   2. For every module the user did NOT select, disable it via its config
      flag (see that module's section in `docs/architecture.md` and the
      relevant `.env.example` keys) rather than deleting its code — this

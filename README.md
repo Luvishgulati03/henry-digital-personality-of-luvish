@@ -103,6 +103,9 @@ never address anyone else.
 ## Make it yours
 
 `BOOTSTRAP.md` (agent-executable setup) · `docs/build-your-own-knowledge-rag.md` ·
+[`docs/design-your-soul.md`](docs/design-your-soul.md) ·
+[`docs/persona-design-guide.md`](docs/persona-design-guide.md) ·
+[`docs/rename-your-agent.md`](docs/rename-your-agent.md) ·
 `build-your-pm-brain.md` · `docs/architecture.md` · `docs/modules/` (per-module
 agent-facing docs). Personal data (soul, memory, corpus, `data/`) is gitignored —
 the framework ships, your life doesn't.
