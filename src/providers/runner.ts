@@ -82,6 +82,17 @@ function collectText(value: unknown, output: string[]): void {
   }
 }
 
+/** Codex JSONL can contain several commentary messages before its final schema-bound answer. */
+export function finalCodexAgentMessage(events: ProviderEvent[]): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const parsed = events[index]?.parsed as Record<string, unknown> | undefined;
+    if (parsed?.type !== "item.completed") continue;
+    const item = parsed.item as Record<string, unknown> | undefined;
+    if (item?.type === "agent_message" && typeof item.text === "string" && item.text.trim()) return item.text.trim();
+  }
+  return undefined;
+}
+
 /**
  * Codex argv for one dispatch. Exported as the testable seam for tier flags.
  * t0 pins a cheap model, t1 (and no tier) keeps the configured/default model,
@@ -328,7 +339,9 @@ export async function execute(
       const extracted: string[] = [];
       for (const event of events) if (event.parsed) collectText(event.parsed, extracted);
       const raw = stdoutText.join("").trim();
-      const response = [...new Set(extracted.map((text) => text.trim()).filter(Boolean))].join("\n\n") || raw;
+      const combined = [...new Set(extracted.map((text) => text.trim()).filter(Boolean))].join("\n\n");
+      const response = (provider === "codex" && options.outputSchemaPath ? finalCodexAgentMessage(events) : undefined)
+        ?? (combined || raw);
       if (timedOut) {
         resolve({
           runId, provider, response, exitCode: null, durationMs: Date.now() - started,
