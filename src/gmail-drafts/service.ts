@@ -3,6 +3,10 @@ import path from "node:path";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import type { ProviderRunner } from "../providers/runner.ts";
+import { providerSchemaPath } from "../providers/schemas.ts";
+import { requireProviderResponse } from "../providers/result.ts";
+
+const DRAFT_REPLIES_SCHEMA_PATH = providerSchemaPath("draft-replies-result.schema.json");
 
 /** Same shape as reminders'/mailwatch's notifier — kept local so this module never imports another module directly (doctrine rule 7). */
 export type DraftRepliesNotifier = (message: string, title?: string) => Promise<void>;
@@ -146,6 +150,26 @@ export function parseDraftBlocks(response: string): DraftBlock[] {
   return blocks;
 }
 
+export function parseStructuredDraftReplies(response: string): { drafted: DraftedReplySummary[]; blocks: DraftBlock[] } {
+  let raw: unknown;
+  try { raw = JSON.parse(response); } catch { throw new Error("Draft replies failed closed: provider returned invalid JSON"); }
+  if (!raw || typeof raw !== "object" || !Array.isArray((raw as { replies?: unknown }).replies)) {
+    throw new Error("Draft replies failed closed: invalid structured result");
+  }
+  const drafted: DraftedReplySummary[] = [];
+  const blocks: DraftBlock[] = [];
+  for (const candidate of (raw as { replies: unknown[] }).replies) {
+    const reply = candidate as Partial<DraftBlock & { preview: string }>;
+    if (typeof reply.to !== "string" || !reply.to.trim() || typeof reply.subject !== "string" || !reply.subject.trim()
+      || typeof reply.body !== "string" || !reply.body.trim() || typeof reply.preview !== "string" || !reply.preview.trim()) {
+      throw new Error("Draft replies failed closed: malformed reply object");
+    }
+    blocks.push({ to: reply.to.trim(), subject: reply.subject.trim(), body: reply.body.trim() });
+    drafted.push({ to: reply.to.trim(), subject: reply.subject.trim(), preview: reply.preview.trim() });
+  }
+  return { drafted, blocks };
+}
+
 /** Per-message body cap and overall block cap for the injected-mail prompt (see `formatInboxBlock`). */
 export const INJECTED_MAIL_MAX_BODY_CHARS = 1_200;
 export const INJECTED_MAIL_MAX_BLOCK_CHARS = 20_000;
@@ -250,20 +274,14 @@ export class DraftRepliesService {
     const prompt = useInjectedMail
       ? await this.buildInjectedMailPrompt(limit, persona, summary)
       : [
+          "Use the configured Gmail MCP/connector directly. Do not use shell commands, browser automation, or local OAuth files.",
           `Read my ${limit} most recent UNREAD inbox emails that genuinely need a reply — skip newsletters, receipts, notifications, and automated blasts.`,
           "For each one worth replying to: draft a reply in Luvish's voice (persona below) — concise, direct, no corporate filler. Never invent facts, commitments, dates, or numbers you don't have; use [placeholder] for anything unknown.",
           this.threading
             ? "Do NOT create a Gmail draft via an MCP tool. Henry will match each full reply to the source message and stage it for Luvish's explicit approval. NEVER send. NEVER modify read-state or labels."
             : "Then CREATE A GMAIL DRAFT for it via the gmail MCP draft-creation tool, threaded to the original message. NEVER send. NEVER modify read-state or labels.",
-          "For every drafted reply, output a block in EXACTLY this format (nothing else on the DRAFT_BEGIN/DRAFT_END lines):",
-          "DRAFT_BEGIN",
-          "To: <recipient email address>",
-          "Subject: <reply subject line>",
-          "Body:",
-          "<the full reply body, may span multiple lines>",
-          "DRAFT_END",
-          "After ALL the blocks, output exactly one summary line per draft: DRAFTED|<to>|<subject>|<first 80 chars of the reply>",
-          "If nothing needs a reply, output exactly NO_REPLIES_NEEDED and nothing else.",
+          "Return each prepared reply in the required structured JSON response with recipient, subject, full body, and a short preview.",
+          "If nothing needs a reply, return an empty replies array.",
           `\n--- Luvish's voice (personality.md) ---\n${persona || "n/a"}`,
           `\n--- resume summary ---\n${summary || "n/a"}`,
         ].join("\n");
@@ -273,19 +291,24 @@ export class DraftRepliesService {
     // dependency either way, so it runs on whatever `config.provider` (and fallback policy)
     // already decide — that's what makes it provider-agnostic rather than Claude-only.
     const result = useInjectedMail
-      ? await this.runner.run(prompt, { role: "draft-replies" })
-      : await this.runner.run(prompt, { provider: "codex", role: "draft-replies" });
-    const response = result.response;
+      ? await this.runner.run(prompt, { role: "draft-replies", outputSchemaPath: DRAFT_REPLIES_SCHEMA_PATH })
+      : await this.runner.run(prompt, { provider: "codex", role: "draft-replies", outputSchemaPath: DRAFT_REPLIES_SCHEMA_PATH });
+    const response = requireProviderResponse(result, "Draft replies");
 
-    const drafted: DraftedReplySummary[] = [];
+    let drafted: DraftedReplySummary[] = [];
+    let blocks: DraftBlock[] = [];
     let skipped = 0;
-    for (const line of response.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("DRAFTED|")) continue;
-      const parsed = parseDraftedLine(trimmed);
-      if (parsed) drafted.push(parsed); else skipped += 1;
+    if (response.trim().startsWith("{")) {
+      ({ drafted, blocks } = parseStructuredDraftReplies(response.trim()));
+    } else {
+      for (const line of response.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("DRAFTED|")) continue;
+        const parsed = parseDraftedLine(trimmed);
+        if (parsed) drafted.push(parsed); else skipped += 1;
+      }
+      blocks = parseDraftBlocks(response);
     }
-    const blocks = parseDraftBlocks(response);
     const staged = this.threading ? await this.stageReplies(blocks) : [];
 
     const localPath = await this.writeLocalDrafts(blocks.length ? blocks : drafted.map((item) => ({ to: item.to, subject: item.subject, body: item.preview })));
@@ -323,15 +346,8 @@ export class DraftRepliesService {
       "Decide which ones genuinely need a reply — skip newsletters, receipts, notifications, and automated blasts.",
       "For each one worth replying to: draft a reply in Luvish's voice (persona below) — concise, direct, no corporate filler. Never invent facts, commitments, dates, or numbers you don't have; use [placeholder] for anything unknown.",
       "You have no Gmail access here — do NOT claim to create, send, or modify anything in Gmail. Henry will match each full reply to its source message and stage it for Luvish's explicit approval. NEVER send. NEVER modify read-state or labels.",
-      "For every drafted reply, output a block in EXACTLY this format (nothing else on the DRAFT_BEGIN/DRAFT_END lines):",
-      "DRAFT_BEGIN",
-      "To: <recipient email address>",
-      "Subject: <reply subject line>",
-      "Body:",
-      "<the full reply body, may span multiple lines>",
-      "DRAFT_END",
-      "After ALL the blocks, output exactly one summary line per draft: DRAFTED|<to>|<subject>|<first 80 chars of the reply>",
-      "If nothing needs a reply, output exactly NO_REPLIES_NEEDED and nothing else.",
+      "Return each proposed reply in the required structured JSON response with recipient, subject, full body, and a short preview.",
+      "If nothing needs a reply, return an empty replies array.",
       `\n${messageBlock}`,
       `\n--- Luvish's voice (personality.md) ---\n${persona || "n/a"}`,
       `\n--- resume summary ---\n${summary || "n/a"}`,

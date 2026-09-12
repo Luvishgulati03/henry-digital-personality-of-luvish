@@ -16,7 +16,7 @@ import {
 import {
   duckDuckGoQuery, duckDuckGoUrl, parseDuckDuckGoResults, unwrapDuckDuckGoHref,
 } from "../src/jobs/sources-web.ts";
-import { syncAlertsFromMail, MAX_SCOUT_TITLES } from "../src/jobs/alerts.ts";
+import { syncAlertsFromMail, MAX_SCOUT_TITLES, parseStructuredAlertPrefs } from "../src/jobs/alerts.ts";
 import type { ProviderRunner } from "../src/providers/runner.ts";
 import type { HenryMemory } from "../src/memory/engram.ts";
 
@@ -643,6 +643,12 @@ test("alerts-sync caps persisted titles at the volume rail while keeping every l
   const persisted = JSON.parse(fs.readFileSync(config.scoutProfilePath, "utf8")) as { titles: string[] };
   assert.equal(persisted.titles.length, MAX_SCOUT_TITLES);
   assert.equal(persisted.titles[0], "Sync Title 1");
+});
+
+test("alerts-sync parses schema-bound connector output", () => {
+  assert.deepEqual(parseStructuredAlertPrefs('{"alerts":[{"title":"AI Product Engineer","location":"Noida","source":"LinkedIn"}]}'), [
+    { title: "AI Product Engineer", location: "Noida", source: "linkedin" },
+  ]);
 });
 
 test("scout --prepare N: stages the existing approval-gated prepare on the top N, one failure never kills the report", async () => {

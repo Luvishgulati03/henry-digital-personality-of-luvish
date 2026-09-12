@@ -112,6 +112,7 @@ never address anyone else.
 [`docs/design-your-soul.md`](docs/design-your-soul.md) ·
 [`docs/persona-design-guide.md`](docs/persona-design-guide.md) ·
 [`docs/rename-your-agent.md`](docs/rename-your-agent.md) ·
+[`docs/connector-architecture.md`](docs/connector-architecture.md) ·
 `build-your-pm-brain.md` · `docs/architecture.md` · `docs/modules/` (per-module
 agent-facing docs). Personal data (soul, memory, corpus, `data/`) is gitignored —
 the framework ships, your life doesn't.

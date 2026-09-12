@@ -12,6 +12,7 @@ import {
   normalizeSubjectKey,
   parseDraftedLine,
   parseDraftBlocks,
+  parseStructuredDraftReplies,
   type DraftRepliesNotifier,
   type ReplySource,
 } from "../src/gmail-drafts/service.ts";
@@ -85,6 +86,14 @@ test("parseDraftBlocks extracts full DRAFT_BEGIN/DRAFT_END bodies and ignores ma
   assert.equal(blocks[0].to, "jane@acme.com");
   assert.equal(blocks[0].subject, "Re: Contract review");
   assert.ok(blocks[0].body.includes("[confirm the effective date]"));
+});
+
+test("structured draft output preserves full bodies without delimiter parsing", () => {
+  const parsed = parseStructuredDraftReplies(JSON.stringify({ replies: [{
+    to: "jane@acme.com", subject: "Re: Contract", body: "Thanks Jane.\nI will review it.", preview: "Thanks Jane.",
+  }] }));
+  assert.deepEqual(parsed.drafted, [{ to: "jane@acme.com", subject: "Re: Contract", preview: "Thanks Jane." }]);
+  assert.equal(parsed.blocks[0]?.body, "Thanks Jane.\nI will review it.");
 });
 
 test("reply source matching is deterministic and never trusts a model-supplied identifier", () => {

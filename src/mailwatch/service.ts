@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { providerSchemaPath } from "../providers/schemas.ts";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import type { ProviderRunner } from "../providers/runner.ts";
@@ -16,7 +15,7 @@ const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const CHECK_LOCK_POLL_MS = 25;
 const CHECK_LOCK_WAIT_MS = 10 * 60 * 1000;
 const MALFORMED_CHECK_LOCK_STALE_MS = 10 * 60 * 1000;
-const MAILWATCH_SCHEMA_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../schemas/mailwatch-result.schema.json");
+const MAILWATCH_SCHEMA_PATH = providerSchemaPath("mailwatch-result.schema.json");
 
 interface MailWatchState {
   lastCheckIso: string;
@@ -589,26 +588,30 @@ export class MailWatchService {
   async backfill(days = 30): Promise<{ appLines: number; created: number; changed: number; notifications: string[] }> {
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const prompt = [
+      "Use the configured Gmail MCP/connector directly. Do not use shell commands, browser automation, or local OAuth files.",
       "Read-only task. Search my Gmail inbox for messages received after", since,
       "that relate to job applications: application confirmations (\"your application was sent to X\",",
       "\"thanks for applying\", \"application received\") from LinkedIn Easy Apply, Naukri, or direct",
       "company portals, plus status updates (viewed, shortlisted, assessment invite, interview",
       "scheduled) and outcomes (rejected, offer). DO NOT modify anything in the mailbox (no",
-      "read-state, labels, drafts). For each match output exactly one line:",
-      "APP|<company>|<role>|<source: LinkedIn, Naukri, or direct>|<status: applied, viewed,",
-      "shortlisted, assessment, interview, rejected, or offer>|<date-ish from the email>|<subject>.",
+      "read-state, labels, drafts). Return every lifecycle email in the required structured JSON response.",
       "Search results only expose subject/snippet. For every likely lifecycle match, fetch and read",
       "the full email body before classification; do not rely on subject/snippet alone. Detect",
       "body-only pending questionnaires (including Gemba-style questionnaires), screening questions",
       "(including Albertsons), requests for additional details/forms (including Swiggy), assessments,",
-      "and referrals (including IRIS). Append |ACTION=<questionnaire|screening_questions|additional_details|assessment|referral>",
-      "to the APP line when pending; omit it otherwise. Use status assessment for an assessment",
+      "and referrals (including IRIS). Set action to the matching enum when pending, otherwise null. Use status assessment for an assessment",
       "request; for other actions use the lifecycle status evidenced by the email (usually shortlisted).",
-      "If none, output exactly NO_ALERTS.",
+      "Set alert=false for this historical backfill. If none, return an empty matches array.",
     ].join(" ");
 
-    const result = await this.runner.run(prompt, { provider: "codex", readOnly: true, role: "mailwatch-backfill" });
-    const appLines = result.response.split(/\r?\n/).filter((line) => line.trim().startsWith("APP|"));
+    const result = await this.runner.run(prompt, { provider: "codex", readOnly: true, role: "mailwatch-backfill", outputSchemaPath: MAILWATCH_SCHEMA_PATH });
+    if (result.limited || result.error !== undefined || result.exitCode !== 0 || !result.response.trim()) {
+      throw new Error(`Mailwatch backfill failed closed: ${result.error || `provider exit ${result.exitCode ?? "null"}`}`);
+    }
+    const response = result.response.trim();
+    const appLines = response.startsWith("{")
+      ? parseStructuredMailwatchResponse(response).appLines
+      : response.split(/\r?\n/).filter((line) => line.trim().startsWith("APP|"));
     const tracker = await updateTracker(this.config, appLines, { backfill: true });
     // ONE summary ping (audit M17): a 30-day sweep used to blast one notification
     // per historical event. Counts only — the regenerated ledger holds the detail.

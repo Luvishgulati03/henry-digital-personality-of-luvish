@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["alerts"],
+  "properties": {
+    "alerts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "location", "source"],
+        "properties": {
+          "title": { "type": "string" },
+          "location": { "type": "string" },
+          "source": { "type": "string" }
+        }
+      }
+    }
+  }
+}
