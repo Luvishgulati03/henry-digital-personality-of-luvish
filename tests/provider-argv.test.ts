@@ -133,6 +133,13 @@ test("codex argv keeps its tier and session behaviour", () => {
   assert.ok(!resumed.includes("--ephemeral"), "a session implies persistence");
 });
 
+test("codex argv forwards a structured output schema", () => {
+  const args = codexArgs("p", { readOnly: true, outputSchemaPath: "/tmp/result.schema.json" });
+  assert.deepEqual(args.slice(args.indexOf("--output-schema"), args.indexOf("--output-schema") + 2), [
+    "--output-schema", "/tmp/result.schema.json",
+  ]);
+});
+
 test("every claude argv carries --dangerously-skip-permissions and no tool disallow", () => {
   for (const { provider, args, label } of everyArgv()) {
     if (provider !== "claude") continue;

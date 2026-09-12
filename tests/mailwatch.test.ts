@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { ActivityLog } from "../src/activity.ts";
-import { MailWatchService, parseAlertLine, type MailWatchNotifier } from "../src/mailwatch/service.ts";
+import { MailWatchService, parseAlertLine, parseStructuredMailwatchResponse, type MailWatchNotifier } from "../src/mailwatch/service.ts";
 import type { HenryMemory } from "../src/memory/engram.ts";
 import type { ProviderRunner } from "../src/providers/runner.ts";
 import type { RunResult } from "../src/types.ts";
@@ -52,6 +52,30 @@ test("parseAlertLine parses well-formed ALERT lines and rejects garbage", () => 
   // Missing id falls back to a deterministic hash, not undefined/blank.
   const noId = parseAlertLine("ALERT||recruiter@acme.com|Subject|what it is");
   assert.ok(noId && noId.id.startsWith("h"));
+});
+
+test("structured mailwatch output becomes deterministic alerts and tracker lines", () => {
+  const parsed = parseStructuredMailwatchResponse(JSON.stringify({ matches: [{
+    messageId: "m-1", from: "recruiter@acme.test", subject: "Interview | scheduled",
+    company: "Acme", role: "Product Engineer", source: "direct", status: "interview",
+    date: "2026-09-13", alert: true, summary: "Interview on Monday", action: null,
+  }] }));
+  assert.deepEqual(parsed.alerts, [{
+    id: "m-1", from: "recruiter@acme.test", subject: "Interview / scheduled", what: "Interview on Monday",
+  }]);
+  assert.deepEqual(parsed.appLines, ["APP|Acme|Product Engineer|direct|interview|2026-09-13|Interview / scheduled"]);
+});
+
+test("check() explicitly uses Gmail MCP with a structured schema", async () => {
+  const { config, activity } = await setup();
+  let captured: { prompt?: string; options?: Record<string, unknown> } = {};
+  const runner = { run: async (prompt: string, options: Record<string, unknown>): Promise<RunResult> => {
+    captured = { prompt, options };
+    return { runId: "r", provider: "codex", response: '{"matches":[]}', exitCode: 0, durationMs: 1, events: [] };
+  } } as unknown as ProviderRunner;
+  await new MailWatchService(config, activity, runner).check();
+  assert.match(captured.prompt ?? "", /Gmail MCP\/connector directly/);
+  assert.match(String(captured.options?.outputSchemaPath), /mailwatch-result\.schema\.json$/);
 });
 
 test("check() parses ALERT lines, notifies, records activity, and persists state", async () => {

@@ -40,6 +40,8 @@ export interface RunOptions {
   promptBuildMs?: number;
   /** Wall-clock envelope per provider attempt (§7). */
   timeoutMs?: number;
+  /** Codex structured-output schema. Unsupported providers ignore this option. */
+  outputSchemaPath?: string;
   onEvent?: (event: ProviderEvent) => void;
 }
 
@@ -93,7 +95,7 @@ function collectText(value: unknown, output: string[]): void {
  */
 export function codexArgs(
   prompt: string,
-  options: { readOnly?: boolean; tier?: DispatchTier; model?: string; t0Model?: string; session?: { id: string; fresh: boolean } } = { readOnly: false },
+  options: { readOnly?: boolean; tier?: DispatchTier; model?: string; t0Model?: string; session?: { id: string; fresh: boolean }; outputSchemaPath?: string } = { readOnly: false },
 ): string[] {
   // `model` is the normal/t1/t2 model. Keep the t0 worker separate so a
   // caller's heavyweight configured model can never accidentally reach a
@@ -125,6 +127,7 @@ export function codexArgs(
     "exec",
     ...(model ? ["-m", model] : []),
     "--json", ...(options.session ? [] : ["--ephemeral"]),
+    ...(options.outputSchemaPath ? ["--output-schema", options.outputSchemaPath] : []),
     "--sandbox", options.readOnly ? "read-only" : "danger-full-access",
     ...config,
     "--skip-git-repo-check", prompt,
@@ -169,11 +172,12 @@ export function buildProviderArgs(
     codexModel?: string; codexT0Model?: string; codexT2Model?: string;
     codexResumeTailorModel?: string; codexApplicationReviewModel?: string; codexApplicationManagerModel?: string;
     claudeModel?: string; claudeT0Model?: string; claudeT2Model?: string; session?: { id: string; fresh: boolean };
+    outputSchemaPath?: string;
   },
 ): string[] {
   const route = resolveProviderRoute(provider, options);
   return provider === "codex"
-    ? codexArgs(prompt, { readOnly: options.readOnly, tier: route.tier, model: route.model, t0Model: options.codexT0Model, session: options.session })
+    ? codexArgs(prompt, { readOnly: options.readOnly, tier: route.tier, model: route.model, t0Model: options.codexT0Model, session: options.session, outputSchemaPath: options.outputSchemaPath })
     : claudeArgs(prompt, {
       readOnly: options.readOnly, tier: route.tier, model: route.model,
       t0Model: options.claudeT0Model, t2Model: options.claudeT2Model, session: options.session,
@@ -629,6 +633,7 @@ export class ProviderRunner {
         claudeT0Model: this.config.claudeT0Model,
         claudeT2Model: this.config.claudeT2Model,
         session,
+        outputSchemaPath: options.outputSchemaPath,
       });
       const route = resolveProviderRoute(provider, {
         tier: options.tier,

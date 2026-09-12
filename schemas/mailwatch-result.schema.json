@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["matches"],
+  "properties": {
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["messageId", "from", "subject", "company", "role", "source", "status", "date", "alert", "summary", "action"],
+        "properties": {
+          "messageId": { "type": "string" },
+          "from": { "type": "string" },
+          "subject": { "type": "string" },
+          "company": { "type": ["string", "null"] },
+          "role": { "type": ["string", "null"] },
+          "source": { "enum": ["LinkedIn", "Naukri", "direct", null] },
+          "status": { "enum": ["applied", "viewed", "shortlisted", "assessment", "interview", "rejected", "offer", null] },
+          "date": { "type": ["string", "null"] },
+          "alert": { "type": "boolean" },
+          "summary": { "type": ["string", "null"] },
+          "action": { "enum": ["questionnaire", "screening_questions", "additional_details", "assessment", "referral", null] }
+        }
+      }
+    }
+  }
+}

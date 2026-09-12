@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import type { ProviderRunner } from "../providers/runner.ts";
@@ -14,6 +16,7 @@ const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const CHECK_LOCK_POLL_MS = 25;
 const CHECK_LOCK_WAIT_MS = 10 * 60 * 1000;
 const MALFORMED_CHECK_LOCK_STALE_MS = 10 * 60 * 1000;
+const MAILWATCH_SCHEMA_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../schemas/mailwatch-result.schema.json");
 
 interface MailWatchState {
   lastCheckIso: string;
@@ -133,6 +136,42 @@ export function parseAlertLine(line: string): ParsedAlert | undefined {
   if (subjectTrimmed.length < 6 || !/[a-z]{3}/i.test(subjectTrimmed)) return undefined;
   const id = rawId.trim() || subjectHash(`${fromTrimmed}|${subjectTrimmed}`);
   return { id, from: fromTrimmed, subject: subjectTrimmed, what };
+}
+
+interface StructuredMailMatch {
+  messageId: string; from: string; subject: string;
+  company: string | null; role: string | null; source: "LinkedIn" | "Naukri" | "direct" | null;
+  status: "applied" | "viewed" | "shortlisted" | "assessment" | "interview" | "rejected" | "offer" | null;
+  date: string | null; alert: boolean; summary: string | null;
+  action: "questionnaire" | "screening_questions" | "additional_details" | "assessment" | "referral" | null;
+}
+
+function safeField(value: string): string { return value.replace(/\|/g, "/").replace(/\r?\n/g, " ").trim(); }
+
+export function parseStructuredMailwatchResponse(response: string): { alerts: ParsedAlert[]; appLines: string[] } {
+  let raw: unknown;
+  try { raw = JSON.parse(response); } catch { throw new Error("Mailwatch check failed closed: provider returned invalid JSON"); }
+  if (!raw || typeof raw !== "object" || !Array.isArray((raw as { matches?: unknown }).matches)) {
+    throw new Error("Mailwatch check failed closed: provider returned an invalid structured result");
+  }
+  const alerts: ParsedAlert[] = [];
+  const appLines: string[] = [];
+  for (const candidate of (raw as { matches: unknown[] }).matches) {
+    const match = candidate as Partial<StructuredMailMatch>;
+    if (!match || typeof match.messageId !== "string" || typeof match.from !== "string" || typeof match.subject !== "string"
+      || typeof match.alert !== "boolean") throw new Error("Mailwatch check failed closed: malformed match object");
+    if (match.alert) {
+      if (typeof match.summary !== "string" || !match.summary.trim()) throw new Error("Mailwatch check failed closed: alert missing summary");
+      alerts.push({ id: safeField(match.messageId) || subjectHash(`${match.from}|${match.subject}`), from: safeField(match.from), subject: safeField(match.subject), what: safeField(match.summary) });
+    }
+    if (match.status !== null && match.status !== undefined) {
+      if (typeof match.company !== "string" || typeof match.role !== "string" || typeof match.source !== "string" || typeof match.date !== "string") {
+        throw new Error("Mailwatch check failed closed: lifecycle match missing tracker fields");
+      }
+      appLines.push(`APP|${safeField(match.company)}|${safeField(match.role)}|${match.source}|${match.status}|${safeField(match.date)}|${safeField(match.subject)}${match.action ? `|ACTION=${match.action}` : ""}`);
+    }
+  }
+  return { alerts, appLines };
 }
 
 export class MailWatchService {
@@ -410,6 +449,7 @@ export class MailWatchService {
     const checkedAt = new Date().toISOString();
     const state = await this.deliverPendingAlerts(await this.readState());
     const prompt = [
+      "Use the configured Gmail MCP/connector directly. Do not use shell commands, browser automation, or local OAuth files.",
       "Read-only task. Search my Gmail inbox for messages received after", state.lastCheckIso,
       "that relate to job applications: shortlisting, resume selected, interview",
       "scheduled/invitation, assessment/test invites, offer letters, or a PERSONAL recruiter",
@@ -423,33 +463,30 @@ export class MailWatchService {
       "emails, newsletters. Those are marketing volume, not outcomes — skip them entirely",
       "(they are handled by a separate pipeline).",
       "DO NOT modify anything in the mailbox (no read-state, labels, drafts).",
-      "For each match output exactly one line: ALERT|<message-id-or-subject-hash>|<from>|<subject>|<one-clause what it is>.",
+      "Return every match in the required structured JSON response. Set alert=true only for forward movement and include a concise summary.",
       "Also search the same window for application-lifecycle emails: application confirmations",
       "(\"your application was sent to X\", \"thanks for applying\", \"application received\") from",
       "LinkedIn Easy Apply, Naukri, or direct company portals, plus status updates (viewed,",
       "shortlisted, assessment invite, interview scheduled) and outcomes (rejected, offer).",
-      "For each such email output exactly one line: APP|<company>|<role>|<source: LinkedIn, Naukri,",
-      "or direct>|<status: applied, viewed, shortlisted, assessment, interview, rejected, or",
-      "offer>|<date-ish from the email>|<subject>. One email may produce both an ALERT and an APP",
-      "line when it qualifies for both.",
+      "For each lifecycle email populate company, role, source, status and date. One email may be both an alert and a lifecycle match.",
       "Search results only expose subject/snippet. For every likely lifecycle match, fetch and read",
       "the full email body before classifying it; never classify a likely match from subject/snippet",
       "alone. Body-only requests for questionnaires, screening questions, additional details or",
-      "forms, assessments/tests, and referrals are actionable lifecycle updates. Append",
-      "|ACTION=<questionnaire|screening_questions|additional_details|assessment|referral> to its APP",
-      "line when one is pending; omit the suffix when no action is pending.",
-      "If nothing matches either category, output exactly NO_ALERTS.",
+      "forms, assessments/tests, and referrals are actionable lifecycle updates. Set action to the matching enum when pending, otherwise null.",
+      "If nothing matches, return an empty matches array.",
     ].join(" ");
 
-    const result = await this.runner.run(prompt, { provider: "codex", readOnly: true, role: "mailwatch" });
+    const result = await this.runner.run(prompt, { provider: "codex", readOnly: true, role: "mailwatch", outputSchemaPath: MAILWATCH_SCHEMA_PATH });
     if (result.limited) throw new Error(`Mailwatch check failed closed: provider limited${result.error ? ` (${result.error})` : ""}`);
     if (result.error !== undefined) throw new Error(`Mailwatch check failed closed: provider error (${result.error || "unknown error"})`);
     if (result.exitCode !== 0) throw new Error(`Mailwatch check failed closed: provider exit code ${result.exitCode ?? "null"}`);
 
     const response = result.response.trim();
-    const parsed: ParsedAlert[] = [];
-    const appLines: string[] = [];
-    if (response !== "NO_ALERTS") {
+    let parsed: ParsedAlert[] = [];
+    let appLines: string[] = [];
+    if (response.startsWith("{")) {
+      ({ alerts: parsed, appLines } = parseStructuredMailwatchResponse(response));
+    } else if (response !== "NO_ALERTS") {
       if (!response) throw new Error("Mailwatch check failed closed: empty provider response");
       for (const line of response.split(/\r?\n/)) {
         const alert = parseAlertLine(line);
