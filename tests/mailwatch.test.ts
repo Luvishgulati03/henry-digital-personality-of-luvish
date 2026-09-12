@@ -66,6 +66,17 @@ test("structured mailwatch output becomes deterministic alerts and tracker lines
   assert.deepEqual(parsed.appLines, ["APP|Acme|Product Engineer|direct|interview|2026-09-13|Interview / scheduled"]);
 });
 
+test("structured lifecycle results preserve honest placeholders when an email omits metadata", () => {
+  const parsed = parseStructuredMailwatchResponse(JSON.stringify({ matches: [{
+    messageId: "m-2", from: "assessment@portal.test", subject: "Complete your assessment",
+    company: null, role: null, source: null, status: "assessment", date: null,
+    alert: true, summary: "Assessment requested", action: "assessment",
+  }] }));
+  assert.deepEqual(parsed.appLines, [
+    "APP|Unknown company|Unknown role|direct|assessment|Unknown date|Complete your assessment|ACTION=assessment",
+  ]);
+});
+
 test("check() explicitly uses Gmail MCP with a structured schema", async () => {
   const { config, activity } = await setup();
   let captured: { prompt?: string; options?: Record<string, unknown> } = {};

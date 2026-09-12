@@ -165,10 +165,14 @@ export function parseStructuredMailwatchResponse(response: string): { alerts: Pa
       alerts.push({ id: safeField(match.messageId) || subjectHash(`${match.from}|${match.subject}`), from: safeField(match.from), subject: safeField(match.subject), what: safeField(match.summary) });
     }
     if (match.status !== null && match.status !== undefined) {
-      if (typeof match.company !== "string" || typeof match.role !== "string" || typeof match.source !== "string" || typeof match.date !== "string") {
-        throw new Error("Mailwatch check failed closed: lifecycle match missing tracker fields");
-      }
-      appLines.push(`APP|${safeField(match.company)}|${safeField(match.role)}|${match.source}|${match.status}|${safeField(match.date)}|${safeField(match.subject)}${match.action ? `|ACTION=${match.action}` : ""}`);
+      // Provider-visible messages do not always name the company or role (for example a generic
+      // assessment portal invite). Preserve the real event with honest placeholders instead of
+      // rejecting every other valid result in the same mailbox batch.
+      const company = typeof match.company === "string" && match.company.trim() ? safeField(match.company) : "Unknown company";
+      const role = typeof match.role === "string" && match.role.trim() ? safeField(match.role) : "Unknown role";
+      const source = typeof match.source === "string" ? match.source : "direct";
+      const date = typeof match.date === "string" && match.date.trim() ? safeField(match.date) : "Unknown date";
+      appLines.push(`APP|${company}|${role}|${source}|${match.status}|${date}|${safeField(match.subject)}${match.action ? `|ACTION=${match.action}` : ""}`);
     }
   }
   return { alerts, appLines };
