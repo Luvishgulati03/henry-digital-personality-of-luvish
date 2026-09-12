@@ -6,6 +6,10 @@
 Welcome. This handbook is a public, user-neutral path for learning Henry by
 doing small verified steps on a laptop.
 
+Want another coding agent to perform the setup with you? Use the
+provider-neutral [SETUP-PROMPT.md](../../SETUP-PROMPT.md) with Codex, Claude
+Code, Gemini CLI, or another terminal agent.
+
 Henry is a terminal-first personal agent kernel. It runs through local provider
 CLIs, keeps memory and knowledge local by default, exposes terminal and dashboard
 surfaces, and stages outbound actions behind an approval boundary.

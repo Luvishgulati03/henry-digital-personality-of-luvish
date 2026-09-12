@@ -60,6 +60,12 @@ Fastest: open this repo in Claude Code / Codex CLI and paste the block from
 **[BOOTSTRAP.md](BOOTSTRAP.md)** — it interviews you, builds your persona from the
 example templates, and verifies each step. By hand:
 
+For a provider-neutral guided setup, paste
+**[SETUP-PROMPT.md](SETUP-PROMPT.md)** into Codex, Claude Code, Gemini CLI, or
+another terminal coding agent. It inspects the current checkout, interviews the
+owner, configures only requested capabilities, and verifies the result without
+sending anything outbound.
+
 ```bash
 npm install
 cp .env.example .env        # then soul.example.md → soul.md, personality.example.md → personality.md
