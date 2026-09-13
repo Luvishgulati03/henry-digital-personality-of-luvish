@@ -1,8 +1,16 @@
 # Claude integration guide
 
-Henry is a local-first personal engineering and project-management agent. Claude is
-one of Henry's supported subscription CLI providers. Read `BOOTSTRAP.md` and `SETUP.md`
-before changing the runtime. If the local-only `context.md` exists, read it for
+Henry is a local-first personal-agent framework. Claude is one supported
+subscription CLI provider.
+
+On a fresh clone, do not begin with `npm install` or assume the user's identity.
+If completed private `soul.md`, `personality.md`, and `.env` files are absent,
+read `SETUP-PROMPT.md`, `SETUP.md`, and `BOOTSTRAP.md` completely and execute the
+guided setup flow. Start by asking for the problem statement, research the use
+case, recommend a workflow blueprint, and ask the user to correct it before
+configuring modules. Never inherit the example owner name or persona.
+
+If the local-only `context.md` exists, read it for
 developmental history, but treat current code, tests, `AGENTS.md`, and
 `docs/architecture.md` as the source of truth when they disagree.
 

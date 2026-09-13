@@ -11,6 +11,22 @@
 > It takes you from a blank clone to your own persona, first working run,
 > private knowledge base, Telegram surface, automation, and custom module.
 
+After cloning, open the repository in Claude Code, Codex CLI, or Gemini CLI and
+paste this:
+
+```text
+Set up this repository as my personal AI agent. Read AGENTS.md, CLAUDE.md,
+SETUP-PROMPT.md, SETUP.md, and BOOTSTRAP.md completely before changing anything.
+Follow the fresh-clone setup flow. First ask me for the problem statement and
+intended users, research the use case, and recommend a workflow blueprint with
+the right capabilities, data and RAG boundaries, connectors, approval gates,
+tests, and rollout. Ask me to correct the blueprint before implementation. Then
+interview me for identity, personality, provider, memory, and authority choices;
+install and configure only what we confirm; run the repository checks; and hand
+me a working local setup. Never send anything, approve anything for me, expose
+the dashboard remotely, or commit my private data during setup.
+```
+
 Henry is a terminal-first personal agent framework: one brain (Claude/Codex CLIs +
 a local memory engine) behind **three chat surfaces** — terminal REPL, a streaming
 web chat, and Telegram — with real jobs wired in: job-hunt automation, team

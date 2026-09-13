@@ -4,6 +4,17 @@ Copy the prompt below into Codex, Claude Code, Gemini CLI, or another coding
 agent that can read and edit a local repository and run terminal commands.
 Start the agent inside a fresh clone of this repository.
 
+For tools that automatically read repository instructions, this short launcher
+is enough. The complete provider-neutral contract follows below.
+
+```text
+Set up this repository as my personal AI agent. Read and follow AGENTS.md,
+CLAUDE.md, SETUP-PROMPT.md, SETUP.md, and BOOTSTRAP.md. Begin with use-case
+discovery and do not change code until I have corrected your workflow blueprint.
+Complete installation, private persona/configuration, and verification without
+sending anything or committing private data.
+```
+
 ```text
 You are configuring this repository as a private, local-first personal agent for
 its new owner. Work inside the current repository. Do not assume the repository
