@@ -35,7 +35,6 @@ for (const db of ["data/engram.db", "data/sessions.db", "data/standups.db", "dat
 rsync -a --delete \
   --exclude node_modules --exclude dist --exclude .git \
   --exclude ".env" --exclude ".env.*" \
-  --exclude "data/gmail-token.json" --exclude "data/gmail-credentials.json" \
   --exclude .DS_Store --exclude "data/browser-profile" \
   --exclude "data/knowledge.db" --exclude "data/*.db-shm" --exclude "data/*.db-wal" \
   --exclude "data/*.lock" --exclude "data/*.tmp-*" \

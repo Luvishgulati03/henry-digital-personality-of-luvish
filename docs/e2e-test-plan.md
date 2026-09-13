@@ -31,7 +31,7 @@ npm run build
 
 ### Gmail sandbox environment
 
-- Google OAuth desktop credentials stored outside Git.
+- Gmail connector configured in Codex.
 - A dedicated test Gmail account or test label, not a personal inbox.
 - Test messages addressed only to the test account.
 - Token file stored under ignored `data/`.
@@ -111,9 +111,9 @@ npm run build
 
 ### Gmail
 
-1. Run `henry gmail auth` with missing credentials and assert the message is actionable.
-2. Connect a dedicated sandbox account.
-3. Run `henry gmail inbox --limit 5` and verify headers/body parsing.
+1. Disable the Codex Gmail connector and assert `henry gmail inbox --limit 5` fails closed.
+2. Re-enable the connector with a dedicated sandbox account.
+3. Run `henry gmail inbox --limit 5` and verify schema-bound parsing without mailbox mutation.
 4. Generate a reply with `--thread-id` and assert the local approval payload preserves the thread.
 5. Verify scheduler polling reads messages but never sends.
 6. Send only after explicit approval and verify the exact test recipient, subject, body, and thread.

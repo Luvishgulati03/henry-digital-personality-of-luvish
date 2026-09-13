@@ -94,8 +94,8 @@ export class HenryRuntime {
     this.activity = new ActivityLog(config.activityPath);
     this.approvals = new ApprovalStore(config.approvalsPath);
     this.memory = new HenryMemory(config, this.activity);
-    this.gmail = new GmailService(config, this.activity, this.approvals);
     this.agent = new HenryAgent(config, this.activity, this.memory, () => this.knowledge);
+    this.gmail = new GmailService(this.activity, this.approvals, this.agent.providerRunner);
     this.luna = new LunaOrchestrator(config, this.activity, this.memory);
     this.reminders = new ReminderService(config, this.activity);
     this.scheduler = new WorkflowScheduler(

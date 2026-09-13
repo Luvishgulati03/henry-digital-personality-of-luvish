@@ -74,8 +74,9 @@ STEP 3 — Interview the user and select modules
     (Codex/Claude via subscription CLI), Engram memory, the approval
     store + outbound guardrail, the scheduler, the CLI/REPL, the local
     dashboard.
-  - gmail — read inbox, generate replies, save Gmail drafts. Sending is
-    always approval-gated. Needs Google Cloud OAuth desktop credentials.
+  - gmail — read inbox, generate replies, save Gmail drafts, and execute an
+    explicitly approved send through the owner's configured Codex Gmail
+    connector. No separate Henry OAuth credentials are used.
   - jobs / career — inspect job postings, tailor a resume + cover letter
     against a resume file, render application PDFs, fill forms in a
     visible browser, submit only after explicit approval. Needs a resume

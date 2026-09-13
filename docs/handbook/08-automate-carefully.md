@@ -123,7 +123,7 @@ Restart Henry after changing `.env`.
 ```bash
 henry telegram status
 henry telegram test
-henry gmail doctor
+henry gmail inbox --limit 3
 ```
 
 Telegram reports missing token/chat configuration. Gmail doctor checks local

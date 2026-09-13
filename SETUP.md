@@ -179,7 +179,6 @@ matters, in order:
 | `HENRY_DASH_SECRET` | **auto-generated** | Written into `.env` on first use (mode `0600`) by the dashboard login. Do not hand-write it. |
 | `HENRY_TELEGRAM_BOT_TOKEN`, `HENRY_TELEGRAM_CHAT_ID` | OPTIONAL | Phone chat + alerts. Step 8. |
 | `HENRY_TELEGRAM_STANDUP_CHAT_ID` | OPTIONAL | Team standups. Discover it later with `henry standup discover`. |
-| `GMAIL_CREDENTIALS_PATH`, `GMAIL_TOKEN_PATH` | OPTIONAL | Only if the user wants the Gmail module; needs Google Cloud OAuth desktop credentials. |
 | `HENRY_JOB_PROFILE_PATH`, `HENRY_RESUME_SOURCE_PATH` | OPTIONAL | Only for the jobs/resume pipeline; they point at personal files that are gitignored. |
 | `X_API_KEY`, `X_API_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_SECRET` | OPTIONAL | Daily tech tweet. All four together or none — a partial set is treated as no keys and tweets stage instead of posting. |
 | `OPENAI_API_KEY` | OPTIONAL | Not needed. Embeddings run locally and free (`bge-small-en-v1.5`, on-device). |
@@ -373,7 +372,7 @@ set up what your user asks for.
 | **PDF ingestion** | `brew install poppler` (macOS) or your distro's poppler package | Lets `knowledge add` read PDFs. Without `pdftotext` on PATH, PDFs are skipped — the run does not abort. |
 | **Local NER scrub** | `brew install ollama`, then `ollama pull llama3.2:3b`, then set `local.ollama.ner: true` in `data/settings.json` | A deeper name-scrub pass that runs on-device instead of costing a metered provider call. Fits an 8GB M1 Air. |
 | **Browser automation** | `npx playwright install chromium` | Needed by the jobs pipeline and resume/cover-letter PDF rendering. |
-| **Gmail** | Google Cloud OAuth *desktop* credentials → `data/gmail-credentials.json` | Inbox reading and draft generation. Sending stays approval-gated. |
+| **Gmail** | Gmail connector enabled in Codex | Inbox reading, drafting, and separately approved sends. |
 | **Jobs pipeline** | A real `resume.md` and `application-profile.md` (both gitignored) | Job scout, tailored resume + cover letter, application tracking. |
 | **Scheduled work** | `henry schedule daemon`, or `henry schedule install` to generate launchd/cron files | Nightly memory consolidation, inbox polling, digests. Review the generated files before installing them. |
 
@@ -386,7 +385,6 @@ quieter than it should:
 | --- | --- | --- |
 | `.env` | Secrets never go to GitHub, private repo or not | Recreate it (Step 3); the vault key regenerates but old encrypted values will not open without the original |
 | `data/knowledge.db` | Exceeds GitHub's 100MB limit | `henry knowledge index` — rebuilds the index from `knowledge/raw`, which IS in the mirror |
-| `data/gmail-credentials.json`, `data/gmail-token.json` | OAuth secrets | Re-download the desktop credentials and re-authorise (Step 8) |
 | `data/browser-profile/` | Live logged-in browser sessions | `henry jobs login` to sign in again |
 
 Your **memories survive** — `data/engram.db` is in the mirror and is checkpointed
