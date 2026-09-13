@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import type { ActivityKind, DispatchTier, ProviderEvent, ProviderName, RunResult } from "../types.ts";
@@ -9,6 +10,14 @@ import { SessionManager, sessionArgs } from "./session.ts";
 import { AdmissionController, sharedAdmissionController } from "../orchestration/admission.ts";
 import { notifyReminder, type ReminderNotifier } from "../reminders/service.ts";
 import { readSettings } from "../util/settings.ts";
+import {
+  CAPABILITY_FILE,
+  describeClaudeGmail,
+  gmailToolAccess,
+  readCapabilities,
+  recordClaudeInit,
+  type ConnectorName,
+} from "./capabilities.ts";
 import {
   LIMIT_LEDGER_FILE,
   ProviderLimitLedger,
@@ -31,6 +40,14 @@ export interface RunOptions {
   /** Precomputed session from acquireSession() — lets the caller build a slim prompt for resumed turns. */
   session?: { id: string; fresh: boolean; provider: ProviderName };
   provider?: ProviderName;
+  /**
+   * How firmly `provider` binds. Absent: a billing pin that roams only with
+   * providers.fallbackPinned. "soft": a preference that hands off to the other CLI whenever
+   * fallback is on. "hard": never roams (approved outbound sends).
+   */
+  pin?: "hard" | "soft";
+  /** A connector the run cannot work without; a CLI that cannot prove it is skipped. */
+  connector?: ConnectorName;
   cwd?: string;
   role?: string;
   readOnly?: boolean;
@@ -149,6 +166,11 @@ export function codexArgs(
 export const CLAUDE_T0_MODEL = "haiku";
 export const CLAUDE_T2_MODEL = "opus";
 
+/** Built-in tools a read-only Claude run may use: look, search, fetch — never mutate. */
+export const CLAUDE_READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "WebSearch", "WebFetch"];
+/** Denied outright on read-only runs, on top of dontAsk's allowlist. */
+export const CLAUDE_WRITE_TOOLS = ["Bash", "Edit", "Write", "NotebookEdit"];
+
 /**
  * Claude argv for one dispatch (subscription CLI — never the API).
  * t0 → the t0 worker, t2 → the deep specialist, t1/absent → the configured model
@@ -159,12 +181,25 @@ export const CLAUDE_T2_MODEL = "opus";
  * brain back to the Claude seat stays a config change and never a code change. The
  * defaults reproduce the previous hardcoded haiku/opus behaviour exactly.
  *
- * The shape is the prompt followed by `--dangerously-skip-permissions`, which is
- * how the agent edits files on Luvish's machine.
+ * A writable run is the prompt followed by `--dangerously-skip-permissions`, which is
+ * how the agent edits files on Luvish's machine. A read-only run is Claude's equivalent of
+ * Codex's read-only sandbox: `dontAsk` denies every tool not on the read allowlist, and the
+ * write tools are denied by name as well (verified live 2026-09-13: a write request is refused).
+ * Tool lists are comma-joined single arguments placed after the prompt, because the CLI's
+ * variadic tool flags would otherwise swallow the prompt as a tool name.
  */
 export function claudeArgs(
   prompt: string,
-  options: { readOnly?: boolean; tier?: DispatchTier; model?: string; t0Model?: string; t2Model?: string; session?: { id: string; fresh: boolean } } = {},
+  options: {
+    readOnly?: boolean; tier?: DispatchTier; model?: string; t0Model?: string; t2Model?: string;
+    session?: { id: string; fresh: boolean };
+    /** Compact JSON Schema text — the Claude counterpart of Codex's --output-schema. */
+    jsonSchema?: string;
+    /** Stream JSON even without a schema, so the init event can prove a connector. */
+    streamJson?: boolean;
+    allowedTools?: string[];
+    disallowedTools?: string[];
+  } = {},
 ): string[] {
   const model = options.tier === "t0"
     ? (options.t0Model || CLAUDE_T0_MODEL)
@@ -172,7 +207,20 @@ export function claudeArgs(
       ? (options.t2Model || CLAUDE_T2_MODEL)
       : options.model;
   const session = options.session ? sessionArgs("claude", options.session).claudeArgs : [];
-  return ["-p", ...(model ? ["--model", model] : []), ...session, prompt, "--dangerously-skip-permissions"];
+  const head = ["-p", ...(model ? ["--model", model] : []), ...session, prompt];
+  const streamed = options.jsonSchema || options.streamJson
+    ? ["--verbose", "--output-format", "stream-json", ...(options.jsonSchema ? ["--json-schema", options.jsonSchema] : [])]
+    : [];
+  const denied = options.disallowedTools ?? [];
+  if (options.readOnly) {
+    return [
+      ...head, ...streamed,
+      "--permission-mode", "dontAsk",
+      "--allowedTools", [...CLAUDE_READ_ONLY_TOOLS, ...(options.allowedTools ?? [])].join(","),
+      "--disallowedTools", [...CLAUDE_WRITE_TOOLS, ...denied].join(","),
+    ];
+  }
+  return [...head, ...streamed, "--dangerously-skip-permissions", ...(denied.length ? ["--disallowedTools", denied.join(",")] : [])];
 }
 
 export function buildProviderArgs(
@@ -184,6 +232,8 @@ export function buildProviderArgs(
     codexResumeTailorModel?: string; codexApplicationReviewModel?: string; codexApplicationManagerModel?: string;
     claudeModel?: string; claudeT0Model?: string; claudeT2Model?: string; session?: { id: string; fresh: boolean };
     outputSchemaPath?: string;
+    claudeJsonSchema?: string; claudeStreamJson?: boolean;
+    claudeAllowedTools?: string[]; claudeDisallowedTools?: string[];
   },
 ): string[] {
   const route = resolveProviderRoute(provider, options);
@@ -192,7 +242,37 @@ export function buildProviderArgs(
     : claudeArgs(prompt, {
       readOnly: options.readOnly, tier: route.tier, model: route.model,
       t0Model: options.claudeT0Model, t2Model: options.claudeT2Model, session: options.session,
+      jsonSchema: options.claudeJsonSchema, streamJson: options.claudeStreamJson,
+      allowedTools: options.claudeAllowedTools, disallowedTools: options.claudeDisallowedTools,
     });
+}
+
+/**
+ * A checked-in schema file as one compact argv string for Claude's --json-schema. The top-level
+ * `$schema` dialect marker is dropped: Claude's validator rejects the draft 2020-12 URI Codex's
+ * schemas carry (found by the live failover check, 2026-09-13), and the marker adds no constraint.
+ */
+export function compactSchema(schemaPath: string): string {
+  const { $schema: _dialect, ...schema } = JSON.parse(readFileSync(schemaPath, "utf8")) as Record<string, unknown>;
+  return JSON.stringify(schema);
+}
+
+/**
+ * Claude's stream-json run ends in one `result` event carrying the structured output (schema
+ * runs) or the final text, plus whether the CLI itself reported an error (a usage-limit notice
+ * arrives this way).
+ */
+export function finalClaudeResult(events: ProviderEvent[]): { response: string; isError: boolean } | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const parsed = events[index]?.parsed;
+    if (parsed?.type !== "result") continue;
+    const structured = parsed.structured_output;
+    const response = structured !== undefined && structured !== null
+      ? JSON.stringify(structured)
+      : typeof parsed.result === "string" ? parsed.result.trim() : "";
+    return { response, isError: parsed.is_error === true };
+  }
+  return undefined;
 }
 
 export interface ProviderRoute {
@@ -340,7 +420,9 @@ export async function execute(
       for (const event of events) if (event.parsed) collectText(event.parsed, extracted);
       const raw = stdoutText.join("").trim();
       const combined = [...new Set(extracted.map((text) => text.trim()).filter(Boolean))].join("\n\n");
+      const claudeResult = provider === "claude" ? finalClaudeResult(events) : undefined;
       const response = (provider === "codex" && options.outputSchemaPath ? finalCodexAgentMessage(events) : undefined)
+        ?? (claudeResult?.response || undefined)
         ?? (combined || raw);
       if (timedOut) {
         resolve({
@@ -349,7 +431,9 @@ export async function execute(
         });
         return;
       }
-      const error = exitCode === 0 ? undefined : stderrText.join("").trim() || `Provider exited with code ${exitCode}`;
+      const error = exitCode === 0 && !claudeResult?.isError
+        ? undefined
+        : stderrText.join("").trim() || (claudeResult?.isError ? claudeResult.response || "Claude reported an error" : `Provider exited with code ${exitCode}`);
       resolve({ runId, provider, response, exitCode, durationMs: Date.now() - started, ...(error ? { error } : {}), events, firstEventMs, firstTextMs });
     });
   });
@@ -401,6 +485,16 @@ export function shouldNotifyAuthFailure(provider: ProviderName, now: number = Da
   const last = lastAuthNotifyAt.get(provider);
   if (last !== undefined && now - last < AUTH_NOTIFY_DEBOUNCE_MS) return false;
   lastAuthNotifyAt.set(provider, now);
+  return true;
+}
+
+const lastLimitNotifyAt = new Map<ProviderName, number>();
+
+/** Same debounce for "out of quota — the other CLI took over", tracked separately from logouts. */
+export function shouldNotifyLimit(provider: ProviderName, now: number = Date.now()): boolean {
+  const last = lastLimitNotifyAt.get(provider);
+  if (last !== undefined && now - last < AUTH_NOTIFY_DEBOUNCE_MS) return false;
+  lastLimitNotifyAt.set(provider, now);
   return true;
 }
 
@@ -490,6 +584,10 @@ export class ProviderRunner {
     return this.config.settingsPath || path.join(this.config.dataDir, "settings.json");
   }
 
+  private capabilitiesPath(): string {
+    return path.join(this.config.dataDir, CAPABILITY_FILE);
+  }
+
   /** Peek/create the session a surfaced run() will use — lets callers slim resumed prompts. */
   acquireSession(surface: string, provider?: ProviderName): { id: string; fresh: boolean; provider: ProviderName } {
     const p = provider || this.config.provider;
@@ -565,20 +663,25 @@ export class ProviderRunner {
     const at = this.nowFn();
     const ledger = this.limits();
     const policy = readFallbackPolicy(this.settingsPath());
-    // A caller-set provider is a PIN (a billing/policy decision), not a preference — see
-    // readFallbackPolicy. `config.provider` is only the default and may always roam.
-    const isPinned = options.provider !== undefined;
+    // A caller-set provider is a PIN (a billing/policy decision) unless the caller marks it
+    // soft — see RunOptions.pin and readFallbackPolicy. `config.provider` is only the default
+    // and may always roam. Read-only runs roam too: Claude runs them under dontAsk with a
+    // read-only tool allowlist (claudeArgs), the counterpart of Codex's read-only sandbox.
+    const isPinned = options.provider !== undefined && options.pin !== "soft";
     const preferred = options.provider || this.config.provider;
     const alternate: ProviderName = preferred === "codex" ? "claude" : "codex";
-    // Claude's installed CLI does not expose a verified read-only mode in the
-    // contract we use here. Never turn a read-only review into a write-capable
-    // FALLBACK; an EXPLICIT caller choice of claude (e.g. vision classification)
-    // is honored as a single-provider run with no fallback either way.
-    const sequence: ProviderName[] = options.readOnly
-      ? [options.provider === "claude" ? "claude" as const : "codex" as const]
-      : isPinned
-        ? (policy.fallback && policy.fallbackPinned ? [preferred, alternate] : [preferred])
-        : (policy.fallback ? [preferred, alternate] : [preferred]);
+    const roams = policy.fallback && (!isPinned || (options.pin !== "hard" && policy.fallbackPinned));
+    const candidates: ProviderName[] = roams ? [preferred, alternate] : [preferred];
+
+    // CONNECTOR GATE: a Gmail run may only land on a CLI that can reach Gmail. Codex's connector
+    // is the long-standing default; Claude's must be proven by its own headless init event, or a
+    // model without the tool would answer "no matching mail" and be believed.
+    const capabilityFile = this.capabilitiesPath();
+    const gmailAccess = options.connector === "gmail" ? (options.readOnly ? "read" as const : "draft" as const) : undefined;
+    const claudeGmail = gmailAccess ? readCapabilities(capabilityFile).claude?.gmail : undefined;
+    const claudeTools = gmailAccess ? gmailToolAccess(claudeGmail, gmailAccess) : undefined;
+    const connectorNote = gmailAccess && !claudeTools && candidates.includes("claude") ? describeClaudeGmail(claudeGmail) : undefined;
+    const sequence = connectorNote ? candidates.filter((provider) => provider !== "claude") : candidates;
 
     // PRE-FLIGHT (§5): a CLI already known to be out of quota is dropped — spending a spawn and
     // an envelope on a guaranteed refusal helps nobody. SOFT cooldowns (logged out, binary
@@ -591,8 +694,22 @@ export class ProviderRunner {
       ...eligible.filter((provider) => state[provider] !== undefined),
     ];
 
+    if (!sequence.length) {
+      const refused: RunResult = {
+        runId: randomUUID(), provider: preferred, response: "", exitCode: null, durationMs: 0,
+        error: connectorNote ?? "No provider was available", events: [],
+      };
+      await this.activity.record(
+        "run.failed",
+        "No provider can reach the required connector",
+        { error: refused.error, connector: options.connector ?? null },
+        { runId: refused.runId, provider: preferred, role: options.role },
+      );
+      return refused;
+    }
+
     if (!order.length) {
-      const message = this.limitedMessage(state, sequence, { pinned: isPinned, policy });
+      const message = `${this.limitedMessage(state, sequence, { pinned: isPinned, policy })}${connectorNote ? ` ${connectorNote}` : ""}`;
       const refused: RunResult = {
         runId: randomUUID(), provider: sequence[0], response: "", exitCode: null, durationMs: 0,
         error: message, events: [], limited: true,
@@ -647,6 +764,12 @@ export class ProviderRunner {
         claudeT2Model: this.config.claudeT2Model,
         session,
         outputSchemaPath: options.outputSchemaPath,
+        ...(provider === "claude" ? {
+          claudeJsonSchema: options.outputSchemaPath ? compactSchema(options.outputSchemaPath) : undefined,
+          claudeStreamJson: options.connector !== undefined,
+          claudeAllowedTools: claudeTools?.allowed,
+          claudeDisallowedTools: claudeTools?.denied,
+        } : {}),
       });
       const route = resolveProviderRoute(provider, {
         tier: options.tier,
@@ -699,6 +822,24 @@ export class ProviderRunner {
         result = await this.executeFn(provider, args, cwd, provider, { ...options, timeoutMs: envelopeMs });
       } finally {
         decision.slot.release();
+      }
+      if (provider === "claude") {
+        // Every stream-json Claude run re-proves its Gmail connector. A run that needed Gmail
+        // and could not reach it must not hand back an answer composed without the tool.
+        const proven = recordClaudeInit(capabilityFile, result.events, at);
+        if (gmailAccess && proven && !gmailToolAccess(proven, gmailAccess)) {
+          const connectorError = describeClaudeGmail(proven);
+          result = { ...result, error: connectorError };
+          last = result;
+          await this.activity.record(
+            "run.failed",
+            "claude cannot reach Gmail; discarding its answer",
+            { error: connectorError, connector: "gmail" },
+            { runId: result.runId, provider, role: options.role },
+          );
+          if (!next) break;
+          continue;
+        }
       }
       if (result.exitCode === 0 && isAuthFailureResponse(result.response)) {
         // A clean exit with a "you're logged out" body is a FAILURE, not success — the caller
@@ -795,6 +936,12 @@ export class ProviderRunner {
         );
         if (next) {
           await this.recordFailover(provider, next, entry.reason, entry.until, options);
+          if (shouldNotifyLimit(provider)) {
+            void this.notifyFn(
+              `⚠️ ${provider} is out of quota until ${entry.until}. ${next} is taking over.`,
+              "Henry switched provider",
+            ).catch(() => undefined);
+          }
           handoff = { from: provider, to: next, reason: entry.reason, resetAt: entry.until };
           continue;
         }
@@ -803,9 +950,21 @@ export class ProviderRunner {
         // keep the task and resume it instead of discarding it as a failed answer.
         last = {
           ...result,
-          error: this.limitedMessage(ledger.state(at), sequence, { pinned: isPinned, policy, lastError: result.error }),
+          error: `${this.limitedMessage(ledger.state(at), sequence, { pinned: isPinned, policy, lastError: result.error })}${connectorNote ? ` ${connectorNote}` : ""}`,
           limited: true,
         };
+        break;
+      }
+      // A writable run that already produced output may have edited files or called tools.
+      // Re-running the same prompt on the other CLI could apply that work twice, so hand back
+      // the partial result instead. Quota, logout and refused spawns are handled above.
+      if (next && !options.readOnly && result.events.some((event) => event.stream === "stdout")) {
+        await this.activity.record(
+          "run.failed",
+          `${provider} failed mid-run; not re-running a writable task on ${next}`,
+          { error: result.error, partial: true },
+          { runId: result.runId, provider, role: options.role },
+        );
         break;
       }
       await this.activity.record("run.failed", `${provider} failed; considering fallback`, { error: result.error }, { runId: result.runId, provider, role: options.role });

@@ -469,7 +469,17 @@ async function main(): Promise<void> {
       print((await runtime.task(task, option("--cwd"))).response);
     } else if (command === "provider") {
       const target = args[1];
-      if (!target) print({ provider: runtime.config.provider });
+      if (!target) print(runtime.providerStatus());
+      else if (target === "limits") {
+        if (args.includes("--clear")) {
+          const which = args[args.indexOf("--clear") + 1];
+          runtime.clearProviderLimits(which === "codex" || which === "claude" ? which : undefined);
+        }
+        print(runtime.providerStatus());
+      } else if (target === "fallback") {
+        if (args[2] !== "on" && args[2] !== "off") throw new Error("Usage: henry provider fallback on|off");
+        print({ fallback: await runtime.setProviderFallback(args[2] === "on") });
+      } else if (target === "check") print(await runtime.checkProviderCapabilities());
       else print({ provider: await runtime.setProvider(target as "codex" | "claude") });
     } else if (command === "jobs") {
       const sub = args[1] || "list";

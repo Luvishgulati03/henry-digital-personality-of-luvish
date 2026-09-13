@@ -33,10 +33,11 @@ import { StandupPoller } from "./standup/poller.ts";
 import { TelegramPump } from "./telegram/pump.ts";
 import { sharedAgentRegistry } from "./orchestration/agent-registry.ts";
 import { TelegramBridge } from "./telegram/bridge.ts";
-import { limitState } from "./providers/limits.ts";
+import { LIMIT_LEDGER_FILE, ProviderLimitLedger, limitState } from "./providers/limits.ts";
+import { CAPABILITY_FILE, describeClaudeGmail, gmailToolAccess, readCapabilities, recordClaudeInit } from "./providers/capabilities.ts";
 import { DraftRepliesService } from "./gmail-drafts/service.ts";
 import type { ProviderName, RunResult } from "./types.ts";
-import type { RunOptions } from "./providers/runner.ts";
+import { claudeArgs, execute, readFallbackPolicy, type RunOptions } from "./providers/runner.ts";
 import { isLongResearchAsk, type DispatchReportHandle } from "./orchestration/luna.ts";
 import type { ReflexSnapshot } from "./reflex.ts";
 
@@ -338,6 +339,56 @@ export class HenryRuntime {
     return provider;
   }
 
+  /** Provider seat, failover policy, live cooldowns, and whether Claude's Gmail connector is proven. */
+  providerStatus(): Record<string, unknown> {
+    const policy = readFallbackPolicy(this.config.settingsPath);
+    const gmail = readCapabilities(path.join(this.config.dataDir, CAPABILITY_FILE)).claude?.gmail;
+    return {
+      provider: this.config.provider,
+      fallback: policy.fallback,
+      fallbackPinned: policy.fallbackPinned,
+      limits: new ProviderLimitLedger(path.join(this.config.dataDir, LIMIT_LEDGER_FILE)).state(),
+      claudeGmail: gmail
+        ? { status: gmail.status, readTools: gmailToolAccess(gmail, "read")?.allowed ?? [], checkedAt: gmail.checkedAt }
+        : "unchecked — run `henry provider check`",
+    };
+  }
+
+  /** Operator escape hatch after a re-login or quota top-up: drop one or both cooldowns. */
+  clearProviderLimits(provider?: ProviderName): void {
+    new ProviderLimitLedger(path.join(this.config.dataDir, LIMIT_LEDGER_FILE)).clear(provider);
+  }
+
+  /** `providers.fallback` — the Codex⇄Claude failover master switch, persisted read-merge-write. */
+  async setProviderFallback(enabled: boolean): Promise<boolean> {
+    let settings: Record<string, unknown> = {};
+    try { settings = JSON.parse(await fs.readFile(this.config.settingsPath, "utf8")) as Record<string, unknown>; } catch { /* fresh */ }
+    const providers = settings.providers && typeof settings.providers === "object" && !Array.isArray(settings.providers)
+      ? settings.providers as Record<string, unknown>
+      : {};
+    settings.providers = { ...providers, fallback: enabled };
+    await fs.mkdir(path.dirname(this.config.settingsPath), { recursive: true, mode: 0o700 });
+    await fs.writeFile(this.config.settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await this.activity.record("provider.switched", `Provider failover ${enabled ? "enabled" : "disabled"}`, { fallback: enabled });
+    return enabled;
+  }
+
+  /**
+   * Proves what the Claude CLI can reach headlessly: one tiny read-only t0 run whose init event
+   * records the Gmail connector's status and tools in data/provider-capabilities.json. Gmail work
+   * fails over to Claude only after this (or any later Claude run) proves the connector.
+   */
+  async checkProviderCapabilities(): Promise<Record<string, unknown>> {
+    const args = claudeArgs("Reply with the single word ok.", {
+      readOnly: true, tier: "t0", t0Model: this.config.claudeT0Model, streamJson: true,
+    });
+    const result = await execute("claude", args, this.config.rootDir, "claude", { timeoutMs: 120_000 });
+    const gmail = recordClaudeInit(path.join(this.config.dataDir, CAPABILITY_FILE), result.events);
+    if (!gmail) throw new Error(`Claude capability check failed: ${result.error ?? `exit ${String(result.exitCode)}`}`);
+    const ready = Boolean(gmailToolAccess(gmail, "read"));
+    return { ...this.providerStatus(), gmailReady: ready, ...(ready ? {} : { next: describeClaudeGmail(gmail) }) };
+  }
+
   /** Full-access engineering task inside any local repository Luvish points Henry at. */
   async task(instruction: string, cwd?: string): Promise<RunResult> {
     const dir = path.resolve(cwd || this.config.rootDir);
@@ -383,6 +434,7 @@ export class HenryRuntime {
       // Live limit/cooldown state per provider CLI ({} when both are healthy) — the
       // failover layer's ledger (providers/limits.ts), surfaced for :status and the page.
       providers: limitState(),
+      fallback: readFallbackPolicy(this.config.settingsPath).fallback,
     };
   }
 

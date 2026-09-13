@@ -439,8 +439,9 @@ export class MailWatchService {
   }
 
   /**
-   * One ProviderRunner.run call (codex primary — it has the authed gmail MCP), read-only,
-   * no fallback provider. Alerts are deduped against `data/mailwatch.json` and the state file
+   * One ProviderRunner.run call (codex primary — it has the authed gmail MCP), read-only.
+   * The pin is soft: when Codex is out of quota the scan moves to Claude, but only if
+   * Claude's own Gmail connector is proven (see providers/capabilities.ts). Alerts are deduped against `data/mailwatch.json` and the state file
    * is re-read immediately before writing — the reminders-store clobber lesson (two processes
    * writing the same JSON) applies here too.
    */
@@ -479,7 +480,7 @@ export class MailWatchService {
       "If nothing matches, return an empty matches array.",
     ].join(" ");
 
-    const result = await this.runner.run(prompt, { provider: "codex", readOnly: true, role: "mailwatch", outputSchemaPath: MAILWATCH_SCHEMA_PATH });
+    const result = await this.runner.run(prompt, { provider: "codex", pin: "soft", connector: "gmail", readOnly: true, role: "mailwatch", outputSchemaPath: MAILWATCH_SCHEMA_PATH });
     if (result.limited) throw new Error(`Mailwatch check failed closed: provider limited${result.error ? ` (${result.error})` : ""}`);
     if (result.error !== undefined) throw new Error(`Mailwatch check failed closed: provider error (${result.error || "unknown error"})`);
     if (result.exitCode !== 0) throw new Error(`Mailwatch check failed closed: provider exit code ${result.exitCode ?? "null"}`);
@@ -604,7 +605,7 @@ export class MailWatchService {
       "Set alert=false for this historical backfill. If none, return an empty matches array.",
     ].join(" ");
 
-    const result = await this.runner.run(prompt, { provider: "codex", readOnly: true, role: "mailwatch-backfill", outputSchemaPath: MAILWATCH_SCHEMA_PATH });
+    const result = await this.runner.run(prompt, { provider: "codex", pin: "soft", connector: "gmail", readOnly: true, role: "mailwatch-backfill", outputSchemaPath: MAILWATCH_SCHEMA_PATH });
     if (result.limited || result.error !== undefined || result.exitCode !== 0 || !result.response.trim()) {
       throw new Error(`Mailwatch backfill failed closed: ${result.error || `provider exit ${result.exitCode ?? "null"}`}`);
     }

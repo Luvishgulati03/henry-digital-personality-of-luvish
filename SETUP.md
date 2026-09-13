@@ -275,7 +275,17 @@ never disagree.
 > to the *other* one. With only one CLI installed, that fallback attempt
 > fails too and the error you see mentions a provider the user has never
 > heard of. That is expected behaviour, not a broken install — the real
-> failure is always the first one in the log.
+> failure is always the first one in the log. Turn failover off with
+> `henry provider fallback off`.
+
+With both CLIs installed, `henry provider` shows the failover switch, any
+out-of-quota cooldowns, and whether Claude can reach Gmail. Quota, logout,
+and missing-CLI failures hand the same prompt to the other CLI (read-only
+runs stay read-only on Claude). A writable run that fails after it started
+working is handed back instead of re-run. Gmail work fails over to Claude
+only after `henry provider check` proves Claude's Gmail connector works in
+headless runs; approved sends never fail over. `henry provider limits --clear`
+drops a cooldown after a re-login or quota top-up.
 
 ### Step 6 — Put `henry` on PATH
 

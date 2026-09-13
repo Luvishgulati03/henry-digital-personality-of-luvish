@@ -11,6 +11,20 @@ separate Google Cloud project, OAuth credential JSON, token file, or Henry login
 
 Ordinary requests, mailwatch, job-email tracking, and drafts use this connector.
 
+## Claude fallback
+
+When Codex is out of quota, logged out, or missing, inbox reads, mailwatch,
+job-alert sync, and draft replies move to Claude's Gmail connector — but only
+once a headless Claude run has proven it works:
+
+1. Run `claude`, open `/mcp`, and authenticate **claude.ai Gmail**.
+2. Run `henry provider check`. Expect `"gmailReady": true`.
+
+Until then Claude is skipped for Gmail work and the run fails closed with the
+reason. On Claude, read-only mail work gets only the connector's read tools;
+draft replies also get draft tools; send, reply, forward, and label tools are
+always denied. Approved sends never fail over: they run on Codex or not at all.
+
 ## Boundaries
 
 - Inbox reads are schema-bound and must not alter read state, labels, or drafts.

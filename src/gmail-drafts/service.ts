@@ -286,13 +286,14 @@ export class DraftRepliesService {
           `\n--- resume summary ---\n${summary || "n/a"}`,
         ].join("\n");
 
-    // The MCP path is pinned to codex (it's the only provider with the authed MCP tool).
+    // The MCP path prefers codex (its authed Gmail tool) with a soft pin: Claude may take over
+    // only with a proven Gmail connector, draft tools allowed and send tools denied.
     // The injected-mail path deliberately does NOT pin a provider: it carries no MCP
     // dependency either way, so it runs on whatever `config.provider` (and fallback policy)
     // already decide — that's what makes it provider-agnostic rather than Claude-only.
     const result = useInjectedMail
       ? await this.runner.run(prompt, { role: "draft-replies", outputSchemaPath: DRAFT_REPLIES_SCHEMA_PATH })
-      : await this.runner.run(prompt, { provider: "codex", role: "draft-replies", outputSchemaPath: DRAFT_REPLIES_SCHEMA_PATH });
+      : await this.runner.run(prompt, { provider: "codex", pin: "soft", connector: "gmail", role: "draft-replies", outputSchemaPath: DRAFT_REPLIES_SCHEMA_PATH });
     const response = requireProviderResponse(result, "Draft replies");
 
     let drafted: DraftedReplySummary[] = [];

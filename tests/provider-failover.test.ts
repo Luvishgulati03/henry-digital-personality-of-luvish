@@ -28,6 +28,7 @@ import {
   parseResetAt,
   providerAvailable,
 } from "../src/providers/limits.ts";
+import { CAPABILITY_FILE, gmailToolAccess } from "../src/providers/capabilities.ts";
 import type { HenryConfig } from "../src/config.ts";
 import type { ActivityEvent, ProviderName, RunResult } from "../src/types.ts";
 
@@ -483,4 +484,131 @@ test("limitState()/providerAvailable() expose provider health for :status", asyn
   assert.ok(state.claude?.until);
   assert.equal(state.claude?.reason, "usage limit reached");
   assert.equal(state.claude?.kind, "limit");
+});
+
+/* ------------------------------------------------------------------ *
+ * 8. Codex → Claude coverage: notifications, read-only, pins, connectors, partial work
+ * ------------------------------------------------------------------ */
+
+test("quota failover tells the operator once who took over", async () => {
+  const loud = await harness({ provider: "codex", script: { codex: CODEX_LIMIT, claude: OK } });
+  await loud.runner.run("hello");
+  assert.equal(loud.notified.length, 1);
+  assert.match(loud.notified[0] ?? "", /codex is out of quota until .*claude is taking over/);
+});
+
+test("a read-only run fails over to claude under claude's read-only argv", async () => {
+  const ro = await harness({ provider: "codex", script: { codex: CODEX_LIMIT, claude: OK } });
+  const result = await ro.runner.run("review this", { readOnly: true, role: "pr-review" });
+  assert.deepEqual(ro.attempts.map((attempt) => attempt.provider), ["codex", "claude"]);
+  assert.equal(result.provider, "claude");
+  const argv = ro.attempts[1]?.args ?? [];
+  assert.ok(argv.includes("dontAsk"));
+  assert.ok(!argv.includes("--dangerously-skip-permissions"), "a read-only fallback never gains write access");
+});
+
+test("a soft pin hands off on quota; a hard pin never does, even with fallbackPinned", async () => {
+  const soft = await harness({ provider: "codex", script: { codex: CODEX_LIMIT, claude: OK } });
+  const handed = await soft.runner.run("research", { provider: "codex", pin: "soft" });
+  assert.equal(handed.provider, "claude");
+  assert.equal(failoverInfo(handed)?.from, "codex");
+
+  const hard = await harness({
+    provider: "codex",
+    script: { codex: CODEX_LIMIT, claude: OK },
+    settings: { providers: { fallbackPinned: true } },
+  });
+  const held = await hard.runner.run("send it", { provider: "codex", pin: "hard" });
+  assert.deepEqual(hard.attempts.map((attempt) => attempt.provider), ["codex"]);
+  assert.match(held.error ?? "", /out of quota/i);
+});
+
+test("a writable run that failed after producing output is handed back, not re-run", async () => {
+  const started = { timestamp: new Date().toISOString(), stream: "stdout" as const, text: '{"type":"item.started"}' };
+  const partial = await harness({ provider: "codex", script: { codex: { ...ORDINARY_FAILURE, events: [started] }, claude: OK } });
+  const result = await partial.runner.run("edit the repo");
+  assert.deepEqual(partial.attempts.map((attempt) => attempt.provider), ["codex"]);
+  assert.equal(result.provider, "codex");
+  assert.ok(result.error);
+});
+
+const GMAIL_TOOLS = [
+  "mcp__claude_ai_Gmail__search_threads",
+  "mcp__claude_ai_Gmail__get_thread",
+  "mcp__claude_ai_Gmail__create_draft",
+  "mcp__claude_ai_Gmail__send_message",
+];
+
+async function proveClaudeGmail(dataDir: string, status = "connected"): Promise<void> {
+  await fs.writeFile(
+    path.join(dataDir, CAPABILITY_FILE),
+    JSON.stringify({ claude: { gmail: { status, tools: GMAIL_TOOLS, checkedAt: "2026-09-13T00:00:00.000Z" } } }),
+    "utf8",
+  );
+}
+
+const MAILWATCH_RUN = { provider: "codex" as const, pin: "soft" as const, connector: "gmail" as const, readOnly: true, role: "mailwatch" };
+
+test("gmailToolAccess allows only proven, connected tools, and never a send tool", () => {
+  assert.equal(gmailToolAccess(undefined, "read"), undefined);
+  assert.equal(gmailToolAccess({ status: "needs-auth", tools: GMAIL_TOOLS, checkedAt: "x" }, "read"), undefined);
+  assert.equal(
+    gmailToolAccess({ status: "connected", tools: ["mcp__claude_ai_Gmail__send_message"], checkedAt: "x" }, "read"),
+    undefined,
+    "a connector with no read tool is not usable",
+  );
+  const read = gmailToolAccess({ status: "connected", tools: GMAIL_TOOLS, checkedAt: "x" }, "read");
+  assert.deepEqual(read?.allowed, ["mcp__claude_ai_Gmail__search_threads", "mcp__claude_ai_Gmail__get_thread"]);
+  const draft = gmailToolAccess({ status: "connected", tools: GMAIL_TOOLS, checkedAt: "x" }, "draft");
+  assert.deepEqual(draft?.allowed, [...(read?.allowed ?? []), "mcp__claude_ai_Gmail__create_draft"]);
+  assert.deepEqual(draft?.denied, ["mcp__claude_ai_Gmail__send_message"]);
+});
+
+test("gmail runs never fall back to an unproven claude connector", async () => {
+  const mail = await harness({ provider: "codex", script: { codex: CODEX_LIMIT, claude: OK } });
+  const result = await mail.runner.run("scan inbox", MAILWATCH_RUN);
+  assert.deepEqual(mail.attempts.map((attempt) => attempt.provider), ["codex"], "claude without a proven Gmail tool is never asked");
+  assert.match(result.error ?? "", /out of quota/i);
+  assert.match(result.error ?? "", /Claude's Gmail connector has never been checked/);
+});
+
+test("a proven claude gmail connector takes over read-only with exact read tools", async () => {
+  const mail = await harness({ provider: "codex", script: { codex: CODEX_LIMIT, claude: OK } });
+  await proveClaudeGmail(mail.dataDir);
+  const result = await mail.runner.run("scan inbox", MAILWATCH_RUN);
+  assert.equal(result.provider, "claude");
+  const argv = mail.attempts[1]?.args ?? [];
+  const allowed = (argv[argv.indexOf("--allowedTools") + 1] ?? "").split(",");
+  const denied = (argv[argv.indexOf("--disallowedTools") + 1] ?? "").split(",");
+  assert.ok(allowed.includes("mcp__claude_ai_Gmail__search_threads") && allowed.includes("mcp__claude_ai_Gmail__get_thread"));
+  assert.ok(!allowed.some((tool) => /draft|send/.test(tool)), "read-only mail work gets no draft or send tool");
+  assert.ok(denied.includes("mcp__claude_ai_Gmail__send_message") && denied.includes("mcp__claude_ai_Gmail__create_draft"));
+  assert.ok(argv.includes("stream-json"), "the init event is streamed so the connector is re-proven");
+});
+
+test("a drafting gmail run on claude may draft but is denied every send tool", async () => {
+  const mail = await harness({ provider: "codex", script: { codex: CODEX_LIMIT, claude: OK } });
+  await proveClaudeGmail(mail.dataDir);
+  const result = await mail.runner.run("draft replies", { ...MAILWATCH_RUN, readOnly: false, role: "draft-replies" });
+  assert.equal(result.provider, "claude");
+  const argv = mail.attempts[1]?.args ?? [];
+  assert.ok(argv.includes("--dangerously-skip-permissions"));
+  assert.deepEqual((argv[argv.indexOf("--disallowedTools") + 1] ?? "").split(","), ["mcp__claude_ai_Gmail__send_message"]);
+});
+
+test("a claude answer is discarded when its own init event shows gmail lost auth", async () => {
+  const init = {
+    timestamp: new Date().toISOString(), stream: "stdout" as const, text: "{}",
+    parsed: { type: "system", subtype: "init", mcp_servers: [{ name: "claude.ai Gmail", status: "needs-auth" }], tools: [] },
+  };
+  const mail = await harness({
+    provider: "codex",
+    script: { codex: CODEX_LIMIT, claude: { exitCode: 0, response: '{"matches":[]}', events: [init] } },
+  });
+  await proveClaudeGmail(mail.dataDir);
+  const result = await mail.runner.run("scan inbox", MAILWATCH_RUN);
+  assert.equal(result.provider, "claude");
+  assert.match(result.error ?? "", /reported needs-auth/, "an answer composed without the Gmail tool is never returned as data");
+  const cached = JSON.parse(readFileSync(path.join(mail.dataDir, CAPABILITY_FILE), "utf8")) as { claude: { gmail: { status: string } } };
+  assert.equal(cached.claude.gmail.status, "needs-auth", "the lost connector is remembered, so the next run skips claude");
 });

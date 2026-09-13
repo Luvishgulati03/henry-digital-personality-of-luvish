@@ -63,6 +63,8 @@ export interface DispatchOptions {
   timeoutMs?: number;
   /** Optional provider pin and stream sink for surfaced dispatch-and-report work. */
   provider?: ProviderName;
+  /** "soft" lets the pinned provider hand off to the other CLI when it is out of quota. */
+  pin?: "hard" | "soft";
   onEvent?: (event: ProviderEvent) => void;
 }
 
@@ -111,6 +113,7 @@ export class LunaOrchestrator {
         surface: `luna::${selected}`,
         readOnly: !options.allowEdits,
         ...(options.provider ? { provider: options.provider } : {}),
+        ...(options.pin ? { pin: options.pin } : {}),
         ...(options.onEvent ? { onEvent: options.onEvent } : {}),
         ...(tier ? { tier } : {}),
         ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
@@ -136,13 +139,16 @@ export class LunaOrchestrator {
   /**
    * Starts long research on the next microtask so the caller can render/send
    * the acknowledgement before any provider event arrives. Pinning Codex+t1
-   * resolves to the configured gpt-5.6-sol model with low reasoning effort.
+   * resolves to the configured gpt-5.6-sol model with low reasoning effort. The pin
+   * is a model preference, not a billing decision, so it is soft: an out-of-quota
+   * Codex hands the research to Claude instead of failing the report.
    */
-  dispatchAndReport(task: string, options: Omit<DispatchOptions, "tier" | "provider" | "allowEdits"> = {}): DispatchReportHandle {
+  dispatchAndReport(task: string, options: Omit<DispatchOptions, "tier" | "provider" | "pin" | "allowEdits"> = {}): DispatchReportHandle {
     const completion = Promise.resolve().then(() => this.dispatch("research", task, {
       ...options,
       allowEdits: false,
       provider: "codex",
+      pin: "soft",
       tier: "t1",
     }));
     return { acknowledgement: DISPATCH_ACKNOWLEDGEMENT, completion };

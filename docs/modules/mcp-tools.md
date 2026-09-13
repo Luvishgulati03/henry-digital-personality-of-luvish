@@ -82,15 +82,14 @@ Two amplifying facts from the actual code:
   Claude) — that's deliberate, so Henry's own free-form turns don't stall on
   a human prompt, but it means an outbound-capable MCP tool fires
   immediately, with no confirmation step at all.
-- For Claude specifically, `claudeArgs()` in `src/providers/runner.ts` does
-  **not** vary its flags when Henry calls it with `readOnly: true` — that
-  option only affects Henry's own fallback-sequence logic
-  (`ProviderRunner.run()`), it is not passed to the `claude` binary as a
-  sandbox restriction. (Codex's `readOnly` does map to a real
-  `--sandbox read-only`.) So a write-capable MCP tool connected to Claude is
-  write-capable on every Henry call that reaches it, including ones Henry
-  labels read-only internally (e.g. `jobs prepare`, `cover generate`,
-  `screenshots classify`).
+- Read-only calls are restricted on both CLIs. Codex's `readOnly` maps to
+  `--sandbox read-only`; Claude's maps to `--permission-mode dontAsk` with a
+  read-tool allowlist (`Read,Grep,Glob,WebSearch,WebFetch`) and the write
+  tools denied, so an MCP tool is unavailable there unless Henry adds it by
+  name (only the Gmail read tools, via `src/providers/capabilities.ts`).
+  **Writable** Claude calls still run with `--dangerously-skip-permissions`,
+  so a write-capable MCP tool connected to Claude is live on every writable
+  Henry call that reaches it.
 
 **Rule of thumb**: connect read-only MCP tools freely (calendar lookup, web
 search, read-only DB queries). For anything that sends, posts, writes, or
