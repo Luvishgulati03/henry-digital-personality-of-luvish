@@ -37,7 +37,25 @@ STEP 1 — Clone and install
   2. Run `npm install` in the repo root.
   3. Copy `.env.example` to `.env` (do not edit yet — later steps will).
 
-STEP 2 — Interview the user
+STEP 2 — Discover the use case before choosing modules
+  1. Ask the user to describe the problem this agent should solve in their own
+     words. Do not infer the use case from the repository name or pre-enable
+     every available feature.
+  2. Ask short follow-ups about users and roles, the current manual workflow,
+     recurring pain, source-of-truth data, expected outputs, success measures,
+     required surfaces, privacy constraints, and actions requiring approval.
+  3. Research the problem before proposing a build. Inspect local source material
+     first. For current, specialised, regulated, or integration-dependent claims,
+     use available web research and connectors, prefer primary sources, cite the
+     evidence, and state uncertainty.
+  4. Present a use-case blueprint: current workflow, recommended end-to-end
+     workflow, data and RAG boundaries, verifiable deterministic services,
+     model responsibilities, connectors, approval gates, minimum useful release,
+     deferred work, tests, and success measures.
+  5. Explain why each recommended capability is needed. Ask the user to correct
+     and approve this workflow before writing code or configuration.
+
+STEP 3 — Interview the user and select modules
   Ask these questions, one at a time, in plain conversation (not a form):
   1. What should the agent be called, and what should it call you?
   2. Which capabilities do you want enabled? Show the module list below
@@ -79,7 +97,7 @@ STEP 2 — Interview the user
     (X/Twitter DMs and posts in the user's style). Tell the user these
     exist on the roadmap but should not be relied on yet.
 
-STEP 3 — Generate the persona files
+STEP 4 — Generate the persona files
   1. Read `docs/design-your-soul.md` for the principles.
   2. Copy `soul.example.md` to `soul.md`. Fill in every bracketed
      placeholder from the interview answers. Keep the hard outbound
@@ -94,7 +112,7 @@ STEP 3 — Generate the persona files
   4. Confirm both files stay under roughly 2k tokens combined per
      `docs/design-your-soul.md` — trim before adding.
 
-STEP 4 — Configure providers and modules
+STEP 5 — Configure providers and modules
   1. Set the chosen default provider in `.env`. Agent and operator names
      belong in the private `soul.md` and `personality.md`; this framework
      does not implement agent-name environment variables. If the user wants
@@ -105,24 +123,24 @@ STEP 4 — Configure providers and modules
      relevant `.env.example` keys) rather than deleting its code — this
      keeps the fork mergeable with upstream.
   3. For every module they DID select, fill in the config paths/
-     credentials they gave you in Step 2, or leave the safe defaults and
+     credentials they gave you in Step 3, or leave the safe defaults and
      note what's still needed before that module will actually run.
 
-STEP 5 — Verify
+STEP 6 — Verify
   1. Run the typecheck command and the test command from `package.json`.
      Fix any failure before continuing; do not proceed on a red build.
   2. Report a short summary: agent name, enabled modules, provider,
      anything still needed from the user (credentials, resume file,
      etc.).
 
-STEP 6 — First run
+STEP 7 — First run
   1. Start the REPL (the `dev` or equivalent script in `package.json`)
      and have the user say hello — confirm the persona in soul.md/
      personality.md is reflected in the reply.
   2. Start the dashboard (the `dashboard` script) and confirm it serves
      on loopback only, then tell the user the local URL.
 
-STEP 7 — Telegram (optional but recommended: chat + alerts on their phone)
+STEP 8 — Telegram (optional but recommended: chat + alerts on their phone)
   1. Ask if the user wants Telegram. If yes, follow docs/modules/telegram.md
      exactly: have them message @BotFather, send /newbot, pick a name, and
      paste the HTTP API token back to you.
@@ -135,7 +153,7 @@ STEP 7 — Telegram (optional but recommended: chat + alerts on their phone)
   5. If they run a team, mention that `standup discover` can wire a team
      group later (docs/standup-module-design.md).
 
-Stop after Step 7 and hand control back to the user.
+Stop after Step 8 and hand control back to the user.
 ```
 
 ---

@@ -39,6 +39,25 @@ Three standing rules for the whole runbook:
    in a browser, from your user's own terminal. Hand them the exact
    command and wait.
 
+### Discovery gate — What problem is this agent solving?
+
+Before selecting modules or changing code, **ASK the user for the problem
+statement in their own words**. Establish the users and roles, current workflow,
+repeated manual work, source-of-truth data, expected output, success measures,
+required surfaces, privacy constraints, and which actions require approval.
+
+Research the use case before recommending a workflow. Inspect local material
+first; use available web research and connected tools for current, specialised,
+regulated, or integration-dependent facts. Prefer primary sources, cite material
+claims, and state uncertainty.
+
+Present a short use-case blueprint covering the current and proposed workflows,
+data and RAG boundaries, deterministic services, model responsibilities,
+connectors, approval gates, minimum useful release, deferred capabilities, tests,
+and success measures. Explain why every recommended module is needed and ask the
+user to correct the blueprint before implementation. Do not install every module
+merely because the framework contains it.
+
 ### Step 0 — Where is the repo?
 
 ```bash
