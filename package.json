@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "license": "MIT",
   "private": true,
-  "description": "Henry — a terminal-first personal engineering agent orchestrated by Luna.",
+  "description": "A local-first personal AI agent framework with memory, tools, workflows, and approval-gated actions.",
   "type": "module",
   "bin": {
     "henry": "./bin/henry.mjs"
