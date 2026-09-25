@@ -2,7 +2,9 @@ import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import { readSettings } from "../util/settings.ts";
 import { reflexKind, renderReflex, type ReflexKind, type ReflexSnapshot } from "../reflex.ts";
-import type { ConsumeOutcome, PumpConsumer, PumpMetaStore, TelegramUpdate } from "./pump.ts";
+import { speakableSummary } from "../voice/speakable.ts";
+import { finalizeSpoken } from "../voice/policy.ts";
+import type { ConsumeOutcome, PumpConsumer, PumpMetaStore, TelegramAudioMeta, TelegramUpdate } from "./pump.ts";
 
 export { reflexKind, renderReflex, type ReflexKind, type ReflexSnapshot } from "../reflex.ts";
 
@@ -24,10 +26,19 @@ export { reflexKind, renderReflex, type ReflexKind, type ReflexSnapshot } from "
  * 4. KILL SWITCH. `telegram.bridge.enabled: false` in data/settings.json switches the
  *    bridge off instantly — read fresh per poll, never cached. Default ON when
  *    HENRY_TELEGRAM_BOT_TOKEN + HENRY_TELEGRAM_CHAT_ID are both present.
+ * 5. VOICE ACTS DIRECTLY, BUT AS A VOICE TURN. A voice note is transcribed, echoed back so
+ *    Luvish can see what Henry heard, and then run straight away — no typed "yes" gate.
+ *    "Direct" only means no confirmation step; it does NOT mean unrestricted. Every voice
+ *    turn still carries the same context a spoken dashboard turn gets (`voice: { privateMode,
+ *    allowWrites }`, src/voice/policy.ts readVoicePolicy): read-only and HENRY_VOICE_TURN
+ *    unless the owner has explicitly turned `voice.allowWrites` on, so approvals and sends
+ *    still refuse under it (src/guardrails.ts). A typed Telegram message is never a voice
+ *    turn and keeps today's behaviour exactly.
  *
  * Doctrine rule 7: this file imports no module. The sender (`notify/telegram.ts`, already
- * pinned to Luvish's DM) and the brain entry (`HenryAgent.run`) are injected by runtime.ts,
- * so the bridge adds ZERO new outbound surfaces and ZERO new brains.
+ * pinned to Luvish's DM), the brain entry (`HenryAgent.run`), and voice intake/transcript
+ * storage are injected by runtime.ts, so the bridge adds ZERO new outbound surfaces and
+ * ZERO new brains — it only decides WHO may be heard and WHEN the words may run.
  */
 
 /** Telegram hard-caps message bodies at this length (same constant as notify/telegram.ts — kept local, doctrine rule 7). */
@@ -115,6 +126,18 @@ export function chunkTelegramText(text: string, max = TELEGRAM_MAX_CHARS): strin
 }
 
 /**
+ * One short, chat-safe sentence from an unknown intake error: URL-shaped text is removed so
+ * a bot token can never ride out inside a reply, and the result is length-capped. Voice
+ * intake (src/telegram/voice.ts) already strips URLs from its own messages; this is the net
+ * for any error object, including one from a future adapter that has not been as careful.
+ */
+function safeSentence(error: unknown): string {
+  const raw = error instanceof Error && error.message ? error.message : "I could not read that voice note.";
+  const cleaned = raw.replace(/https?:\/\/\S+/gi, "[url]").replace(/\s+/g, " ").trim();
+  return cleaned.slice(0, 200) || "I could not read that voice note.";
+}
+
+/**
  * Kill switch. Absent settings mean ON — the bridge is the default behaviour once the two
  * env vars exist; only an explicit `false` turns it off, and OFF wins instantly.
  */
@@ -128,6 +151,12 @@ export function bridgeEnabled(settingsPath: string): boolean {
 
 export interface BridgeStats {
   replies: number;
+  /** Voice notes seen, transcribed, refused (not configured / intake failure), and answered. */
+  voiceReceived: number;
+  voiceTranscribed: number;
+  voiceRejected: number;
+  /** Answers that were also sent back as a voice note. */
+  voiceSpoken: number;
   /** Answered from local state with no provider call — see the reflex lane below. */
   reflex: number;
   /** Turns picked back up after a quota wall. */
@@ -142,14 +171,47 @@ export interface BridgeStats {
   thinking: boolean;
 }
 
+/** privateMode/allowWrites for the voice turn about to run — read fresh, per turn. */
+export interface BridgeVoicePolicy { privateMode: boolean; allowWrites: boolean }
+
+/**
+ * Owner voice notes, injected. The bridge never fetches, downloads, converts, or transcribes
+ * anything itself (doctrine rule 7); it only decides WHO may be heard and WHEN the words may
+ * run — see rail 5 above. Recording/updating the transcript history is the injected
+ * implementation's job (runtime.ts wires it to VoiceTranscriptStore, src/voice/transcripts.ts),
+ * so private mode's "record nothing" is enforced there, not here.
+ */
+export interface BridgeVoice {
+  /** False when local transcription is not configured; voice notes are then declined politely. */
+  readonly enabled: boolean;
+  transcribe(meta: TelegramAudioMeta): Promise<{ text: string; language?: string; bytes: number; durationSeconds?: number; id?: string }>;
+  /** Read fresh per turn: the owner can flip private mode / allow-writes between messages. */
+  policy(): BridgeVoicePolicy;
+  /** Best-effort: what became of a transcript, so the owner's history stays truthful. */
+  settle?: (id: string | undefined, state: "answered" | "failed", reply?: string) => void;
+  /**
+   * Optional spoken reply, used ONLY for a turn the owner spoke and NEVER in private mode
+   * (the bridge itself skips calling this under private mode — see handleVoice). Best effort:
+   * it resolves false rather than throwing, because the text answer has already been delivered.
+   */
+  speak?: (text: string) => Promise<boolean>;
+}
+
 /**
  * Everything the reflex lane can answer WITHOUT a provider call. Supplied by the runtime,
  * because the bridge owns no stores (doctrine rule 7) — and kept deliberately small: this
  * is the set of questions whose answer is already sitting in local state.
  */
 export interface BridgeDeps {
-  /** The ONE brain entry — runtime.ts wires this to HenryAgent.run (readOnly, telegram surface). */
-  think: (prompt: string, report: (text: string) => Promise<boolean>) => Promise<string>;
+  /**
+   * The ONE brain entry — runtime.ts wires this to HenryAgent.run (readOnly, telegram
+   * surface). `context.voice` marks a VOICE TURN: runtime.ts then rides the same
+   * `voice: { privateMode, allowWrites }` context the dashboard passes to agent.run, which
+   * forces the read-only sandbox and HENRY_VOICE_TURN unless allowWrites is explicitly on.
+   */
+  think: (prompt: string, report: (text: string) => Promise<boolean>, context?: { voice?: boolean }) => Promise<string>;
+  /** Optional: absent means voice notes are refused with one plain sentence. */
+  voice?: BridgeVoice;
   /** The existing DM sender, already pinned to Luvish's chat id. Injected: the bridge owns no send surface. */
   send: (config: HenryConfig, text: string) => Promise<boolean>;
   /**
@@ -174,14 +236,23 @@ export interface BridgeDeps {
  * pattern here must be one whose answer is entirely local and unambiguous. Anything with a
  * hint of interpretation belongs to the brain.
  */
-interface Pending { updateId: number; text: string }
+/**
+ * One queued turn. Text and voice share the SINGLE sequential queue on purpose: transcription
+ * and a brain call both want the whole machine, so "one in flight" has to cover both.
+ */
+type Pending =
+  | { kind?: "text"; updateId: number; text: string }
+  | { kind: "voice"; updateId: number; meta: TelegramAudioMeta };
 
 export class TelegramBridge implements PumpConsumer {
   readonly name = "bridge";
   private readonly queue: Pending[] = [];
   private draining?: Promise<void>;
   private droppedSinceLastReply = 0;
-  private counters = { replies: 0, deferred: 0, dropped: 0, stale: 0, failed: 0, reflex: 0, resumed: 0, deferredByLimit: 0 };
+  private counters = {
+    replies: 0, deferred: 0, dropped: 0, stale: 0, failed: 0, reflex: 0, resumed: 0, deferredByLimit: 0,
+    voiceReceived: 0, voiceTranscribed: 0, voiceRejected: 0, voiceSpoken: 0,
+  };
   /** Reflex answers run outside the sequential queue; `settled()` still has to wait for them. */
   private readonly reflexInFlight = new Set<Promise<void>>();
   private thinking = false;
@@ -236,9 +307,23 @@ export class TelegramBridge implements PumpConsumer {
       // Everything below is already known to be Luvish's own chat.
       maxSeen = Math.max(maxSeen, update.update_id);
       if (Number.isFinite(lastHandled) && update.update_id <= lastHandled) continue; // replayed batch
-      if (!message?.text || message.from?.is_bot) continue; // stickers, photos, our own echoes
+      if (!message || message.from?.is_bot) continue; // our own echoes
+      // Media is read from a NEW message only. An edit (a caption change, typically) arrives
+      // with a fresh update id, so honouring it would re-download and re-transcribe audio the
+      // owner already heard back.
+      const media = update.message ? (message.voice ?? message.audio) : undefined;
+      if (!message.text && !media) continue; // stickers, photos, anything with no words in it
       if (now - message.date * 1000 > BRIDGE_STALE_MS) { this.counters.stale += 1; continue; }
-      const text = message.text.trim();
+
+      if (!message.text && media) {
+        // A voice note joins the SAME sequential queue as text: transcription and a brain
+        // call both want the whole machine, so "one in flight" has to cover both.
+        this.resumeDeferred();
+        this.enqueue({ kind: "voice", updateId: update.update_id, meta: media });
+        continue;
+      }
+
+      const text = (message.text ?? "").trim();
       if (!text) continue;
       // REFLEX FIRST, and deliberately outside the queue: a question about local state
       // must not wait behind a brain call that may run for a minute. This is what keeps
@@ -290,9 +375,12 @@ export class TelegramBridge implements PumpConsumer {
     if (!raw) return;
     this.store.deleteMeta(DEFERRED_KEY);
     try {
-      const parsed = JSON.parse(raw) as Pending;
-      if (parsed && typeof parsed.text === "string" && parsed.text.trim()) {
-        this.queue.unshift(parsed);
+      // Only a TEXT turn is resumable: a Telegram file id may have expired by the time
+      // quota returns, and a voice note is always deferred as its already-transcribed words
+      // (see handleVoice), never as its raw metadata — so a "voice" row here is unreadable.
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (parsed && parsed.kind !== "voice" && typeof parsed.text === "string" && parsed.text.trim() && typeof parsed.updateId === "number") {
+        this.queue.unshift(parsed as Pending);
         this.counters.resumed += 1;
       }
     } catch { /* an unreadable row is dropped rather than poisoning every future poll */ }
@@ -352,6 +440,7 @@ export class TelegramBridge implements PumpConsumer {
   }
 
   private async handle(item: Pending, note: string): Promise<void> {
+    if (item.kind === "voice") return await this.handleVoice(item, note);
     const deferral = this.operatorMode ? operatorTerminalOnlyReason(item.text) : terminalOnlyReason(item.text);
     if (deferral) {
       this.counters.deferred += 1;
@@ -360,7 +449,7 @@ export class TelegramBridge implements PumpConsumer {
       return;
     }
 
-    const stopTyping = this.startTyping();
+    const stopTyping = this.startAction("typing");
     this.thinking = true;
     let answer = "";
     try {
@@ -392,6 +481,110 @@ export class TelegramBridge implements PumpConsumer {
     });
   }
 
+  /**
+   * THE VOICE TURN. Transcribes, echoes the words back so Luvish can see what Henry heard,
+   * then runs them straight away — no typed "yes" gate (owner decision, see rail 5 above).
+   * "Direct" is bounded by the voice context, not by a confirmation step: `deps.think` is
+   * called with `{ voice: true }`, which rides the same read-only + HENRY_VOICE_TURN rail a
+   * spoken dashboard turn gets, so nothing the transcript says can approve or send anything.
+   * Failures at every stage answer with one plain line and never throw out of this method.
+   */
+  private async handleVoice(item: { kind: "voice"; updateId: number; meta: TelegramAudioMeta }, note: string): Promise<void> {
+    this.counters.voiceReceived += 1;
+    const voice = this.deps.voice;
+    if (!voice?.enabled) {
+      this.counters.voiceRejected += 1;
+      await this.reply(`${note}I cannot transcribe voice notes on this machine yet. Local speech recognition is not configured, so send that one as text.`);
+      await this.activity.record("workflow.completed", "Telegram bridge declined a voice note (transcription not configured)", { telegram: true, voice: true });
+      return;
+    }
+
+    const stopListening = this.startAction("record_voice");
+    this.thinking = true;
+    const started = this.deps.now?.() ?? Date.now();
+    let result: Awaited<ReturnType<BridgeVoice["transcribe"]>>;
+    try {
+      result = await voice.transcribe(item.meta);
+    } catch (error) {
+      this.counters.voiceRejected += 1;
+      const code = typeof error === "object" && error !== null ? String((error as { code?: unknown }).code ?? "") : "";
+      await this.reply(`${note}${safeSentence(error)}`);
+      // The transcript, the file id, the token and the download URL are all absent on purpose.
+      await this.activity.record("voice.failed", "Telegram voice note could not be transcribed", { telegram: true, voice: true, code: code || undefined }).catch(() => undefined);
+      return;
+    } finally {
+      this.thinking = false;
+      stopListening();
+    }
+    this.counters.voiceTranscribed += 1;
+    const sttMs = (this.deps.now?.() ?? Date.now()) - started;
+    await this.reply(`${note}You said: "${result.text}"`);
+    // Length, timing and metadata only: the words themselves stay out of the activity log.
+    await this.activity.record("voice.transcribed", "Telegram bridge transcribed a voice note", {
+      telegram: true, voice: true, chars: result.text.length, bytes: result.bytes, sttMs,
+      ...(result.durationSeconds !== undefined ? { durationSeconds: result.durationSeconds } : {}),
+      ...(result.language ? { language: result.language } : {}),
+    }).catch(() => undefined);
+
+    const policy = voice.policy();
+    const stopTyping = this.startAction("typing");
+    this.thinking = true;
+    let answer = "";
+    try {
+      answer = (await this.deps.think(result.text, (text) => this.reply(text), { voice: true })).trim();
+    } catch (error) {
+      // Out of quota is not a failed answer. The transcript is already known — requeue the
+      // WORDS (not the Telegram file id, which may have expired by the time quota returns)
+      // through the same deferred-turn mechanism a text message uses.
+      if (error && typeof error === "object" && (error as { deferrable?: boolean }).deferrable === true) {
+        this.thinking = false;
+        stopTyping();
+        await this.deferTurn({ kind: "text", updateId: item.updateId, text: result.text }, String((error as Error).message ?? "provider limit"));
+        return;
+      }
+      this.counters.failed += 1;
+      voice.settle?.(result.id, "failed");
+      await this.activity.record("run.failed", "Telegram bridge voice turn failed", { telegram: true, voice: true, error: String(error) }).catch(() => undefined);
+    } finally {
+      this.thinking = false;
+      stopTyping();
+    }
+    if (!answer) answer = "I hit an error thinking about that one — say it again.";
+    const sent = await this.reply(answer);
+    if (sent) this.counters.replies += 1; else this.counters.failed += 1;
+    voice.settle?.(result.id, sent ? "answered" : "failed", sent ? answer : undefined);
+    await this.activity.record(sent ? "run.completed" : "run.failed", `Telegram bridge ${sent ? "answered" : "failed to answer"} a voice note`, {
+      telegram: true, voice: true, chars: answer.length,
+    }).catch(() => undefined);
+
+    // Spoken reply: best-effort, never fails the turn, and NEVER attempted in private mode.
+    // Private mode could speak the neutral finalizeSpoken() line instead, but people nearby
+    // may hear the speaker at all — choosing NO voice (not even a neutral one) is the more
+    // conservative reading of "private", and the transcript itself is already never recorded
+    // under private mode (see VoiceTranscriptStore.record()), so there is nothing extra to say.
+    if (sent && !policy.privateMode && voice.speak) this.speakAnswer(answer, policy);
+  }
+
+  /**
+   * Sends the answer back as a voice note, tracked like a reflex answer so `settled()` waits
+   * for it. The spoken text is built the same way a spoken dashboard turn builds it —
+   * `speakableSummary` (the ```spoken fence, or a short fallback) through `finalizeSpoken`
+   * (the ONLY sanctioned text-to-speech path; see src/voice/policy.ts), never the raw answer.
+   * A false result is normal (answer too long, synthesis off, encoder missing) and is never
+   * reported as a failure: the owner already has the text.
+   */
+  private speakAnswer(answer: string, policy: BridgeVoicePolicy): void {
+    const speak = this.deps.voice?.speak;
+    if (!speak) return;
+    const spoken = finalizeSpoken(speakableSummary({ reply: answer }), policy);
+    if (!spoken) return;
+    const pending = speak(spoken)
+      .then((ok) => { if (ok) this.counters.voiceSpoken += 1; })
+      .catch(() => undefined)
+      .finally(() => { this.reflexInFlight.delete(pending); });
+    this.reflexInFlight.add(pending);
+  }
+
   /** Chunked to Telegram's hard cap and sent in order; the first failure stops the rest. */
   private async reply(text: string): Promise<boolean> {
     const chunks = chunkTelegramText(text);
@@ -404,10 +597,11 @@ export class TelegramBridge implements PumpConsumer {
   }
 
   /**
-   * "Henry is typing…" while the brain runs. Best-effort and fire-and-forget: a failed
-   * chat action must never affect the reply. Pinned to Luvish's own chat like everything here.
+   * A Telegram chat action ("typing", "record_voice", …) pulsed while the bridge works.
+   * Best-effort and fire-and-forget: a failed chat action must never affect the reply.
+   * Pinned to Luvish's own chat like everything here.
    */
-  private startTyping(): () => void {
+  private startAction(action: string): () => void {
     const fetchImpl = this.deps.fetchImpl ?? fetch;
     if (!this.config.telegramBotToken || !this.config.telegramChatId) return () => undefined;
     const ping = () => {
@@ -415,7 +609,7 @@ export class TelegramBridge implements PumpConsumer {
         .then(() => fetchImpl(`https://api.telegram.org/bot${this.config.telegramBotToken}/sendChatAction`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: this.config.telegramChatId, action: "typing" }),
+          body: JSON.stringify({ chat_id: this.config.telegramChatId, action }),
         }))
         .catch(() => undefined);
     };

@@ -32,7 +32,13 @@ import { StandupService } from "./standup/service.ts";
 import { StandupPoller } from "./standup/poller.ts";
 import { TelegramPump } from "./telegram/pump.ts";
 import { sharedAgentRegistry } from "./orchestration/agent-registry.ts";
-import { TelegramBridge } from "./telegram/bridge.ts";
+import { TelegramBridge, type BridgeVoice } from "./telegram/bridge.ts";
+import {
+  TelegramVoiceIntake, ffmpegAudioConverter, httpTelegramFileFetcher, sendTelegramVoiceNote, telegramVoiceReplier,
+} from "./telegram/voice.ts";
+import { LocalVoiceService, voiceConfigFromEnv } from "./voice/index.ts";
+import { VoiceTranscriptStore } from "./voice/transcripts.ts";
+import { readVoicePolicy } from "./voice/policy.ts";
 import { LIMIT_LEDGER_FILE, ProviderLimitLedger, limitState } from "./providers/limits.ts";
 import { CAPABILITY_FILE, describeClaudeGmail, gmailToolAccess, readCapabilities, recordClaudeInit } from "./providers/capabilities.ts";
 import { DraftRepliesService } from "./gmail-drafts/service.ts";
@@ -75,6 +81,9 @@ export class HenryRuntime {
   private _telegramBridge?: TelegramBridge;
   private _telegramPump?: TelegramPump;
   private _jobScout?: JobScoutService;
+  private _voiceTranscripts?: VoiceTranscriptStore;
+  /** `null` after a failed/declined build, distinct from "not yet attempted" (`undefined`). */
+  private _telegramVoice?: TelegramVoiceIntake | null;
 
   /**
    * Composed operator-notification channel: console + osascript (via `notifyReminder`) then
@@ -166,11 +175,18 @@ export class HenryRuntime {
   get telegramBridge(): TelegramBridge {
     if (!this._telegramBridge) {
       this._telegramBridge = new TelegramBridge(this.config, this.activity, this.standupStore, {
-        think: (prompt, reportToTelegram) => {
+        think: (prompt, reportToTelegram, context) => {
+          // VOICE TURN: the same `voice: { privateMode, allowWrites }` context the dashboard
+          // passes to agent.run (src/voice/policy.ts readVoicePolicy). allowWrites is false by
+          // default, so agent.run forces readOnly regardless of telegramOperatorMode, and every
+          // provider child carries HENRY_VOICE_TURN — approvals and sends refuse under it
+          // (src/guardrails.ts). A typed message never sets this.
+          const voicePolicy = context?.voice ? readVoicePolicy(this.config.settingsPath) : undefined;
           const turn = this.startInteractiveTurn(prompt, {
             surface: "telegram",
             readOnly: !this.config.telegramOperatorMode,
-            role: this.config.telegramOperatorMode ? "telegram-operator" : "telegram-bridge",
+            role: voicePolicy ? "telegram-voice" : (this.config.telegramOperatorMode ? "telegram-operator" : "telegram-bridge"),
+            ...(voicePolicy ? { voice: { privateMode: voicePolicy.privateMode, allowWrites: voicePolicy.allowWrites } } : {}),
           });
           if (!turn.delegated) {
             return turn.completion.then((result) => {
@@ -200,6 +216,9 @@ export class HenryRuntime {
           return Promise.resolve(turn.acknowledgement);
         },
         send: (config, text) => sendTelegram(config, text),
+        // Owner voice notes. Absent when local speech recognition or ffmpeg is not
+        // configured, in which case the bridge declines them in one plain sentence.
+        ...(this.telegramVoiceIntake ? { voice: this.telegramVoiceWithReplies(this.telegramVoiceIntake) } : {}),
         // Local state for the reflex lane, so "what are you working on?" is answered from
         // the dispatch registry and the approval queue instead of costing a provider run
         // and waiting behind whatever turn is already in flight.
@@ -207,6 +226,118 @@ export class HenryRuntime {
       });
     }
     return this._telegramBridge;
+  }
+
+  /**
+   * What Henry heard, kept on the owner's terms (see voice/transcripts.ts). Lazy: the
+   * database is opened the first time a surface transcribes or the dashboard asks.
+   */
+  get voiceTranscripts(): VoiceTranscriptStore {
+    this._voiceTranscripts ||= new VoiceTranscriptStore(this.config.dataDir, this.config.settingsPath);
+    return this._voiceTranscripts;
+  }
+
+  /**
+   * Owner voice-note intake, or undefined when it cannot work.
+   *
+   * Everything is explicit and local: whisper.cpp through the existing voice adapter, an
+   * operator-named `ffmpeg` for the OGG/Opus Telegram sends, and Telegram's own file API.
+   * Nothing is downloaded or installed here, and a missing piece disables the surface rather
+   * than half-enabling it.
+   *
+   *   HENRY_TELEGRAM_VOICE=0                turn the surface off even when STT is configured
+   *                                         (default ON once STT + HENRY_FFMPEG_PATH are set)
+   *   HENRY_FFMPEG_PATH                     required converter (default: ffmpeg on PATH, else
+   *                                         /opt/homebrew/bin/ffmpeg)
+   *   HENRY_TELEGRAM_VOICE_MAX_BYTES        default 20 MB
+   *   HENRY_TELEGRAM_VOICE_MAX_SECONDS      default 300
+   *   HENRY_TELEGRAM_VOICE_REPLIES=0        spoken replies, default ON once TTS is configured
+   */
+  private get telegramVoiceIntake(): TelegramVoiceIntake | undefined {
+    if (this._telegramVoice === undefined) {
+      this._telegramVoice = this.buildTelegramVoiceIntake() ?? null;
+    }
+    return this._telegramVoice ?? undefined;
+  }
+
+  private buildTelegramVoiceIntake(): TelegramVoiceIntake | undefined {
+    const env = process.env;
+    if (env.HENRY_TELEGRAM_VOICE === "0" || env.HENRY_TELEGRAM_VOICE === "false") return undefined;
+    const token = this.config.telegramBotToken;
+    if (!token) return undefined;
+    const ffmpegPath = env.HENRY_FFMPEG_PATH?.trim() || "/opt/homebrew/bin/ffmpeg";
+    const transcriber = new LocalVoiceService(voiceConfigFromEnv(env));
+    if (!transcriber.sttEnabled()) return undefined;
+    const positive = (value: string | undefined): number | undefined => {
+      const parsed = Number(value);
+      return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+    };
+    return new TelegramVoiceIntake({
+      fetcher: httpTelegramFileFetcher(token),
+      converter: ffmpegAudioConverter({ executablePath: ffmpegPath }),
+      transcriber,
+      limits: {
+        maxBytes: positive(env.HENRY_TELEGRAM_VOICE_MAX_BYTES),
+        maxSeconds: positive(env.HENRY_TELEGRAM_VOICE_MAX_SECONDS),
+        prompt: "Henry, Luvish, Luna, Telegram, repo, approve, dashboard, standup",
+      },
+    });
+  }
+
+  /**
+   * The intake, plus a spoken reply when TTS is configured (opt out with
+   * HENRY_TELEGRAM_VOICE_REPLIES=0). Text is always sent first, so every failure here is
+   * silent and the owner still has the answer. Local synthesis costs roughly real time, so
+   * only short answers are spoken (see VOICE_REPLY_MAX_CHARS).
+   */
+  private telegramVoiceWithReplies(intake: TelegramVoiceIntake): BridgeVoice {
+    const base: BridgeVoice = {
+      // `enabled` stays a getter so the intake remains the single source of truth at call time.
+      get enabled() { return intake.enabled; },
+      transcribe: async (meta) => {
+        const started = Date.now();
+        try {
+          const result = await intake.transcribe(meta);
+          const transcript = result.text.trim();
+          const row = this.voiceTranscripts.record({
+            surface: "telegram", text: transcript, language: result.language,
+            durationSeconds: result.durationSeconds, bytes: result.bytes, sttMs: Date.now() - started,
+          });
+          return { ...result, text: transcript, id: row.id };
+        } catch (error) {
+          // A failure keeps no words, only the fact and the reason, so the owner can see it.
+          this.voiceTranscripts.record({
+            surface: "telegram", text: "", state: "failed", sttMs: Date.now() - started,
+            durationSeconds: meta.duration, bytes: meta.file_size,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+      },
+      policy: () => {
+        const policy = readVoicePolicy(this.config.settingsPath);
+        return { privateMode: policy.privateMode, allowWrites: policy.allowWrites };
+      },
+      settle: (id, state, reply) => {
+        if (!id) return;
+        try { this.voiceTranscripts.update(id, { state, ...(reply !== undefined ? { reply } : {}) }); } catch { /* display data; never fail a turn over it */ }
+      },
+    };
+    const env = process.env;
+    const token = this.config.telegramBotToken;
+    const chatId = this.config.telegramChatId;
+    if (env.HENRY_TELEGRAM_VOICE_REPLIES === "0" || !token || !chatId || !intake.canSpeak) return base;
+    const speaker = new LocalVoiceService(voiceConfigFromEnv(env));
+    if (!speaker.ttsEnabled()) return base;
+    return {
+      ...base,
+      get enabled() { return intake.enabled; },
+      speak: telegramVoiceReplier({
+        synthesize: (text, options) => speaker.synthesize(text, options),
+        encode: (wav) => intake.encodeReply(wav),
+        send: (audio) => sendTelegramVoiceNote({ token, chatId, audio }),
+      }),
+    };
   }
 
   /** Shared local-state snapshot used by every provider-free reflex surface. */
@@ -445,6 +576,7 @@ export class HenryRuntime {
 
   close(): void {
     this.scheduler.stop(); this._workflowEngine?.stop(); this._telegramPump?.stop(); this._standupPoller?.stop(); this._standupStore?.close();
+    this._voiceTranscripts?.close();
     // Agent replies stream/return before durable conversation capture completes.
     // Defer only the memory close; shutting it immediately caused one-shot `ask`
     // commands to log "database connection is not open" and lose the memory.
