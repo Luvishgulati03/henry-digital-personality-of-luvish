@@ -42,6 +42,8 @@ this repo; these are read directly from `process.env`):
 | `HENRY_TTS_ENGINE` | `kokoro`, `espeak-ng`, or `piper`. |
 | `HENRY_TTS_EXECUTABLE` | Executable path for `espeak-ng`/`piper`. |
 | `HENRY_TTS_MODEL_PATH` | Model path, required for `piper`. |
+| `HENRY_TTS_VOICE` | Kokoro voice name, used for every language. Default `am_michael` (male, American). An unknown name logs a warning and falls back to the default. |
+| `HENRY_TTS_SPEED` | Kokoro speech rate. Default `1.0`, clamped to `0.7`–`1.3`. |
 | `HENRY_KOKORO_URL` | Kokoro worker base URL; must be a loopback `http://` origin. |
 | `HENRY_KOKORO_TOKEN` | Bearer token for the Kokoro worker (at least 24 characters). |
 | `HENRY_VOICE_PYTHON` | Python interpreter with the Kokoro worker's dependencies installed. |
@@ -189,8 +191,10 @@ turn, on a 404) creates a fresh "Voice" thread. The embedded overlay never touch
    per voice turn: `{reason:"request"}` up front when the words clearly ask for research or a
    lookup (research, look up, search, find, check my, what's the latest, summarise, news, jobs,
    email/inbox/mail, calendar), or `{reason:"tool"}` the first time the provider starts a command,
-   tool call, or web search. Chit-chat never gets it. The page then plays "Give me a moment while
-   I look into it." and, if still waiting, "Still working on it, almost there."
+   tool call, or web search. Chit-chat never gets it. The page then plays one of a small rotating
+   set of short holding lines (for example "Chasing that down.", "Digging through the files.")
+   and, if still waiting, a second, different one from the same set. They describe looking, never
+   claim the work is done, and never promise a time.
 5. **Speech.** Each `spoken` line is queued and played in order (half-duplex: the mic is off
    while Henry speaks). `POST /api/voice/speak` re-applies the privacy filter on the server
    before synthesis: private mode turns anything into a neutral status line, otherwise emails,
@@ -205,10 +209,10 @@ Henry's voice but keeps captions.
 | Route | Purpose |
 | --- | --- |
 | `GET /talk` | The Talk page. |
-| `GET /api/voice/status` | `{available, sttEnabled, ttsEnabled, talkEnabled, privateMode, allowWrites, reason?}`. |
+| `GET /api/voice/status` | `{available, sttEnabled, ttsEnabled, talkEnabled, privateMode, allowWrites, ttsVoice?, ttsSpeed?, reason?}`. |
 | `POST /api/voice/transcribe` | 16 kHz WAV body (max 8 MB) → `{text, transcriptId}`; nothing kept in private mode. |
 | `POST /api/voice/speak` | `{text, chunk?}` → WAV, or the framed sequence; redacted / private-mode line only. |
-| `GET /api/voice/greeting`, `/reprompt`, `/filler?v=0|1` | Fixed phrases, synthesised once and cached in `data/voice/cache/` (0600). |
+| `GET /api/voice/greeting`, `/reprompt`, `/filler?v=0..N` | Fixed phrases, synthesised once and cached in `data/voice/cache/` (0600), keyed by voice + speed + text so a changed `HENRY_TTS_VOICE`/`HENRY_TTS_SPEED` re-renders instead of replaying an old clip. |
 | `POST /api/voice/talk/session` | `{event:"start"}` / `{event:"end", turns, reason}` → `talk.session.started/ended` activity. |
 | `GET/POST /api/voice/settings` | `privateMode`, `allowWrites`, `talkEnabled`, `retentionDays` (same-origin writes). |
 | `GET /api/voice/transcripts` | Recent transcripts, text only (no audio paths). |
@@ -222,4 +226,5 @@ status says why, and the Talk page shows "Voice is off" instead of a broken orb.
 The dashboard's **voice** card toggles private mode, allow writes (with the warning "Voice can
 stage drafts; approvals and sends stay typed." and a confirm), the Talk page itself, and how many
 days transcripts are kept. A value forced by `HENRY_VOICE_PRIVATE` or `HENRY_VOICE_ALLOW_WRITES`
-shows its effective state, locked, with a note saying which variable set it.
+shows its effective state, locked, with a note saying which variable set it. It also shows the
+active Kokoro voice and speed (`HENRY_TTS_VOICE`/`HENRY_TTS_SPEED`), read-only.

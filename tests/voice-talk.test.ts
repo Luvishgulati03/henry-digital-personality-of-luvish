@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { HenryRuntime } from "../src/runtime.ts";
-import { TALK_PHRASES, speakableForRoute, startDashboard, vendorVadAsset, voiceVocabularyPrompt, type DashboardVoice } from "../src/dashboard/server.ts";
+import {
+  DEFAULT_TTS_SPEED, DEFAULT_TTS_VOICE, TALK_PHRASES, speakableForRoute, startDashboard,
+  ttsPromptCacheHash, ttsVoiceFromEnv, vendorVadAsset, voiceVocabularyPrompt, type DashboardVoice,
+} from "../src/dashboard/server.ts";
 import { PRIVATE_SPOKEN_DONE, PRIVATE_SPOKEN_INPUT, PRIVATE_SPOKEN_WORKING } from "../src/voice/policy.ts";
 import { isLookupRequest, isToolStart } from "../src/voice/intent.ts";
 import { readSettings, updateSettings } from "../src/util/settings.ts";
@@ -13,6 +15,8 @@ import { readSettings, updateSettings } from "../src/util/settings.ts";
 delete process.env.HENRY_VOICE_PRIVATE;
 delete process.env.HENRY_VOICE_ALLOW_WRITES;
 delete process.env.HENRY_VOICE_VOCABULARY;
+delete process.env.HENRY_TTS_VOICE;
+delete process.env.HENRY_TTS_SPEED;
 
 type Emit = (event: { timestamp: string; stream: string; text: string; parsed?: Record<string, unknown> }) => void;
 type Script = (emit: Emit) => string;
@@ -152,7 +156,10 @@ test("GET /api/voice/status reports the engine, private mode, and allow-writes; 
   const on = await harness("henry-talk-status-");
   try {
     const status = await jsonOf(await fetch(`${on.base}/api/voice/status`));
-    assert.deepEqual(status, { available: true, sttEnabled: true, ttsEnabled: true, talkEnabled: true, privateMode: false, allowWrites: false });
+    assert.deepEqual(status, {
+      available: true, sttEnabled: true, ttsEnabled: true, talkEnabled: true, privateMode: false, allowWrites: false,
+      ttsVoice: DEFAULT_TTS_VOICE, ttsSpeed: DEFAULT_TTS_SPEED,
+    });
     updateSettings(on.runtime.config.settingsPath, { voice: { privateMode: true, allowWrites: true } });
     const flipped = await jsonOf(await fetch(`${on.base}/api/voice/status`));
     assert.equal(flipped.privateMode, true);
@@ -264,7 +271,7 @@ test("GET /api/voice/greeting|reprompt|filler: Henry's phrases, synthesised once
     const cacheDir = path.join(h.runtime.config.dataDir, "voice", "cache");
     fs.mkdirSync(cacheDir, { recursive: true });
     const onDisk = tone(33);
-    fs.writeFileSync(path.join(cacheDir, `${crypto.createHash("sha256").update(TALK_PHRASES.reprompt).digest("hex")}.wav`), onDisk);
+    fs.writeFileSync(path.join(cacheDir, `${ttsPromptCacheHash(TALK_PHRASES.reprompt)}.wav`), onDisk);
     const reprompt = Buffer.from(await (await fetch(`${h.base}/api/voice/reprompt`)).arrayBuffer());
     assert.deepEqual(reprompt, onDisk);
     assert.equal(h.fake.tts.length, 0);
@@ -276,15 +283,35 @@ test("GET /api/voice/greeting|reprompt|filler: Henry's phrases, synthesised once
       await greeting.arrayBuffer();
     }
     assert.deepEqual(h.fake.tts, ["Hey Luvish. I'm listening."], "greeting synthesised exactly once");
-    const hash = crypto.createHash("sha256").update(TALK_PHRASES.greeting).digest("hex");
+    const hash = ttsPromptCacheHash(TALK_PHRASES.greeting);
     assert.ok(fs.existsSync(path.join(cacheDir, `${hash}.wav`)), "greeting cached on disk");
 
     await (await fetch(`${h.base}/api/voice/filler?v=0`)).arrayBuffer();
     await (await fetch(`${h.base}/api/voice/filler?v=1`)).arrayBuffer();
-    await (await fetch(`${h.base}/api/voice/filler?v=2`)).arrayBuffer(); // wraps to v=0: cached
-    assert.deepEqual(h.fake.tts.slice(1), ["Give me a moment while I look into it.", "Still working on it, almost there."]);
+    await (await fetch(`${h.base}/api/voice/filler?v=${TALK_PHRASES.fillers.length}`)).arrayBuffer(); // wraps to v=0: cached
+    assert.deepEqual(h.fake.tts.slice(1), TALK_PHRASES.fillers.slice(0, 2));
+    // The two fillers played within one turn (v=0, v=1) are never the same line.
+    assert.notEqual(TALK_PHRASES.fillers[0], TALK_PHRASES.fillers[1]);
+    assert.ok(TALK_PHRASES.fillers.length >= 6 && TALK_PHRASES.fillers.length <= 10);
     assert.equal(TALK_PHRASES.reprompt, "Still here. What do you need?");
   } finally { await h.close(); }
+});
+
+test("ttsVoiceFromEnv: defaults to am_michael/1.0, parses and clamps HENRY_TTS_SPEED, and keys the prompt cache", () => {
+  assert.deepEqual(ttsVoiceFromEnv({}), { voice: DEFAULT_TTS_VOICE, speed: DEFAULT_TTS_SPEED });
+  assert.deepEqual(ttsVoiceFromEnv({ HENRY_TTS_VOICE: "  bm_lewis  " }), { voice: "bm_lewis", speed: DEFAULT_TTS_SPEED });
+  assert.deepEqual(ttsVoiceFromEnv({ HENRY_TTS_SPEED: "0.9" }), { voice: DEFAULT_TTS_VOICE, speed: 0.9 });
+  // Out-of-range and garbage speeds clamp/fall back instead of erroring.
+  assert.deepEqual(ttsVoiceFromEnv({ HENRY_TTS_SPEED: "5" }), { voice: DEFAULT_TTS_VOICE, speed: 1.3 });
+  assert.deepEqual(ttsVoiceFromEnv({ HENRY_TTS_SPEED: "0.01" }), { voice: DEFAULT_TTS_VOICE, speed: 0.7 });
+  assert.deepEqual(ttsVoiceFromEnv({ HENRY_TTS_SPEED: "not-a-number" }), { voice: DEFAULT_TTS_VOICE, speed: DEFAULT_TTS_SPEED });
+
+  // A changed voice or speed changes the cache key, so an old cached clip is never replayed.
+  const text = "Hey. I'm listening.";
+  const base = ttsPromptCacheHash(text, {});
+  assert.notEqual(base, ttsPromptCacheHash(text, { HENRY_TTS_VOICE: "bm_lewis" }));
+  assert.notEqual(base, ttsPromptCacheHash(text, { HENRY_TTS_SPEED: "1.2" }));
+  assert.equal(base, ttsPromptCacheHash(text, {}));
 });
 
 test("GET /vendor/vad/<name>: allowlisted assets only; traversal and unknown names 404", async () => {
