@@ -20,11 +20,13 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "@ricky0123/vad-web": "^0.0.31",
     "better-sqlite3": "12.11.1",
     "croner": "^9.0.0",
     "dotenv": "^16.4.7",
     "engram-memory": "github:anmolmoses/engram-memory#8ce6ecdbd2aa5ba157a931105d9713ec9a2a2aaa",
     "mongodb": "^7.5.0",
+    "onnxruntime-web": "^1.30.0",
     "pdf-parse": "^1.1.1",
     "playwright": "^1.62.1"
   },
