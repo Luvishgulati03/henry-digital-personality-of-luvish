@@ -553,10 +553,15 @@ window.HenryOrb = HenryOrb;
       const ct = response.headers.get('content-type') || '';
       if (ct.includes('application/x-henry-wav-seq') && response.body) await readFramed(response.body.getReader());
       else { const audio = await response.blob(); if (audio.size > 44) queueFrame(audio); }
+      // Done when nothing is queued or playing. playNextFrame replaces playback.onended for every
+      // clip, so an onended wrapper is lost once a reply has 3+ clips; poll the real state instead.
+      const mine = speakAbort;
       await new Promise((resolve) => {
-        const originalOnEnded = playback.onended;
-        playback.onended = () => { originalOnEnded?.(); if (!playQueue.length) { speaking = false; resolve(); } };
-        const check = () => { if (!playQueue.length && (playback.paused || playback.ended) && !speaking) return resolve(); requestAnimationFrame(check); };
+        const check = () => {
+          if (speakAbort !== mine || mine.signal.aborted) return resolve();
+          if (!playQueue.length && !playingUrl && (playback.paused || playback.ended)) { speaking = false; return resolve(); }
+          requestAnimationFrame(check);
+        };
         check();
       });
       return true;
