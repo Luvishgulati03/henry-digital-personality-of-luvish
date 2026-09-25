@@ -1,5 +1,5 @@
 /**
- * When does a voice turn earn a holding phrase ("Give me a moment while I look into it.")?
+ * When does a voice turn earn a holding phrase (a short rotating line like "Chasing that down.")?
  *
  * The Talk page plays a filler ONLY after the dashboard sends a `gathering` SSE event, so small
  * talk ("hi", "thanks", "how are you") never hears one; the orb just shows Thinking. Two

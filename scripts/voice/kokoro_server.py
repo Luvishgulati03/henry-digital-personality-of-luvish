@@ -29,6 +29,47 @@ MAX_TOKENS = 2_000
 SOCKET_TIMEOUT_SECONDS = 10
 INFERENCE_TIMEOUT_SECONDS = 120
 CPU_THREADS = max(1, min(4, os.cpu_count() or 1))
+# Male American voice by default; HENRY_TTS_VOICE overrides. Used for every language, since
+# Henry now only replies in English.
+DEFAULT_VOICE = "am_michael"
+DEFAULT_SPEED = 1.0
+MIN_SPEED = 0.7
+MAX_SPEED = 1.3
+
+
+def resolve_voice(requested: str, available: Any) -> str:
+    """Validate the requested voice against the model's own voice list, falling back cleanly."""
+    try:
+        voices = set(available) if available is not None else set()
+    except TypeError:
+        voices = set()
+    candidate = (requested or "").strip() or DEFAULT_VOICE
+    if voices and candidate not in voices:
+        print(
+            f"kokoro: unknown HENRY_TTS_VOICE '{candidate}'; falling back to {DEFAULT_VOICE}",
+            file=sys.stderr,
+        )
+        candidate = DEFAULT_VOICE
+    return candidate
+
+
+def resolve_speed(raw: str | None) -> float:
+    """Parse HENRY_TTS_SPEED, clamped to a sane range; any bad input falls back to the default."""
+    try:
+        speed = float(raw) if raw else DEFAULT_SPEED
+    except ValueError:
+        print(
+            f"kokoro: invalid HENRY_TTS_SPEED '{raw}'; using default {DEFAULT_SPEED}",
+            file=sys.stderr,
+        )
+        speed = DEFAULT_SPEED
+    clamped = max(MIN_SPEED, min(MAX_SPEED, speed))
+    if clamped != speed:
+        print(
+            f"kokoro: HENRY_TTS_SPEED {speed} out of range [{MIN_SPEED}, {MAX_SPEED}]; clamping to {clamped}",
+            file=sys.stderr,
+        )
+    return clamped
 
 
 def load_model(model_path: str, voices_path: str) -> Any:
@@ -136,7 +177,12 @@ def make_handler(model: Any, token: str) -> type[BaseHTTPRequestHandler]:
                 return
             if not self._authorized():
                 return
-            self._json(200, {"ready": True, "voices": model.get_voices()})
+            self._json(200, {
+                "ready": True,
+                "voices": model.get_voices(),
+                "voice": self.server.tts_voice,
+                "speed": self.server.tts_speed,
+            })
 
         def do_POST(self) -> None:
             if self.path != "/synthesize":
@@ -179,7 +225,6 @@ def make_handler(model: Any, token: str) -> type[BaseHTTPRequestHandler]:
                 self._json(400, {"error": "Hindi requests must use Devanagari text"})
                 return
 
-            voice = "hf_alpha" if language == "hi" else "af_heart"
             model_language = "hi" if language == "hi" else "en-us"
             with self.server.synthesis_lock:
                 # ONNX Runtime cannot safely cancel a single in-process inference.
@@ -190,7 +235,10 @@ def make_handler(model: Any, token: str) -> type[BaseHTTPRequestHandler]:
                 watchdog.start()
                 try:
                     samples, sample_rate = model.create(
-                        text.strip(), voice=voice, lang=model_language, speed=1.0
+                        text.strip(),
+                        voice=self.server.tts_voice,
+                        lang=model_language,
+                        speed=self.server.tts_speed,
                     )
                     if sample_rate != SAMPLE_RATE:
                         raise ValueError(f"unexpected sample rate: {sample_rate}")
@@ -242,7 +290,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     server = Server((HOST, args.port), make_handler(model, token))
     server.synthesis_lock = threading.Lock()
-    print(f"Kokoro worker listening on http://{HOST}:{args.port}", flush=True)
+    server.tts_voice = resolve_voice(os.environ.get("HENRY_TTS_VOICE", ""), model.get_voices())
+    server.tts_speed = resolve_speed(os.environ.get("HENRY_TTS_SPEED"))
+    print(
+        f"Kokoro worker listening on http://{HOST}:{args.port} "
+        f"(voice={server.tts_voice}, speed={server.tts_speed})",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

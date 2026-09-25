@@ -322,7 +322,18 @@ export interface DashboardOptions {
 export const TALK_PHRASES = Object.freeze({
   greeting: "Hey Luvish. I'm listening.",
   reprompt: "Still here. What do you need?",
-  fillers: Object.freeze(["Give me a moment while I look into it.", "Still working on it, almost there."]),
+  // Short, playful holding lines: never claim to be done, never promise a time, never imply
+  // access to anything specific. No names or emojis (they also play on public pages).
+  fillers: Object.freeze([
+    "Rummaging through my brain. Politely.",
+    "Summoning the answer. It's a little shy.",
+    "Hold that thought, the hamsters are sprinting.",
+    "Connecting the dots. There are a lot of dots.",
+    "Doing the nerdy part now.",
+    "Brewing an answer. Decaf, sadly.",
+    "Consulting my notes. They're very organised. Mostly.",
+    "Chasing that down. It runs fast.",
+  ]),
 });
 type TalkPromptKind = "greeting" | "reprompt" | "filler";
 
@@ -333,18 +344,43 @@ function talkPromptText(kind: TalkPromptKind, variant = 0): string {
   return fillers[((variant % fillers.length) + fillers.length) % fillers.length];
 }
 
+/** Kokoro voice/speed the way `henry start` and the worker both read it: HENRY_TTS_VOICE
+ * (default am_michael, a male American voice) and HENRY_TTS_SPEED (default 1.0, clamped to
+ * 0.7–1.3). Used for every language. The worker independently validates the voice name against
+ * the model's own voice list and falls back there; this side only needs a stable cache key. */
+export const DEFAULT_TTS_VOICE = "am_michael";
+export const DEFAULT_TTS_SPEED = 1.0;
+const TTS_SPEED_MIN = 0.7;
+const TTS_SPEED_MAX = 1.3;
+
+export function ttsVoiceFromEnv(env: NodeJS.ProcessEnv = process.env): { voice: string; speed: number } {
+  const voice = (env.HENRY_TTS_VOICE || "").trim() || DEFAULT_TTS_VOICE;
+  const parsed = Number.parseFloat(env.HENRY_TTS_SPEED || "");
+  const speed = Number.isFinite(parsed) ? Math.min(TTS_SPEED_MAX, Math.max(TTS_SPEED_MIN, parsed)) : DEFAULT_TTS_SPEED;
+  return { voice, speed };
+}
+
+/** The cache-key hash for a Talk prompt: sha256 of voice + speed + text, so a changed
+ * HENRY_TTS_VOICE/HENRY_TTS_SPEED re-renders instead of replaying an old cached clip. */
+export function ttsPromptCacheHash(text: string, env: NodeJS.ProcessEnv = process.env): string {
+  const { voice, speed } = ttsVoiceFromEnv(env);
+  return crypto.createHash("sha256").update(`${voice}\u0000${speed}\u0000${text}`, "utf8").digest("hex");
+}
+
 /**
  * The Talk phrases are fixed, so each is synthesised once and cached in memory and on disk
- * under `<dataDir>/voice/cache/<sha256 of text>.wav` (0600), making the first greeting after a
- * restart instant. Memory is keyed by dataDir + text so two dashboards never share a cache.
+ * under `<dataDir>/voice/cache/<sha256 of voice+speed+text>.wav` (0600), making the first
+ * greeting after a restart instant. Memory is keyed by dataDir + voice + speed + text so two
+ * dashboards, or a changed voice, never share a cache entry.
  */
 const ttsPromptCache = new Map<string, Buffer>();
 
 async function synthesizeCachedPrompt(voice: DashboardVoice, dataDir: string, text: string): Promise<Buffer> {
-  const key = `${dataDir}\u0000${text}`;
+  const { voice: ttsVoice, speed: ttsSpeed } = ttsVoiceFromEnv();
+  const key = `${dataDir}\u0000${ttsVoice}\u0000${ttsSpeed}\u0000${text}`;
   const cached = ttsPromptCache.get(key);
   if (cached) return cached;
-  const hash = crypto.createHash("sha256").update(text, "utf8").digest("hex");
+  const hash = ttsPromptCacheHash(text);
   const cacheDir = path.join(dataDir, "voice", "cache");
   const cachePath = path.join(cacheDir, `${hash}.wav`);
   try {
@@ -864,9 +900,11 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
           : !sttEnabled ? "Speech-to-text is not set up. Start Henry with `henry start` so it can find whisper.cpp and a Whisper model."
           : !ttsEnabled ? "Henry can hear you but has no voice (text-to-speech is not set up); replies appear as captions."
           : undefined;
+        const ttsVoiceInfo = ttsEnabled ? ttsVoiceFromEnv() : undefined;
         json(response, 200, {
           available: talkEnabled && sttEnabled, sttEnabled, ttsEnabled, talkEnabled,
           privateMode: policy.privateMode, allowWrites: policy.allowWrites, ...(reason ? { reason } : {}),
+          ...(ttsVoiceInfo ? { ttsVoice: ttsVoiceInfo.voice, ttsSpeed: ttsVoiceInfo.speed } : {}),
         });
         return;
       }

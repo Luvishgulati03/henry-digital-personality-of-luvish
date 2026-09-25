@@ -130,6 +130,11 @@ export async function startHenry(args) {
   process.env.HENRY_KOKORO_URL ||= DEFAULT_KOKORO_URL;
   process.env.HENRY_KOKORO_TOKEN ||= crypto.randomBytes(32).toString("hex");
   process.env.HENRY_TTS_ENGINE ||= "kokoro";
+  // A different profile can still choose its own voice/speed via .env; these are only the
+  // defaults when unset. The Kokoro worker reads them from its own environment below, and the
+  // dashboard reads the same HENRY_TTS_VOICE/HENRY_TTS_SPEED to key its prompt cache.
+  process.env.HENRY_TTS_VOICE ||= "am_michael";
+  process.env.HENRY_TTS_SPEED ||= "1.0";
 
   const voiceReady = resolved.sttEnabled && resolved.ttsEnabled;
   if (!voiceReady) console.log(resolved.disabledReason || "Voice is disabled: local assets were not found.");
