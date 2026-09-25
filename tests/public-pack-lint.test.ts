@@ -95,6 +95,11 @@ test("phone numbers are flagged unless allowlisted, matching regardless of punct
   assert.equal(allowed.length, 0);
 });
 
+test("year ranges and ISO dates are not mistaken for phone numbers", () => {
+  const files: DraftFile[] = [{ name: "a.md", content: "B.Tech (2021-2025), role 2020 – 2024, updated 2026-09-25." }];
+  assert.equal(lintContactInfo(files, []).length, 0);
+});
+
 test("size cap: per-file warning and total error", () => {
   const longFile: DraftFile = { name: "big.md", content: "x".repeat(FILE_WARN_BYTES + 1) };
   const warnOnly = lintSize([longFile]);

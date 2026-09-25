@@ -152,6 +152,10 @@ const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 // the owner reviews); a missed real phone number in a public file is not.
 const PHONE_PATTERN = /(?:\+?\d[\d\s().-]{6,}\d)/g;
 
+// Year ranges ("2021-2025", "2020 – 2024") and ISO dates ("2026-09-25") look like phone
+// numbers to PHONE_PATTERN but are ordinary resume content.
+const DATE_LIKE = /^(?:(?:19|20)\d{2}\s*[-–]\s*(?:19|20)\d{2}|(?:19|20)\d{2}-\d{2}-\d{2})$/;
+
 function normalizePhone(value: string): string {
   return value.replace(/\D/g, "");
 }
@@ -179,6 +183,7 @@ export function lintContactInfo(files: DraftFile[], allowTerms: string[]): LintI
       for (const match of line.matchAll(PHONE_PATTERN)) {
         const digits = normalizePhone(match[0]);
         if (digits.length < 7) continue;
+        if (DATE_LIKE.test(match[0].trim())) continue;
         if (allowedPhones.has(digits)) continue;
         issues.push({
           severity: "error",
