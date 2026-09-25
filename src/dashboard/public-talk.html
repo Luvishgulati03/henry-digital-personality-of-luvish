@@ -653,6 +653,7 @@ window.HenryOrb = HenryOrb;
     setCapturing(false);
     speechSince = 0; silenceSince = 0;
     if (resetWatchdog) { lastActivityAt = performance.now(); repromptedYet = false; repromptAt = 0; }
+    if (sileroVad && vadMode === 'energy') vadMode = 'silero';
     void resumeVad();
     if (!listenRaf) listenRaf = requestAnimationFrame(listenLoop);
   }
@@ -819,7 +820,8 @@ window.HenryOrb = HenryOrb;
       });
       if (stream !== shared) { try { await instance.destroy(); } catch {} return; }
       sileroVad = instance;
-      vadMode = 'silero';
+      // Loaded late (mid-session): switch only between utterances, never mid-capture.
+      if (!capturing) { vadMode = 'silero'; if (state === 'listening') void resumeVad(); }
     } catch { vadMode = 'energy'; sileroVad = null; }
   }
 
@@ -924,7 +926,9 @@ window.HenryOrb = HenryOrb;
     const vadReady = initVad();
     lastActivityAt = performance.now(); repromptedYet = false; repromptAt = 0;
     await playPrompt('greeting');
-    await vadReady;
+    // Never hold the session on the Silero download (it can be slow through the tunnel): listen
+    // with the energy VAD at once; initVad switches to Silero between utterances once it loads.
+    await Promise.race([vadReady, sleep(1500)]);
     if (id !== sessionId || state !== 'greeting') return;
     enterListening(true);
   }
