@@ -71,20 +71,31 @@
     <h1>Welcome back</h1>
     <div id="error">Incorrect username or password.</div>
     <label>Username
-      <input name="username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+      <input name="username" type="text" value="owner" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required>
     </label>
     <label>Password
-      <input name="password" type="password" autocomplete="current-password" required>
+      <input name="password" type="password" autocomplete="current-password" required autofocus>
     </label>
     <button type="submit">Sign in</button>
   </form>
-  <footer>local access stays open on this machine</footer>
+  <footer>owner access only</footer>
 </main>
 <script>
   // The page is served straight off disk (read-and-cache, no templating), so the
   // failed-login state rides the query string the POST handler redirects to.
-  if (new URLSearchParams(location.search).has("error")) {
-    document.getElementById("error").classList.add("show");
+  const reason = new URLSearchParams(location.search).get("error");
+  if (reason !== null) {
+    const box = document.getElementById("error");
+    const messages = {
+      off: "Owner sign-in through this link is turned off.",
+      setup: "Owner sign-in is not set up yet. Run henry admin password on the owner's Mac.",
+      locked: "Too many failed attempts. Sign-in is paused for a while.",
+    };
+    box.textContent = messages[reason] || "Incorrect username or password.";
+    box.classList.add("show");
+    if (reason === "off" || reason === "setup") {
+      document.querySelectorAll("input, button").forEach((element) => { element.disabled = true; });
+    }
   }
 </script>
 </body>

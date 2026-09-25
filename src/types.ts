@@ -44,7 +44,15 @@ export type ActivityKind =
   | "talk.session.ended"
   | "voice.transcribed"
   | "voice.failed"
-  | "voice.settings.updated";
+  | "voice.settings.updated"
+  | "remote.started"
+  | "remote.failed"
+  | "remote.stopped"
+  | "public.visitor"
+  | "public.turn"
+  | "public.refused"
+  | "public.ping"
+  | "public.note";
 
 export interface ActivityEvent {
   id: string;

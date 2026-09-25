@@ -5,7 +5,11 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { DASHBOARD_HTML } from "./page.ts";
-import { clearedSessionCookie, endSession, issueSession, readSession, requireRole, verifyLogin, type Role, type SessionUser } from "./auth.ts";
+import {
+  clearLoginFailures, clearedSessionCookie, endSession, issueSession, loginLockedFor, ownerAccountExists, readSession,
+  recordLoginFailure, requireRole, verifyLogin, OWNER_USERNAME, type Role, type SessionUser,
+} from "./auth.ts";
+import { RemoteLoginAlerts, remoteAdminEnabled } from "./remote-admin.ts";
 import { KnowledgeBase } from "../knowledge/store.ts";
 import { sampleResources } from "./resources.ts";
 import { sharedAdmissionController } from "../orchestration/admission.ts";
@@ -33,6 +37,8 @@ import { LocalVoiceService, VoiceError, voiceConfigFromEnv, type VoiceLanguage }
 import { VoiceTranscriptStore, readVoiceSettings, updateVoiceSettings } from "../voice/transcripts.ts";
 import { isLookupRequest, isToolStart } from "../voice/intent.ts";
 import { readSettings, updateSettings } from "../util/settings.ts";
+import { createPublicSurface, isPublicPath, isPublicRequest, matchPublicRoute, trustedPublicOrigins, type PublicSurface, type PublicSurfaceDeps } from "../public/surface.ts";
+import { sendTelegram } from "../notify/telegram.ts";
 
 const EVENTS_POLL_MS = 2000;
 
@@ -316,6 +322,58 @@ export interface DashboardOptions {
   voice?: DashboardVoice;
   /** Pre-synthesise the Talk phrases at startup when TTS is on. Default true. */
   warmVoicePrompts?: boolean;
+  /** Test seams for the public face (runner, limits, clock). Production uses the runtime's own. */
+  publicSurface?: Partial<Pick<PublicSurfaceDeps, "runner" | "mode" | "now" | "env" | "sweepIntervalMs" | "memory">>;
+  /** Owner-only Telegram (visitor pings, remote-login notices). Defaults to src/notify/telegram.ts. */
+  ownerSend?: (text: string) => Promise<boolean>;
+  /** Receives the public face once built (tests drive its idle sweep directly). */
+  onPublicSurface?: (surface: PublicSurface) => void;
+}
+
+/**
+ * Routes an UNAUTHENTICATED tunnelled request may reach besides the public face's allowlist
+ * (src/public/surface.ts PUBLIC_TUNNEL_ROUTES): the owner's login page, its POST, and logout.
+ * Everything else through the tunnel needs a valid owner session (302 to /login for a page, 401 for
+ * an API). tests/public-routes.test.ts walks every registered route against this.
+ */
+export const TUNNEL_LOGIN_ROUTES: readonly string[] = Object.freeze(["GET /login", "POST /login", "GET /logout"]);
+
+/**
+ * Origins allowed to read GET /api/health cross-site (e.g. the owner's portfolio "Henry is online"
+ * pill), from HENRY_HEALTH_CORS_ORIGINS: a comma-separated list of exact https origins, no path.
+ * Default empty: no cross-site reads until the owner opts in. Anything that is not a bare https
+ * origin is dropped rather than silently normalised. Ported from Kelly.
+ */
+export function parseHealthCorsOrigins(value: string | undefined): Set<string> {
+  const origins = new Set<string>();
+  if (!value) return origins;
+  for (const raw of value.split(",")) {
+    const candidate = raw.trim();
+    if (!candidate) continue;
+    let parsed: URL;
+    try { parsed = new URL(candidate); } catch { continue; }
+    if (parsed.protocol !== "https:") continue;
+    if (parsed.pathname !== "/" && parsed.pathname !== "") continue;
+    if (parsed.search || parsed.hash || parsed.username || parsed.password) continue;
+    origins.add(`${parsed.protocol}//${parsed.host}`);
+  }
+  return origins;
+}
+
+/**
+ * GET /api/health, identical for the owner's loopback dashboard and the tunnel. Unauthenticated on
+ * purpose. `remote.active` is the ONLY tunnel signal here (no URL, mode, or error text), so
+ * `henry start --public` can poll it and the owner's portfolio can show an online pill.
+ */
+function writeHealth(request: http.IncomingMessage, response: http.ServerResponse, runtime: HenryRuntime): void {
+  let remoteActive = false;
+  try { remoteActive = runtime.tunnel.status().active; } catch { /* fail closed: not active */ }
+  const origin = request.headers.origin;
+  if (typeof origin === "string" && parseHealthCorsOrigins(process.env.HENRY_HEALTH_CORS_ORIGINS).has(origin)) {
+    response.setHeader("access-control-allow-origin", origin);
+    response.setHeader("vary", "Origin");
+  }
+  json(response, 200, { ok: true, timestamp: new Date().toISOString(), remote: { active: remoteActive } });
 }
 
 /** Henry Talk's fixed phrases. Fillers play only after a `gathering` event (src/voice/intent.ts). */
@@ -665,9 +723,18 @@ function wantsHtml(request: http.IncomingMessage): boolean {
   return (request.headers.accept || "").includes("text/html");
 }
 
-function localOrigin(request: http.IncomingMessage): boolean {
+/**
+ * CSRF gate for every route below its call site. A LOCAL request keeps the long-standing rule: a
+ * loopback Origin, or none. A TUNNELLED request (the owner signed in through the public link) must
+ * carry an Origin that EXACTLY equals a trusted public origin (HENRY_PUBLIC_ORIGIN,
+ * https://<HENRY_PUBLIC_HOST>, or the tunnel's reported URL): no suffix or wildcard match, and no
+ * missing Origin on anything but a GET/HEAD. Public origins are never trusted for local requests.
+ */
+function localOrigin(request: http.IncomingMessage, tunnelled = false, tunnelUrl?: string): boolean {
   const origin = request.headers.origin;
-  return !origin || /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin);
+  if (!tunnelled) return !origin || /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin);
+  if (!origin) return request.method === "GET" || request.method === "HEAD";
+  return trustedPublicOrigins(tunnelUrl).includes(origin);
 }
 
 function loopback(host: string): boolean { return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]"; }
@@ -821,17 +888,65 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
   // them over loopback. Read-only voice turns (the default) run in a sandbox with no network
   // and no writes, so they never block the owner's own dashboard approvals.
   let activeWritableVoiceTurns = 0;
+  const ownerSend = options.ownerSend ?? ((text: string) => sendTelegram(runtime.config, text));
+  const loginAlerts = new RemoteLoginAlerts(ownerSend);
+  const tunnelUrl = (): string | undefined => { try { return runtime.tunnel.status().url; } catch { return undefined; } };
+  // HENRY'S PUBLIC FACE (src/public/surface.ts): all an unauthenticated tunnel visitor can reach.
+  const publicSurface = createPublicSurface({
+    config: runtime.config,
+    activity: runtime.activity,
+    memory: options.publicSurface?.memory ?? runtime.memory,
+    runner: options.publicSurface?.runner ?? runtime.agent.providerRunner,
+    voice,
+    synthesizeCached: (text) => synthesizeCachedPrompt(voice, runtime.config.dataDir, text),
+    fillers: TALK_PHRASES.fillers,
+    vendorAsset: vendorVadAsset,
+    health: (request, response) => writeHealth(request, response, runtime),
+    tunnelUrl,
+    ownerAccess: () => (!remoteAdminEnabled() ? "off" : ownerAccountExists() ? "ready" : "not-set-up"),
+    send: ownerSend,
+    ...(options.publicSurface?.mode ? { mode: options.publicSurface.mode } : {}),
+    ...(options.publicSurface?.now ? { now: options.publicSurface.now } : {}),
+    ...(options.publicSurface?.env ? { env: options.publicSurface.env } : {}),
+    ...(options.publicSurface?.sweepIntervalMs !== undefined ? { sweepIntervalMs: options.publicSurface.sweepIntervalMs } : {}),
+  });
+  options.onPublicSurface?.(publicSurface);
   const server = http.createServer(async (request, response) => {
     try {
       if (!loopback(runtime.config.host) && !runtime.config.allowRemoteDashboard) throw new Error("Remote dashboard is disabled; bind HENRY_HOST to loopback or explicitly enable a token-protected remote dashboard");
       const url = new URL(request.url || "/", `http://${runtime.config.host}:${runtime.config.port}`);
+      // THE TUNNEL GATE, before auth and before any dashboard route. A request that may come from
+      // the public internet (any Cloudflare/proxy header, a non-loopback Host, or a non-loopback
+      // peer) never gets the local-admin bypass or the token path. Without an owner session it
+      // reaches only the public face's allowlist (landing, chat, talk, their APIs, /api/health)
+      // and the owner's login/logout; anything else is 302 /login (pages) or 401 (APIs). With a
+      // valid owner session (and HENRY_REMOTE_ADMIN not off) it falls through to the full
+      // dashboard below, under the exact-origin CSRF rule in localOrigin().
+      const tunnelled = isPublicRequest(request, { allowRemoteDashboard: runtime.config.allowRemoteDashboard });
+      const route = url.pathname.replace(/\/$/, "") || "/";
+      let tunnelOwner: SessionUser | undefined;
+      if (tunnelled) {
+        // Only the `owner` account (`henry admin password`) is ever honoured through the link.
+        const session = remoteAdminEnabled() ? readSession(request.headers.cookie) : undefined;
+        tunnelOwner = session?.username === OWNER_USERNAME ? session : undefined;
+        const loginRoute = TUNNEL_LOGIN_ROUTES.includes(`${request.method} ${route}`);
+        if (!tunnelOwner && !loginRoute) {
+          if (matchPublicRoute(request.method, url.pathname)) { await publicSurface.handle(request, response, url, true); return; }
+          if (request.method === "GET" && wantsHtml(request)) { redirect(response, "/login"); return; }
+          json(response, 401, { error: "authentication required" });
+          return;
+        }
+        if (tunnelOwner && isPublicPath(url.pathname)) { await publicSurface.handle(request, response, url, true); return; }
+      } else if (isPublicPath(url.pathname)) {
+        if (await publicSurface.handle(request, response, url, false)) return;
+      }
       // Auth gate. /login and /api/health are reachable logged-out, and /logout only
       // ever destroys the caller's own session. Everything else below — every personal
       // route Luvish had — is admin-only; the local-admin bypass inside sessionUserFor
-      // is what keeps his localhost experience exactly as it was.
-      const route = url.pathname.replace(/\/$/, "") || "/";
+      // is what keeps his localhost experience exactly as it was. A tunnelled request's
+      // user is its owner session and nothing else.
       const publicPath = route === "/login" || route === "/logout" || route === "/api/health";
-      const user = await sessionUserFor(request, runtime);
+      const user = tunnelled ? tunnelOwner : await sessionUserFor(request, runtime);
       if (!publicPath && !requireRole(user, "admin")) {
         if (request.method === "GET" && wantsHtml(request)) {
           if (user) { wrongRolePage(response, user, ["admin"]); return; }
@@ -842,13 +957,23 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
         return;
       }
       if (request.method === "GET" && route === "/login") {
-        response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        if (tunnelled) {
+          // Already signed in: straight to the dashboard. Kill switch or no owner password yet:
+          // the page says so (the reason rides the query string; the page is static).
+          if (tunnelOwner) { redirect(response, "/"); return; }
+          const blocked = !remoteAdminEnabled() ? "off" : !ownerAccountExists() ? "setup" : undefined;
+          if (blocked && url.searchParams.get("error") !== blocked) { redirect(response, `/login?error=${blocked}`); return; }
+        }
+        response.writeHead(200, {
+          "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
+          ...(tunnelled ? { "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'", "referrer-policy": "no-referrer" } : {}),
+        });
         response.end(await loginHtml());
         return;
       }
       if (request.method === "GET" && route === "/logout") {
         endSession(request.headers.cookie);
-        redirect(response, "/login", { "set-cookie": clearedSessionCookie() });
+        redirect(response, tunnelled ? "/" : "/login", { "set-cookie": clearedSessionCookie({ secure: tunnelled }) });
         return;
       }
       if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
@@ -963,7 +1088,7 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
         response.end(await constellationJs());
         return;
       }
-      if (request.method === "GET" && url.pathname === "/api/health") { json(response, 200, { ok: true, timestamp: new Date().toISOString() }); return; }
+      if (request.method === "GET" && url.pathname === "/api/health") { writeHealth(request, response, runtime); return; }
       if (request.method === "GET" && url.pathname === "/api/status") { json(response, 200, await runtime.status()); return; }
       if (request.method === "GET" && url.pathname === "/api/resources") {
         const resources = await sampleResources();
@@ -1116,18 +1241,37 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
         return;
       }
 
-      if (!localOrigin(request)) { json(response, 403, { error: "cross-origin request rejected" }); return; }
+      if (!localOrigin(request, tunnelled, tunnelUrl())) { json(response, 403, { error: "cross-origin request rejected" }); return; }
       // Below the CSRF line with every other mutating route: the login form posts
       // same-origin, so the localOrigin check above is exactly the protection it wants.
       if (request.method === "POST" && route === "/login") {
+        // Through the public link: the kill switch, and "not set up" until `henry admin password`.
+        if (tunnelled && !remoteAdminEnabled()) { redirect(response, "/login?error=off"); return; }
+        if (tunnelled && !ownerAccountExists()) { redirect(response, "/login?error=setup"); return; }
         const form = await formBody(request);
         const username = (form.get("username") || "").trim();
         const password = form.get("password") || "";
-        const account = username && password ? verifyLogin(username, password) : undefined;
+        // Throttled by USERNAME alone (auth.ts): behind the tunnel the peer is always 127.0.0.1
+        // and a forwarded client address is never allowed to decide who may try a password.
+        if (loginLockedFor(username) > 0) { redirect(response, "/login?error=locked"); return; }
+        const account = username && password && (!tunnelled || username.toLowerCase() === OWNER_USERNAME)
+          ? verifyLogin(username, password) : undefined;
         // Never echo the attempt back in the URL — no username, no reason, no timing tell.
-        if (!account) { redirect(response, "/login?error=1"); return; }
+        if (!account) {
+          const locked = recordLoginFailure(username);
+          if (tunnelled) loginAlerts.failure(request, locked);
+          if (locked) void runtime.activity.record("workflow.failed", "Dashboard login locked after repeated failures", { remote: tunnelled }).catch(() => undefined);
+          redirect(response, "/login?error=1");
+          return;
+        }
+        clearLoginFailures(username);
+        if (tunnelled) {
+          loginAlerts.success(request);
+          void runtime.activity.record("workflow.completed", "Owner signed in through the public link", { remote: true }).catch(() => undefined);
+        }
         // Henry's dashboard is admin-only — every account lands on mission control at "/".
-        redirect(response, "/", { "set-cookie": issueSession(account).cookie });
+        // Secure when the login came through the public https link; SameSite=Strict always.
+        redirect(response, "/", { "set-cookie": issueSession(account, { secure: tunnelled }).cookie });
         return;
       }
       // ---- Henry Talk voice routes (owner-only like everything above; same-origin enforced) ----
@@ -1646,6 +1790,7 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
   const attachmentPurge = scheduleAttachmentPurge(runtime);
   server.on("close", () => {
     clearInterval(attachmentPurge);
+    void publicSurface.close().catch(() => undefined);
     try { transcriptStore?.close(); } catch { /* already closed */ }
     transcriptStore = undefined;
   });

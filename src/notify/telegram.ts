@@ -1,4 +1,5 @@
 import type { HenryConfig } from "../config.ts";
+import { isPublicTurn } from "../guardrails.ts";
 
 /** Telegram hard-caps message bodies at this length. */
 export const TELEGRAM_MAX_CHARS = 4096;
@@ -17,6 +18,9 @@ export const TELEGRAM_TIMEOUT_MS = 10_000;
  */
 export async function sendTelegram(config: HenryConfig, text: string): Promise<boolean> {
   if (!config.telegramBotToken || !config.telegramChatId) return false;
+  // A public visitor turn's child process never messages anyone (src/guardrails.ts). The owner
+  // pings in src/public/ are sent by the dashboard process itself, which never carries the flag.
+  if (isPublicTurn()) return false;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TELEGRAM_TIMEOUT_MS);
   try {

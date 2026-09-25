@@ -24,6 +24,7 @@ import {
 } from "./tui/panel.ts";
 import { isLongResearchAsk } from "./orchestration/luna.ts";
 import { runPublicPackCommand } from "./public-pack/cli.ts";
+import { connectedLines, failedLine, TUNNEL_CONNECT_TIMEOUT_MS, TUNNEL_STILL_CONNECTING_MESSAGE, waitForFirstTunnelTransition, watchTunnelTransitions, type TunnelAnnounceLine } from "./remote/announce.ts";
 
 const args = process.argv.slice(2);
 
@@ -166,6 +167,130 @@ function announceTelegramPump(state: { armed: boolean; bridge: boolean; standup:
   if (!state.armed) return;
   const surfaces = [state.bridge ? "your DM (two-way)" : "", state.standup ? "the team group" : ""].filter(Boolean);
   console.log(note("info", `Telegram: watching ${surfaces.join(" + ")}.`));
+}
+
+function printTunnelLine(line: TunnelAnnounceLine): void {
+  console.log(line.level === "info" ? line.text : note(line.level, line.text));
+}
+
+/**
+ * Starts the public-link tunnel (src/remote/tunnel.ts) once the dashboard is up. A no-op unless
+ * HENRY_TUNNEL=cloudflare, which only `henry start --public` sets. Never throws: a broken tunnel
+ * must not take the dashboard down. Cloudflare's start() returns before cloudflared registers, so
+ * "not active, no error" means "still connecting": wait for the first real transition, then keep
+ * printing one line per later drop/reconnect (src/remote/announce.ts).
+ */
+async function announceTunnel(runtime: HenryRuntime): Promise<void> {
+  if ((process.env.HENRY_TUNNEL || "off") === "off") return;
+  try {
+    const tunnel = runtime.tunnel;
+    const status = await runtime.startTunnel();
+    let finalStatus = status;
+    if (status.active && status.url) {
+      for (const line of connectedLines(status, false)) printTunnelLine(line);
+    } else if (status.lastError) {
+      printTunnelLine(failedLine(status.lastError, false));
+    } else {
+      printTunnelLine({ level: "info", text: "Connecting Henry's public link..." });
+      const first = await waitForFirstTunnelTransition(tunnel, TUNNEL_CONNECT_TIMEOUT_MS);
+      if (first === "timeout") {
+        printTunnelLine({ level: "warn", text: TUNNEL_STILL_CONNECTING_MESSAGE });
+      } else {
+        finalStatus = first.status;
+        if (first.kind === "remote.started" && first.status.active) {
+          for (const line of connectedLines(first.status, false)) printTunnelLine(line);
+        } else {
+          printTunnelLine(failedLine(first.status.lastError ?? "not connected yet", false));
+        }
+      }
+    }
+    watchTunnelTransitions(tunnel, finalStatus.active, printTunnelLine);
+  } catch (error) {
+    printTunnelLine(failedLine(error instanceof Error ? error.message : String(error), false));
+  }
+}
+
+/**
+ * `henry tunnel setup <hostname> [--name henry]` (one-time Cloudflare named-tunnel setup, never
+ * --overwrite-dns) and `henry tunnel status` / `henry tunnel setup --status` (readiness only).
+ * Runs before the runtime is created: it touches no memory, approvals, or data.
+ */
+async function tunnelCommand(): Promise<void> {
+  const sub = args[1] || "status";
+  const { runCloudflareTunnelSetup, runCloudflareTunnelStatus, createDefaultCloudflareSetupDeps } = await import("./remote/cloudflare-setup.ts");
+  const deps = createDefaultCloudflareSetupDeps();
+  if (sub === "status" || (sub === "setup" && args.includes("--status"))) {
+    await runCloudflareTunnelStatus(deps);
+    return;
+  }
+  if (sub === "setup") {
+    const setupArgs = args.slice(2);
+    const hostname = setupArgs[0] && !setupArgs[0].startsWith("--") ? setupArgs[0] : undefined;
+    if (!hostname) throw new Error("Usage: henry tunnel setup <hostname> [--name henry]");
+    const nameIndex = setupArgs.indexOf("--name");
+    await runCloudflareTunnelSetup(hostname, { name: nameIndex >= 0 ? setupArgs[nameIndex + 1] : undefined }, deps);
+    return;
+  }
+  throw new Error("Usage: henry tunnel setup <hostname> [--name henry] | henry tunnel status");
+}
+
+/** Reads one line from the terminal without echoing it. Refuses pipes and arguments on purpose. */
+async function promptHidden(question: string): Promise<string> {
+  const stdin = process.stdin;
+  if (!stdin.isTTY || typeof stdin.setRawMode !== "function") {
+    throw new Error("Run this in a terminal: the password is typed at a hidden prompt, never passed as an argument or piped in.");
+  }
+  process.stdout.write(question);
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.setEncoding("utf8");
+  return await new Promise<string>((resolve, reject) => {
+    let value = "";
+    const cleanup = (): void => { stdin.removeListener("data", onData); stdin.setRawMode(false); stdin.pause(); process.stdout.write("\n"); };
+    const onData = (chunk: string): void => {
+      for (const char of chunk) {
+        if (char === "\r" || char === "\n") { cleanup(); resolve(value); return; }
+        if (char === "\u0003" || char === "\u0004") { cleanup(); reject(new Error("Cancelled.")); return; }
+        if (char === "\u007f" || char === "\b") { value = value.slice(0, -1); continue; }
+        if (char >= " ") value += char;
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+
+/**
+ * `henry admin password`     set or change the owner's password (hidden prompt, typed twice, at
+ *                            least 12 characters; stored as a scrypt hash in the data dir, never in
+ *                            .env). Changing it signs every session out.
+ * `henry admin logout-all`   ends every dashboard session, local and remote.
+ * `henry admin status`       whether an owner password exists and whether remote owner access is on.
+ */
+async function adminCommand(): Promise<void> {
+  const sub = args[1] || "status";
+  const auth = await import("./dashboard/auth.ts");
+  const { remoteAdminEnabled } = await import("./dashboard/remote-admin.ts");
+  if (sub === "password") {
+    const first = await promptHidden(`New owner password (at least ${auth.MIN_OWNER_PASSWORD_LENGTH} characters): `);
+    if (first.length < auth.MIN_OWNER_PASSWORD_LENGTH) throw new Error(`Too short: the owner password needs at least ${auth.MIN_OWNER_PASSWORD_LENGTH} characters.`);
+    const second = await promptHidden("Type it again: ");
+    if (first !== second) throw new Error("The two entries did not match. Nothing was changed.");
+    const result = auth.setOwnerPassword(first);
+    console.log(`${result.created ? "Owner password set" : "Owner password changed"}. Sign in from the public link's Owner button as "${auth.OWNER_USERNAME}". ${result.sessionsEnded} existing ${result.sessionsEnded === 1 ? "session was" : "sessions were"} signed out.`);
+    if (!remoteAdminEnabled()) console.log("Note: HENRY_REMOTE_ADMIN is off, so owner sign-in through the public link stays disabled.");
+    return;
+  }
+  if (sub === "logout-all") {
+    const ended = auth.endAllSessions();
+    console.log(`Signed out ${ended} ${ended === 1 ? "session" : "sessions"}. Every device must sign in again.`);
+    return;
+  }
+  if (sub === "status") {
+    console.log(`Owner password: ${auth.ownerAccountExists() ? "set" : "not set (run henry admin password)"}`);
+    console.log(`Owner sign-in through the public link: ${remoteAdminEnabled() ? "on" : "off (HENRY_REMOTE_ADMIN=off)"}`);
+    return;
+  }
+  throw new Error("Usage: henry admin password | logout-all | status");
 }
 
 /**
@@ -362,6 +487,8 @@ async function repl(
 
 async function main(): Promise<void> {
   const command = args[0] || "repl";
+  if (command === "tunnel") { await tunnelCommand(); return; }
+  if (command === "admin") { await adminCommand(); return; }
   const runtime = await HenryRuntime.create();
   let keepAlive = false;
   try {
@@ -455,6 +582,7 @@ async function main(): Promise<void> {
       });
       announceTelegramPump(pump);
       console.log(`Henry dashboard: http://${runtime.config.host}:${runtime.config.port}`);
+      await announceTunnel(runtime);
     } else if (command === "status") {
       print(await runtime.status());
     } else if (command === "memory") {
@@ -934,7 +1062,7 @@ async function main(): Promise<void> {
       } else if (sub === "list") {
         print(await runtime.launch.list());
       } else throw new Error('Usage: henry launch intake "<brief|path>" | run <slug> | list');
-    } else throw new Error("Commands: ask, repl, dashboard, status, code, provider, jobs, cover, resume, jd, memory, dispatch, gmail, review, approve, schedule, workflow, goal, remind, telegram, mailwatch, standup, linkedin, tweet, launch");
+    } else throw new Error("Commands: ask, repl, dashboard, status, code, provider, jobs, cover, resume, jd, memory, dispatch, gmail, review, approve, schedule, workflow, goal, remind, telegram, mailwatch, standup, linkedin, tweet, launch, tunnel, admin");
   } finally {
     if (!keepAlive) runtime.close();
   }
