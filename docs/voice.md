@@ -192,7 +192,7 @@ turn, on a 404) creates a fresh "Voice" thread. The embedded overlay never touch
    lookup (research, look up, search, find, check my, what's the latest, summarise, news, jobs,
    email/inbox/mail, calendar), or `{reason:"tool"}` the first time the provider starts a command,
    tool call, or web search. Chit-chat never gets it. The page then plays one of a small rotating
-   set of short holding lines (for example "Chasing that down.", "Digging through the files.")
+   set of short holding lines (for example "Doing the nerdy part now.", "Chasing that down. It runs fast.")
    and, if still waiting, a second, different one from the same set. They describe looking, never
    claim the work is done, and never promise a time.
 5. **Speech.** Each `spoken` line is queued and played in order (half-duplex: the mic is off

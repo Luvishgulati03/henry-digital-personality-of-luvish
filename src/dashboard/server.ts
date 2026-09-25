@@ -322,17 +322,17 @@ export interface DashboardOptions {
 export const TALK_PHRASES = Object.freeze({
   greeting: "Hey Luvish. I'm listening.",
   reprompt: "Still here. What do you need?",
-  // Short, honest holding lines: they describe looking, never claim to be done, and never
-  // promise a time. Kept plain (no names, no emojis) since these play over the open mic.
+  // Short, playful holding lines: never claim to be done, never promise a time, never imply
+  // access to anything specific. No names or emojis (they also play on public pages).
   fillers: Object.freeze([
-    "Flipping through the archives.",
-    "Chasing that down.",
-    "Digging through the files.",
-    "Cross-referencing a few things.",
-    "Running the numbers now.",
-    "Poking around for the answer.",
-    "Tracing this back to the source.",
-    "Rifling through the notes.",
+    "Rummaging through my brain. Politely.",
+    "Summoning the answer. It's a little shy.",
+    "Hold that thought, the hamsters are sprinting.",
+    "Connecting the dots. There are a lot of dots.",
+    "Doing the nerdy part now.",
+    "Brewing an answer. Decaf, sadly.",
+    "Consulting my notes. They're very organised. Mostly.",
+    "Chasing that down. It runs fast.",
   ]),
 });
 type TalkPromptKind = "greeting" | "reprompt" | "filler";
