@@ -25,13 +25,13 @@ h1,h2,h3,p{margin:0}h1{font-size:23px;letter-spacing:-.028em;font-weight:600}
 .brand{display:flex;align-items:center;gap:13px}
 .mark{width:13px;height:13px;border-radius:50%;background:radial-gradient(circle at 34% 30%,#8ef4ff,var(--cyan) 55%,rgba(38,230,255,0) 76%);box-shadow:0 0 20px rgba(38,230,255,.75)}
 .controls,.links{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.links{margin-top:20px}
-.button,.link{display:inline-flex;align-items:center;gap:7px;min-height:38px;padding:0 13px;color:var(--muted);border:1px solid var(--line);border-radius:11px;background:linear-gradient(180deg,var(--panel-2),var(--panel));text-decoration:none;font:11px var(--mono);letter-spacing:.07em;text-transform:uppercase;cursor:pointer;transition:color .16s,border-color .16s,background .16s}
+.button,.link{display:inline-flex;align-items:center;gap:7px;min-height:44px;padding:0 13px;color:var(--muted);border:1px solid var(--line);border-radius:11px;background:linear-gradient(180deg,var(--panel-2),var(--panel));text-decoration:none;font:11px var(--mono);letter-spacing:.07em;text-transform:uppercase;cursor:pointer;transition:color .16s,border-color .16s,background .16s}
 .button:hover,.link:hover{color:var(--text);border-color:var(--line-hot)}
 .button:focus-visible,.link:focus-visible,.seg button:focus-visible,.input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
 .button.primary{color:#04121e;border-color:transparent;background:linear-gradient(180deg,#6cf1ff,#20c9ff);font-weight:700;box-shadow:0 10px 26px -14px rgba(38,230,255,.9)}
 .button.primary:hover{background:linear-gradient(180deg,#8df5ff,#3ad4ff);color:#04121e}
 .seg{display:flex;border:1px solid var(--line);border-radius:11px;overflow:hidden;background:var(--panel)}
-.seg button{border:0;border-right:1px solid var(--line);border-radius:0;min-height:38px;padding:0 13px;background:transparent;color:var(--muted);font:11px var(--mono);letter-spacing:.07em;text-transform:uppercase;cursor:pointer}
+.seg button{border:0;border-right:1px solid var(--line);border-radius:0;min-height:44px;padding:0 13px;background:transparent;color:var(--muted);font:11px var(--mono);letter-spacing:.07em;text-transform:uppercase;cursor:pointer}
 .seg button:last-child{border-right:0}.seg button.active{background:rgba(38,230,255,.16);color:var(--cyan)}
 .hero{display:grid;grid-template-columns:1.4fr repeat(5,1fr);gap:1px;margin:26px 0;background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;box-shadow:var(--shadow)}
 .hero-item{min-height:92px;padding:17px 18px;background:linear-gradient(165deg,rgba(12,28,52,.86),rgba(7,17,31,.94));display:flex;flex-direction:column;justify-content:space-between;gap:8px}
@@ -65,7 +65,7 @@ h1,h2,h3,p{margin:0}h1{font-size:23px;letter-spacing:-.028em;font-weight:600}
 .status-strip{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .status-dot{width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 13px var(--cyan)}
 .form-grid{display:grid;grid-template-columns:1fr auto;gap:11px}.form-grid textarea{grid-column:1/-1}
-.input,textarea,select{width:100%;color:var(--text);background:rgba(3,9,18,.66);border:1px solid var(--line);border-radius:11px;padding:11px 12px;font:13px var(--sans)}
+.input,textarea,select{width:100%;color:var(--text);background:rgba(3,9,18,.66);border:1px solid var(--line);border-radius:11px;padding:11px 12px;font:16px var(--sans);min-height:44px}
 textarea{min-height:112px;resize:vertical}
 .input::placeholder,textarea::placeholder{color:var(--dim)}
 .input:focus,textarea:focus,select:focus{outline:none;border-color:var(--line-hot)}

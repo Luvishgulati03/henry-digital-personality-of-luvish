@@ -7,14 +7,14 @@ main{max-width:1200px;margin:auto;padding:22px}
 header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 h1{margin:0;font-size:22px}
 .sub{color:var(--muted);font-size:12px}
-a.back{color:var(--accent);text-decoration:none;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:5px 12px}
+a.back{display:inline-flex;align-items:center;min-height:44px;color:var(--accent);text-decoration:none;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:5px 12px}
 .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
-.chip{border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer;user-select:none}
+.chip{display:inline-flex;align-items:center;min-height:44px;border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer;user-select:none}
 .chip.active{background:rgba(87,227,137,.15);color:var(--accent);border-color:var(--accent);font-weight:600}
 .chip.errors.active{background:var(--bad);border-color:var(--bad)}
-input[type=search]{flex:1;min-width:180px;background:#0f131a;border:1px solid var(--line);border-radius:8px;color:var(--text);padding:7px 10px;font-size:13px}
-select{background:#0f131a;border:1px solid var(--line);border-radius:8px;color:var(--text);padding:6px}
-label.follow{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;cursor:pointer}
+input[type=search]{flex:1;min-width:180px;min-height:44px;background:#0f131a;border:1px solid var(--line);border-radius:8px;color:var(--text);padding:7px 10px;font-size:16px}
+select{min-height:44px;background:#0f131a;border:1px solid var(--line);border-radius:8px;color:var(--text);padding:6px;font-size:16px}
+label.follow{display:flex;align-items:center;gap:6px;min-height:44px;color:var(--muted);font-size:12px;cursor:pointer}
 #count{color:var(--muted);font-size:12px;margin-left:auto}
 .log{background:color-mix(in srgb,var(--panel) 92%,transparent);border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .row{display:grid;grid-template-columns:74px 158px 1fr;gap:10px;padding:8px 12px;border-top:1px solid var(--line);cursor:pointer;align-items:baseline}

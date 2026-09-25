@@ -32,11 +32,11 @@
   .topbar { position:fixed; top:max(14px, env(safe-area-inset-top)); left:14px; right:14px; display:flex; align-items:center; justify-content:space-between; gap:10px; z-index:5; pointer-events:none; }
   .topbar > * { pointer-events:auto; }
   .nav { display:flex; gap:8px; }
-  .nav a { display:inline-flex; align-items:center; min-height:34px; padding:0 12px; border:1px solid var(--line); border-radius:11px; background:linear-gradient(180deg,var(--panel-2),var(--panel)); color:var(--muted); text-decoration:none; font:11px var(--mono); letter-spacing:.07em; text-transform:uppercase; }
+  .nav a { display:inline-flex; align-items:center; justify-content:center; min-height:44px; min-width:44px; padding:0 12px; border:1px solid var(--line); border-radius:11px; background:linear-gradient(180deg,var(--panel-2),var(--panel)); color:var(--muted); text-decoration:none; font:11px var(--mono); letter-spacing:.07em; text-transform:uppercase; }
   .nav a:hover { color:var(--text); border-color:var(--line-hot); }
   body.embed .nav { display:none; }
 
-  #mute { width:40px; height:40px; border-radius:12px; border:1px solid var(--line); background:linear-gradient(180deg,var(--panel-2),var(--panel)); display:grid; place-items:center; color:var(--muted); }
+  #mute { width:44px; height:44px; border-radius:12px; border:1px solid var(--line); background:linear-gradient(180deg,var(--panel-2),var(--panel)); display:grid; place-items:center; color:var(--muted); }
   #mute:hover { color:var(--text); border-color:var(--line-hot); }
   #mute[aria-pressed="true"] { background:rgba(255,200,87,.14); color:var(--amber); border-color:rgba(255,200,87,.45); }
   #mute svg { width:18px; height:18px; }

@@ -54,9 +54,19 @@
   .conv:hover { background: var(--surface); color: var(--text); }
   .conv.active { background: var(--surface-2); color: var(--text); border-color: var(--border); }
   .conv .name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .conv .act { opacity: 0; border: none; background: none; color: var(--text-faint); cursor: pointer; font-size: 12px; padding: 2px 3px; }
+  .conv .act {
+    position: relative; opacity: 0; border: none; background: none; color: var(--text-faint);
+    cursor: pointer; font-size: 12px; padding: 2px 3px; min-width: 24px; min-height: 24px;
+  }
+  /* The visible glyph stays small so the tight sidebar row does not grow, but the pseudo-element
+     pads the actual hit area out to the 44px touch-target minimum. */
+  .conv .act::before { content: ""; position: absolute; inset: -10px; }
   .conv:hover .act, .conv.active .act { opacity: 1; }
   .conv .act:hover { color: var(--text); }
+  @media (hover: none) {
+    /* No hover on touch: keep rename/delete reachable without first making the row active. */
+    .conv .act { opacity: 1; }
+  }
   .side-empty { padding: 10px 14px; color: var(--text-faint); font-size: 12.5px; }
 
   /* ---------- agent activity strip (display only) ---------- */
@@ -102,10 +112,12 @@
     position: absolute; top: 2px; right: 2px; width: 17px; height: 17px; border-radius: 50%;
     border: none; background: rgba(0,0,0,.7); color: #fff; font-size: 11px; line-height: 1; cursor: pointer;
   }
+  /* Visible circle stays 17px so it does not swallow the thumbnail; the hit area is padded out. */
+  .attachchip button::before { content: ""; position: absolute; inset: -13px; }
   .attachchip.pending { display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 11px; }
   .composer-actions { display: flex; align-items: center; gap: 8px; }
   #attach {
-    width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--border); background: none;
+    width: 44px; height: 44px; flex: none; border-radius: 50%; border: 1px solid var(--border); background: none;
     color: var(--text-faint); cursor: pointer; display: flex; align-items: center; justify-content: center;
   }
   #attach:hover { color: var(--text); border-color: var(--text-faint); }
@@ -128,6 +140,7 @@
     flex: 0 0 auto;
   }
   .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: .2px; }
+  #toggleside { flex: none; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
   .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
   .brand small { color: var(--text-faint); font-weight: 400; }
   .header-right { display: flex; align-items: center; gap: 10px; }
@@ -135,14 +148,15 @@
     font-size: 11.5px; color: var(--text-dim); border: 1px solid var(--border); border-radius: 999px;
     padding: 3px 10px; background: var(--surface); font-family: var(--mono);
   }
+  a.chip { display: inline-flex; align-items: center; min-height: 44px; }
   .btn {
     appearance: none; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim);
     border-radius: 10px; padding: 6px 12px; font-size: 13px; cursor: pointer; font-family: var(--sans);
-    transition: color .15s, border-color .15s, background .15s;
+    min-height: 44px; transition: color .15s, border-color .15s, background .15s;
   }
   .btn:hover { color: var(--text); border-color: var(--text-faint); }
   .btn:disabled { opacity: .45; cursor: default; }
-  a.btn { text-decoration: none; display: inline-block; }
+  a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 
   /* ---------- transcript ---------- */
   #scroller { flex: 1 1 auto; overflow-y: auto; scroll-behavior: smooth; }
@@ -157,7 +171,8 @@
   .suggestions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 10px; max-width: 560px; }
   .suggestion {
     border: 1px solid var(--border); background: var(--surface); color: var(--text-dim);
-    padding: 9px 14px; border-radius: 14px; font-size: 13.5px; cursor: pointer; transition: all .15s;
+    padding: 9px 14px; min-height: 44px; border-radius: 14px; font-size: 13.5px; cursor: pointer;
+    transition: all .15s;
   }
   .suggestion:hover { color: var(--text); border-color: var(--accent-dim); background: var(--surface-2); transform: translateY(-1px); }
 
@@ -195,7 +210,12 @@
   .prose code { font-family: var(--mono); font-size: .86em; background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: 5px; padding: 1.5px 5.5px; }
   .codeblock { border: 1px solid var(--border-soft); border-radius: 10px; overflow: hidden; background: var(--code-bg); font-family: var(--sans); }
   .codeblock-bar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; background: var(--surface-2); font-size: 11.5px; color: var(--text-faint); }
-  .codeblock-bar button { border: none; background: none; color: var(--text-faint); font-size: 11.5px; cursor: pointer; font-family: var(--sans); }
+  .codeblock-bar button {
+    position: relative; border: none; background: none; color: var(--text-faint); font-size: 11.5px;
+    cursor: pointer; font-family: var(--sans); padding: 4px;
+  }
+  /* Visible label stays a small text link; the pseudo-element pads the tap target to 44px. */
+  .codeblock-bar button::before { content: ""; position: absolute; inset: -16px -6px; }
   .codeblock-bar button:hover { color: var(--text); }
   .codeblock pre { padding: 13px 14px; overflow-x: auto; }
   .codeblock code { font-family: var(--mono); font-size: 13px; line-height: 1.55; background: none; border: none; padding: 0; color: #d5f5e3; }
@@ -221,13 +241,14 @@
   .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
   .composer textarea {
     width: 100%; resize: none; border: none; outline: none; background: none; color: var(--text);
-    font-family: var(--sans); font-size: 15px; line-height: 1.5; max-height: 200px;
+    font-family: var(--sans); font-size: 16px; line-height: 1.5; max-height: 200px; min-height: 44px;
+    padding: 10px 0;
   }
   .composer textarea::placeholder { color: var(--text-faint); }
   .composer-row { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
   .hint { font-size: 11.5px; color: var(--text-faint); }
   #send {
-    width: 34px; height: 34px; border-radius: 50%; border: none; cursor: pointer;
+    width: 44px; height: 44px; flex: none; border-radius: 50%; border: none; cursor: pointer;
     background: var(--accent); color: #052e16; display: flex; align-items: center; justify-content: center;
     transition: transform .12s, background .15s, opacity .15s;
   }
@@ -261,7 +282,7 @@
   }
   #talkClose {
     position: absolute; top: 10px; right: 10px; z-index: 2;
-    width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--border);
+    width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border);
     background: var(--surface-2); color: var(--text-dim); cursor: pointer;
     display: flex; align-items: center; justify-content: center; font-size: 15px; line-height: 1;
   }
@@ -584,7 +605,10 @@
       });
       item.appendChild(remove);
 
-      item.addEventListener("click", function () { openConversation(conversation.id); });
+      item.addEventListener("click", function () {
+        openConversation(conversation.id);
+        if (window.matchMedia("(max-width: 760px)").matches) sidebar.classList.add("collapsed");
+      });
       convList.appendChild(item);
     });
   }
@@ -1016,8 +1040,15 @@
   send.addEventListener("click", submit);
   autoSize();
 
-  newchat.addEventListener("click", function () { if (!streaming) createConversation(); });
+  newchat.addEventListener("click", function () {
+    if (streaming) return;
+    createConversation();
+    if (window.matchMedia("(max-width: 760px)").matches) sidebar.classList.add("collapsed");
+  });
   toggleSide.addEventListener("click", function () { sidebar.classList.toggle("collapsed"); });
+  /* Narrow screens: the sidebar is a fixed overlay (see the 760px breakpoint above), so it
+     starts collapsed there — otherwise it opens covering the whole transcript on first load. */
+  if (window.matchMedia("(max-width: 760px)").matches) sidebar.classList.add("collapsed");
 
   /* ---------- agent activity strip (display only — no dispatch control) ---------- */
   var agentsById = {};
