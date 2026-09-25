@@ -79,6 +79,27 @@ are rejected. Use a project script or a checked-in smoke-test command for produc
 verification. Henry cannot infer a production environment or claim a production test
 passed unless you provide that command and environment.
 
+## Public knowledge pack
+
+Recruiters can chat with a public-mode Henry that answers only from an approved
+"public knowledge pack" — never from `soul.md`, `memory/`, `knowledge/`, or `.env`.
+The owner writes the pack by hand and publishes it explicitly:
+
+```bash
+henry public pack init     # creates <data dir>/public-pack/draft/*.md placeholders
+                            # (e.g. "Your Name", you@example.com) + denylist.txt/allow.txt
+henry public pack lint      # checks draft/ for denylisted terms, secrets, local paths,
+                             # un-allowlisted emails/phones, and a ~60 KB size cap
+henry public pack show      # draft vs published status and diff
+henry public pack publish   # lints, requires interactive y/N (or --yes), then atomically
+                             # replaces published/*.md that the public server reads
+```
+
+`denylist.txt` (private terms that must never appear publicly, e.g. a client or family
+business name) and `allow.txt` (the owner's own public contact values) stay local and
+are never committed or published. Running `publish` by hand IS the owner's approval;
+nothing publishes this pack automatically.
+
 ## Safety rules
 
 Inspect first, make the smallest change, run the project checks, and report actual
