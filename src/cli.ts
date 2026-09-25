@@ -23,6 +23,7 @@ import {
   prompt as promptFor, spinnerStart, spinnerTick,
 } from "./tui/panel.ts";
 import { isLongResearchAsk } from "./orchestration/luna.ts";
+import { runPublicPackCommand } from "./public-pack/cli.ts";
 
 const args = process.argv.slice(2);
 
@@ -840,6 +841,10 @@ async function main(): Promise<void> {
         console.log(digest.line);
         if (args.includes("--send")) await runtime.notifyOperator(digest.line, "Henry — job index");
       } else throw new Error("Usage: henry mailwatch check|status|tracker|backfill --days <n>|digest [--send]");
+    } else if (command === "public") {
+      const sub = args[1];
+      if (sub !== "pack") throw new Error("Usage: henry public pack init|lint|show|publish [--yes]");
+      await runPublicPackCommand(runtime.config, args.slice(2));
     } else if (command === "pm") {
       const sub = args[1] || "status";
       if (sub === "on") { await runtime.setPmMode(true); console.log("PM mode ON — Henry now operates as your project manager (PMBOK-grounded, decisions with rationale). `henry pm off` to exit."); }
