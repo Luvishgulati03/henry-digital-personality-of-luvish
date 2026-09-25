@@ -40,7 +40,30 @@ export function isVoiceTurn(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 export function assertNotVoiceTurn(env: NodeJS.ProcessEnv = process.env): void {
+  // The public rail is stricter than the voice rail, so every voice refusal point refuses a
+  // public turn too (approvals, claims, executions, sends, reminders, tweets, standups).
+  if (isPublicTurn(env)) throw new Error(PUBLIC_TURN_REFUSAL);
   if (isVoiceTurn(env)) throw new Error(VOICE_TURN_REFUSAL);
+}
+
+/**
+ * The public rail. A turn answering an anonymous visitor on Henry's public face (src/public/)
+ * runs its provider child with HENRY_PUBLIC_TURN=1 on top of having no tools at all. Every path
+ * that refuses a voice turn (assertNotVoiceTurn, isRestrictedTurn) refuses this one too, so even a
+ * provider regression that handed the model a shell could not approve, claim, execute, or send.
+ */
+export const PUBLIC_TURN_ENV = "HENRY_PUBLIC_TURN";
+
+export const PUBLIC_TURN_REFUSAL =
+  "Approvals, sends, and every other owner action are disabled during a public visitor turn.";
+
+export function isPublicTurn(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[PUBLIC_TURN_ENV] === "1";
+}
+
+/** True for any turn that must never approve or send: a voice turn or a public visitor turn. */
+export function isRestrictedTurn(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isVoiceTurn(env) || isPublicTurn(env);
 }
 
 /**

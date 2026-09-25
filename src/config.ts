@@ -8,8 +8,18 @@ import { fileURLToPath } from "node:url";
 // outside the repo silently lost every key (Telegram went mute while the terminal 🔔
 // still fired). Load the repo's own .env first, then let a cwd .env fill remaining
 // gaps (dotenv never overrides already-set vars).
-dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".env") });
-dotenv.config();
+//
+// Test isolation (tests/isolate.mjs sets HENRY_TEST_ISOLATION=1): the owner's .env must never
+// reach a test process — it can carry a live public tunnel, Telegram credentials, and the owner's
+// name. dotenv only fills unset variables, so a test that deletes a key would otherwise get the
+// owner's value back.
+if (process.env.HENRY_TEST_ISOLATION !== "1") {
+  dotenv.config({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", ".env") });
+  dotenv.config();
+}
+
+/** The neutral display name for the owner when HENRY_OWNER_NAME is not configured. */
+export const DEFAULT_OWNER_NAME = "the owner";
 
 const DEFAULT_SCREENSHOT_CATEGORIES = ["work", "design-reference", "receipts", "memes", "documents", "code", "_unsorted"];
 // No titles are baked in: an unconfigured scout skips with a reason (src/jobs/scout.ts) until
@@ -52,6 +62,11 @@ export interface HenryConfig {
   /** Deep specialist model for t2 work on Claude. */
   claudeT2Model?: string;
   requireOutboundApproval: boolean;
+  /**
+   * The owner's display name (HENRY_OWNER_NAME), used where Henry names the owner to someone else,
+   * e.g. the public face's "Ping <owner>" button. Never baked into code; defaults to "the owner".
+   */
+  ownerName: string;
   /** The owner's own email address (HENRY_OWNER_EMAIL; legacy DAD_EMAIL still honoured). */
   ownerEmail?: string;
   knowledgeDir: string;
@@ -213,6 +228,7 @@ export function loadConfig(rootDir = defaultRoot): HenryConfig {
     claudeT0Model: env("CLAUDE_T0_MODEL") || "haiku",
     claudeT2Model: env("CLAUDE_T2_MODEL") || "opus",
     requireOutboundApproval: bool(env("REQUIRE_OUTBOUND_APPROVAL"), true),
+    ownerName: env("OWNER_NAME")?.trim() || DEFAULT_OWNER_NAME,
     ownerEmail: env("OWNER_EMAIL") || process.env.DAD_EMAIL || undefined,
     knowledgeDir: resolveFromRoot(rootDir, env("KNOWLEDGE_DIR"), "knowledge"),
     knowledgeDbPath: path.join(dataDir, "knowledge.db"),

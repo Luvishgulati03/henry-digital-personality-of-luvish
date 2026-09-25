@@ -385,6 +385,7 @@ set up what your user asks for.
 | **Gmail** | Gmail connector enabled in Codex | Inbox reading, drafting, and separately approved sends. |
 | **Jobs pipeline** | A real `resume.md` and `application-profile.md` (both gitignored) | Job scout, tailored resume + cover letter, application tracking. |
 | **Scheduled work** | `henry schedule daemon`, or `henry schedule install` to generate launchd/cron files | Nightly memory consolidation, inbox polling, digests. Review the generated files before installing them. |
+| **Public mode** | `brew install cloudflared`, `henry tunnel setup henry.your-domain.com`, publish the public knowledge pack, optionally `henry admin password`, then `henry start --public` | A public link with a landing page: pack-only chat and voice faces for visitors, and an optional password sign-in for the owner. Read the risk note first: [`docs/modules/public-mode.md`](docs/modules/public-mode.md). |
 
 **Restoring your own machine from a private mirror.** The mirror carries your
 soul, persona, memories and corpus, but four things are excluded on purpose and

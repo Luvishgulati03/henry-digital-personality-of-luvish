@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07111f">
+<meta name="robots" content="noindex">
+<title>Henry</title>
+<link rel="manifest" href="/public/manifest.webmanifest">
+<link rel="icon" href="/public/icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg:#07111f; --bg-deep:#030912; --panel:rgba(9,20,38,.72); --panel-2:rgba(12,28,52,.62);
+    --line:rgba(155,190,255,.18); --line-hot:rgba(38,230,255,.42);
+    --text:#eef7ff; --muted:#8aa4bf; --dim:#67839f; --cyan:#26e6ff; --blue:#4e7dff; --violet:#8d5cff;
+    --sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  * { box-sizing:border-box; }
+  html { background:var(--bg-deep); }
+  body { margin:0; min-height:100vh; min-height:100dvh; color:var(--text); font:15px/1.55 var(--sans);
+    display:flex; align-items:center; justify-content:center; padding:max(24px, env(safe-area-inset-top)) 18px max(24px, env(safe-area-inset-bottom));
+    background:radial-gradient(120% 80% at 12% -8%,rgba(38,230,255,.10),transparent 60%),radial-gradient(100% 70% at 88% -4%,rgba(141,92,255,.13),transparent 62%),linear-gradient(180deg,var(--bg),var(--bg-deep) 70%); }
+  main { width:100%; max-width:420px; display:flex; flex-direction:column; gap:22px; }
+  .orb { width:84px; height:84px; border-radius:50%; margin:0 auto;
+    background:radial-gradient(circle at 50% 38%, #26e6ff 0, #4e7dff 48%, rgba(141,92,255,.55) 72%, transparent 74%);
+    box-shadow:0 0 40px rgba(38,230,255,.35); }
+  h1 { margin:0; text-align:center; font-size:28px; letter-spacing:-.01em; }
+  #tagline { margin:6px 0 0; text-align:center; color:var(--muted); }
+  .choices { display:flex; flex-direction:column; gap:12px; }
+  .choice { display:flex; flex-direction:column; align-items:flex-start; gap:4px; width:100%; min-height:64px; padding:14px 16px;
+    border-radius:16px; border:1px solid var(--line); background:linear-gradient(180deg,var(--panel-2),var(--panel)); color:var(--text);
+    text-decoration:none; font:inherit; text-align:left; }
+  .choice strong { font-size:16px; }
+  .choice span { color:var(--muted); font-size:13px; }
+  .choice.primary { border-color:var(--line-hot); background:linear-gradient(180deg,rgba(38,230,255,.16),rgba(78,125,255,.10)); }
+  .choice:focus-visible { outline:2px solid var(--cyan); outline-offset:3px; }
+  .choice[aria-disabled="true"] { opacity:.55; pointer-events:none; }
+  .row { display:flex; gap:10px; }
+  .row .choice { flex:1; min-width:0; }
+  .divider { height:1px; background:var(--line); margin:4px 0; }
+  @media (prefers-reduced-motion:reduce) { * { transition:none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="orb" aria-hidden="true"></div>
+  <div>
+    <h1>Henry</h1>
+    <p id="tagline">Chief of staff and AI twin</p>
+  </div>
+  <nav class="choices" aria-label="Choose how to continue">
+    <a class="choice primary" id="visitor" href="/public/chat">
+      <strong id="visitorTitle">I'm here to learn more</strong>
+      <span>Chat with Henry. No sign-in needed.</span>
+    </a>
+    <a class="choice" id="voice" href="/public/talk">
+      <strong>Talk by voice</strong>
+      <span>Hands-free, out loud.</span>
+    </a>
+    <div class="divider" role="presentation"></div>
+    <a class="choice" id="owner" href="/login">
+      <strong>Owner</strong>
+      <span id="ownerNote">Sign in with a password.</span>
+    </a>
+  </nav>
+</main>
+<script>
+(() => {
+  const setText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+  fetch('/api/public/config', { credentials: 'same-origin' })
+    .then((response) => response.ok ? response.json() : Promise.reject(new Error('HTTP ' + response.status)))
+    .then((config) => {
+      const owner = typeof config.ownerName === 'string' && config.ownerName.trim() ? config.ownerName.trim() : 'the owner';
+      setText('tagline', owner + "'s chief of staff and AI twin");
+      setText('visitorTitle', "I'm here to learn about " + owner);
+      if (config.available === false) setText('tagline', "Henry's public profile isn't published yet. Please check back soon.");
+      if (!config.voice || config.voice.stt === false) {
+        const voice = document.getElementById('voice');
+        voice.setAttribute('aria-disabled', 'true'); voice.removeAttribute('href');
+        setText('voice', ''); voice.hidden = true;
+      }
+      const ownerLink = document.getElementById('owner');
+      if (config.ownerAccess === 'not-set-up') { setText('ownerNote', 'Not set up yet.'); ownerLink.setAttribute('aria-disabled', 'true'); ownerLink.removeAttribute('href'); }
+      else if (config.ownerAccess === 'off') { setText('ownerNote', 'Owner sign-in is turned off for this link.'); ownerLink.setAttribute('aria-disabled', 'true'); ownerLink.removeAttribute('href'); }
+    })
+    .catch(() => {});
+})();
+</script>
+</body>
+</html>

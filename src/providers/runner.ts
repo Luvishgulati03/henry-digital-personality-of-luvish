@@ -5,7 +5,8 @@ import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import type { ActivityKind, DispatchTier, ProviderEvent, ProviderName, RunResult } from "../types.ts";
 import { safeEnvironment } from "../util/env.ts";
-import { isVoiceTurn, VOICE_TURN_ENV } from "../guardrails.ts";
+import { isPublicTurn, isVoiceTurn, PUBLIC_TURN_ENV, VOICE_TURN_ENV } from "../guardrails.ts";
+import { publicClaudeArgs, publicCodexArgs, publicEnvironment, publicTurnViolation } from "./public-sandbox.ts";
 import { homedir } from "node:os";
 import path from "node:path";
 import { SessionManager, sessionArgs } from "./session.ts";
@@ -71,8 +72,19 @@ export interface RunOptions {
    * survives grandchild `henry …` commands.
    */
   voiceTurn?: boolean;
+  /**
+   * A PUBLIC VISITOR TURN (src/public/turn.ts). The run is spawned with the public sandbox argv
+   * (src/providers/public-sandbox.ts: no tools, no MCP, no settings, no session), a minimal
+   * environment carrying HENRY_PUBLIC_TURN=1, in `cwd` (required: an empty scratch directory),
+   * and any answer whose events show a tool call is discarded. `surface`, `session`,
+   * `connector`, `outputSchemaPath` and `voiceTurn` are ignored. `systemPrompt` carries the public
+   * rules: Claude receives it via --system-prompt; Codex receives it prepended to the prompt.
+   */
+  publicTurn?: { systemPrompt: string };
   onEvent?: (event: ProviderEvent) => void;
 }
+
+export const PUBLIC_TURN_NESTED_REFUSAL = "A public visitor turn cannot start another provider run.";
 
 /** Default wall-clock envelope: 5 minutes (MASTER_PLAN §7). */
 export const DEFAULT_ENVELOPE_MS = 300_000;
@@ -357,11 +369,13 @@ export async function execute(
   let firstTextMs: number | null = null;
   const child = spawn(command, args, {
     cwd,
-    env: safeEnvironment(provider, {
+    // A public turn gets the minimal public environment (no tokens, HENRY_PUBLIC_TURN=1).
+    env: options.publicTurn ? publicEnvironment(provider, { HENRY_RUN_ID: runId }) : safeEnvironment(provider, {
       CI: "1", HENRY_RUN_ID: runId,
       // The voice rail: set for a voice turn, and re-propagated from a process that already
       // carries it (safeEnvironment's allowlist would otherwise drop it at the next hop).
       ...(options.voiceTurn || isVoiceTurn() ? { [VOICE_TURN_ENV]: "1" } : {}),
+      ...(isPublicTurn() ? { [PUBLIC_TURN_ENV]: "1" } : {}),
     }),
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -688,8 +702,17 @@ export class ProviderRunner {
     );
   }
 
-  async run(prompt: string, options: RunOptions = {}): Promise<RunResult> {
+  async run(prompt: string, inputOptions: RunOptions = {}): Promise<RunResult> {
     const at = this.nowFn();
+    // PUBLIC RAIL: a process that already serves a public turn never starts another run, and a
+    // public run never carries a session, connector, schema, or the voice path's overrides.
+    if (isPublicTurn() && !inputOptions.publicTurn) {
+      return { runId: randomUUID(), provider: inputOptions.provider || this.config.provider, response: "", exitCode: null, durationMs: 0, error: PUBLIC_TURN_NESTED_REFUSAL, events: [] };
+    }
+    const options: RunOptions = inputOptions.publicTurn
+      ? { ...inputOptions, readOnly: true, surface: undefined, session: undefined, connector: undefined, outputSchemaPath: undefined, voiceTurn: false }
+      : inputOptions;
+    if (options.publicTurn && !options.cwd) throw new Error("A public turn needs an explicit scratch cwd.");
     const ledger = this.limits();
     const policy = readFallbackPolicy(this.settingsPath());
     // A caller-set provider is a PIN (a billing/policy decision) unless the caller marks it
@@ -712,7 +735,7 @@ export class ProviderRunner {
     // VOICE RAIL (connectors): a voice turn's Codex run loses every sending connector tool, and
     // its Claude run is denied the Gmail send tools its cached init proof lists. The env flag
     // (execute()) covers Henry's own approve/send paths; this covers the connector itself.
-    const voiceTurn = options.voiceTurn === true || isVoiceTurn();
+    const voiceTurn = !options.publicTurn && (options.voiceTurn === true || isVoiceTurn());
     const codexVoiceConfig = voiceTurn ? codexVoiceTurnOverrides(this.readCodexConfig()) : undefined;
     const claudeVoiceDenied = voiceTurn ? claudeGmailSendTools(readCapabilities(capabilityFile).claude?.gmail) : [];
     const connectorNote = gmailAccess && !claudeTools && candidates.includes("claude") ? describeClaudeGmail(claudeGmail) : undefined;
@@ -784,7 +807,16 @@ export class ProviderRunner {
             ? { id: options.session.id, fresh: options.session.fresh }
             : this.sessions().acquire(options.surface, provider))
         : undefined;
-      const args = buildProviderArgs(provider, prompt, {
+      const publicModel = options.publicTurn ? resolveProviderRoute(provider, {
+        tier: options.tier,
+        codexModel: this.config.codexModel, codexT0Model: this.config.codexT0Model, codexT2Model: this.config.codexT2Model,
+        claudeModel: this.config.claudeModel, claudeT0Model: this.config.claudeT0Model, claudeT2Model: this.config.claudeT2Model,
+      }).model : undefined;
+      const args = options.publicTurn
+        ? (provider === "claude"
+          ? publicClaudeArgs(prompt, options.publicTurn.systemPrompt, { model: publicModel })
+          : publicCodexArgs(`${options.publicTurn.systemPrompt}\n\n${prompt}`, { model: publicModel, effort: "low" }))
+        : buildProviderArgs(provider, prompt, {
         readOnly: options.readOnly === true,
         tier: options.tier,
         role: options.role,
@@ -860,7 +892,18 @@ export class ProviderRunner {
       } finally {
         decision.slot.release();
       }
-      if (provider === "claude") {
+      if (options.publicTurn) {
+        // Output-side rail: an answer produced with a tool call (or with a tool merely loaded) is
+        // never handed to a visitor. This is configuration drift, not a quota problem, so it
+        // neither fails over nor parks the provider.
+        const violation = publicTurnViolation(provider, result.events);
+        if (violation) {
+          result = { ...result, response: "", error: `public sandbox violation: ${violation}` };
+          await this.activity.record("run.failed", "Public turn discarded: sandbox violation", { error: result.error, public: true }, { runId: result.runId, provider, role: options.role });
+          return result;
+        }
+      }
+      if (provider === "claude" && !options.publicTurn) {
         // Every stream-json Claude run re-proves its Gmail connector. A run that needed Gmail
         // and could not reach it must not hand back an answer composed without the tool.
         const proven = recordClaudeInit(capabilityFile, result.events, at);

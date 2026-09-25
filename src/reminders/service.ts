@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { Cron } from "croner";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
-import { assertNotVoiceTurn, isVoiceTurn, VOICE_TURN_REFUSAL } from "../guardrails.ts";
+import { assertNotVoiceTurn, isRestrictedTurn, VOICE_TURN_REFUSAL } from "../guardrails.ts";
 
 export type ReminderStatus = "pending" | "fired" | "cancelled";
 
@@ -81,9 +81,9 @@ export const PROMPT_NO_NOTIFICATION = "NO_MATCH";
  */
 export type ExecuteApprovalFn = (approvalId: string) => Promise<string>;
 
-/** `{ voiceTurn: true }` when this process is serving a voice turn — stamped on every new reminder. */
+/** `{ voiceTurn: true }` when this process is serving a voice (or public) turn — stamped on every new reminder. */
 function voiceStamp(): { voiceTurn?: true } {
-  return isVoiceTurn() ? { voiceTurn: true } : {};
+  return isRestrictedTurn() ? { voiceTurn: true } : {};
 }
 
 /** macOS notification, best-effort; console logging always fires as the say-free fallback (and always gets the untruncated text). */

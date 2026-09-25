@@ -30,6 +30,21 @@ npx tsx src/cli.ts repl
 or `node bin/henry.mjs <command>`. The dashboard is loopback-only at
 `http://127.0.0.1:7337` by default. Never enable remote access without a token.
 
+Public mode (optional, see `docs/modules/public-mode.md`) serves a public link through a
+Cloudflare named tunnel while the dashboard stays on loopback:
+
+```bash
+henry tunnel setup henry.your-domain.com   # one-time; never --overwrite-dns
+henry admin password                      # optional owner sign-in (min 12 chars, hashed)
+henry start --public                      # needs a published public knowledge pack
+henry admin logout-all                    # end every session
+```
+
+Unauthenticated tunnel traffic reaches only the landing page, the public chat/talk faces
+and their `/api/public/*` routes, `/api/health`, and the owner's login. Public turns run
+with no tools, no memory reads and `HENRY_PUBLIC_TURN=1`; `HENRY_REMOTE_ADMIN=off` turns
+owner sign-in through the link off.
+
 ## Give Henry context
 
 - Persona: fill in local `soul.md` and `personality.md`; both are ignored by Git.

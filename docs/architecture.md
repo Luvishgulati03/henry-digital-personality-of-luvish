@@ -63,6 +63,16 @@ another one.
   server-sent events. Exposing it beyond localhost requires an explicit
   token-protected remote mode — the approval queue and full-access
   provider control must never sit behind an unauthenticated interface.
+- **Public face (optional)** — `src/public/` and `src/remote/`: a Cloudflare
+  named tunnel into the loopback dashboard. A tunnelled request is gated
+  before any dashboard route: unauthenticated, it reaches only a fixed
+  allowlist (landing page, public chat/talk faces, `/api/public/*`,
+  `/api/health`, owner login); with the owner's password session it gets
+  the dashboard. Public turns go through the ProviderRunner's public
+  sandbox (no tools, no MCP, no settings, no session, scratch cwd, minimal
+  env with `HENRY_PUBLIC_TURN=1`), answer only from the published public
+  knowledge pack, never read memory, and pass an output guard. See
+  `docs/modules/public-mode.md`.
 
 ## 2. The module contract
 
@@ -229,6 +239,9 @@ build it from scratch:
   outbound-capable MCP tools bypass the approval gate above.
 - [`docs/modules/telegram.md`](modules/telegram.md) — fire-and-forget
   Telegram delivery layered on top of the console/macOS-notification path.
+- [`docs/modules/public-mode.md`](modules/public-mode.md) — a public link
+  through a Cloudflare named tunnel: pack-only chat and voice faces for
+  visitors, visit notes, owner pings, and optional owner sign-in.
 
 ## Hot-path caching
 

@@ -1,0 +1,980 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07111f">
+<meta name="robots" content="noindex">
+<title>Henry · talk</title>
+<link rel="manifest" href="/public/manifest.webmanifest">
+<link rel="icon" href="/public/icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    /* Henry's constellation palette (src/dashboard/page.ts). */
+    --bg:#07111f; --bg-deep:#030912; --panel:rgba(9,20,38,.72); --panel-2:rgba(12,28,52,.62);
+    --line:rgba(155,190,255,.18); --line-hot:rgba(38,230,255,.42);
+    --text:#eef7ff; --muted:#8aa4bf; --dim:#67839f;
+    --cyan:#26e6ff; --blue:#4e7dff; --violet:#8d5cff; --teal:#35efc3; --amber:#ffc857; --red:#ff7a92;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+    --sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --orb: clamp(220px, 40vmin, 360px);
+  }
+  * { box-sizing:border-box; }
+  html { background:var(--bg-deep); }
+  html, body { height:100%; }
+  body { margin:0; color:var(--text); font:14px/1.55 var(--sans); overflow:hidden; height:100dvh;
+    background:radial-gradient(120% 80% at 12% -8%,rgba(38,230,255,.10),transparent 60%),radial-gradient(100% 70% at 88% -4%,rgba(141,92,255,.13),transparent 62%),radial-gradient(120% 90% at 50% 108%,rgba(78,125,255,.08),transparent 60%),linear-gradient(180deg,var(--bg),var(--bg-deep) 70%); }
+  button, a { font:inherit; color:inherit; }
+  button { cursor:pointer; }
+  button:focus-visible, a:focus-visible { outline:2px solid var(--cyan); outline-offset:3px; }
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+
+  .app { height:100%; height:100dvh; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:20px; position:relative; }
+
+  .topbar { position:fixed; top:max(14px, env(safe-area-inset-top)); left:14px; right:14px; display:flex; align-items:center; justify-content:space-between; gap:10px; z-index:5; pointer-events:none; }
+  .topbar > * { pointer-events:auto; }
+  .nav { display:flex; gap:8px; }
+  .nav a { display:inline-flex; align-items:center; justify-content:center; min-height:44px; min-width:44px; padding:0 12px; border:1px solid var(--line); border-radius:11px; background:linear-gradient(180deg,var(--panel-2),var(--panel)); color:var(--muted); text-decoration:none; font:11px var(--mono); letter-spacing:.07em; text-transform:uppercase; }
+  .nav a:hover { color:var(--text); border-color:var(--line-hot); }
+  body.embed .nav { display:none; }
+
+  #mute { width:44px; height:44px; border-radius:12px; border:1px solid var(--line); background:linear-gradient(180deg,var(--panel-2),var(--panel)); display:grid; place-items:center; color:var(--muted); }
+  #mute:hover { color:var(--text); border-color:var(--line-hot); }
+  #mute[aria-pressed="true"] { background:rgba(255,200,87,.14); color:var(--amber); border-color:rgba(255,200,87,.45); }
+  #mute svg { width:18px; height:18px; }
+  /* Embedded in chat.html the parent's close button sits top-right: keep mute clear of it. */
+  body.embed .topbar { justify-content:flex-start; }
+
+  .badges { position:fixed; top:calc(max(14px, env(safe-area-inset-top)) + 50px); left:50%; transform:translateX(-50%); display:flex; gap:6px; flex-wrap:wrap; justify-content:center; z-index:4; }
+  body.embed .badges { top:max(14px, env(safe-area-inset-top)); }
+  .badge { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line); border-radius:99px; padding:3px 10px; color:var(--muted); font:10px var(--mono); letter-spacing:.1em; text-transform:uppercase; background:rgba(3,9,18,.6); }
+  .badge[hidden] { display:none; }
+  .badge.private { color:var(--amber); border-color:rgba(255,200,87,.45); }
+  .badge.writes { color:var(--violet); border-color:rgba(141,92,255,.5); }
+  .badge i { width:6px; height:6px; border-radius:50%; background:currentColor; }
+
+  #talk { position:relative; width:var(--orb); height:var(--orb); border-radius:50%; border:0; padding:0; background:transparent; display:grid; place-items:center; touch-action:manipulation; -webkit-tap-highlight-color:transparent; user-select:none; }
+  #talk canvas { position:absolute; inset:-40%; width:180%; height:180%; pointer-events:none; }
+  #talk .glyph { position:relative; width:calc(var(--orb) * .17); height:calc(var(--orb) * .17); color:var(--text); transition:transform .25s ease, color .25s ease; filter:drop-shadow(0 2px 8px rgba(0,0,0,.6)); }
+  #talk:hover .glyph { transform:scale(1.06); }
+  #talk[aria-pressed="true"] .glyph { color:#fff; }
+  #talk:focus-visible { outline:2px solid var(--cyan); outline-offset:8px; }
+  #talk:disabled { cursor:not-allowed; }
+  #talk:disabled .glyph { color:var(--dim); transform:none; }
+
+  .status { text-align:center; min-height:26px; position:relative; z-index:2; }
+  .status strong { display:block; font:600 clamp(16px,2.4vw,20px)/1.2 var(--sans); letter-spacing:-.01em; color:var(--muted); }
+  .status[data-mode="listening"] strong { color:var(--cyan); }
+  .status[data-mode="speaking"] strong, .status[data-mode="greeting"] strong { color:var(--teal); }
+  .status[data-mode="error"] strong { color:var(--red); }
+  #note { margin:6px auto 0; max-width:44ch; color:var(--dim); font-size:12.5px; }
+  #note:empty { display:none; }
+
+  .captions { width:min(680px,92vw); text-align:center; position:fixed; bottom:max(16px, env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; gap:6px; pointer-events:none; }
+  .captions[hidden] { display:none; }
+  #heard { font:12px/1.5 var(--mono); color:var(--muted); margin:0; max-width:60ch; overflow-wrap:anywhere; }
+  #heard:not(:empty)::before { content:"you · "; color:var(--dim); }
+  #reply { font:15px/1.5 var(--sans); color:var(--text); margin:0; max-width:60ch; overflow-wrap:anywhere; }
+
+  audio#audioPlayback { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); width:min(320px,90%); height:34px; filter:invert(.92) hue-rotate(180deg) saturate(.6); border-radius:999px; z-index:4; }
+  audio#audioPlayback[hidden] { display:none; }
+
+  @media (max-width:480px) { .nav a { padding:0 10px; } .badges { top:calc(max(14px, env(safe-area-inset-top)) + 48px); } }
+  @media (prefers-reduced-motion:reduce) { * { transition:none !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <nav class="nav" aria-label="Henry">
+      <a href="/public/chat">Chat</a>
+      <a href="/public/chat?ping=1" id="pingLink">Ping</a>
+    </nav>
+    <button id="mute" type="button" aria-pressed="false" aria-label="Mute Henry's voice">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M11 5 6 9H2v6h4l5 4z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+      </svg>
+    </button>
+  </div>
+
+  <div class="badges" aria-live="polite">
+    <span class="badge" id="ownerBadge"><i></i>Henry · public</span>
+  </div>
+
+  <button id="talk" type="button" aria-pressed="false" aria-label="Tap to talk">
+    <canvas id="orbCanvas" aria-hidden="true"></canvas>
+    <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><line x1="12" y1="18" x2="12" y2="22"></line><line x1="8" y1="22" x2="16" y2="22"></line>
+    </svg>
+  </button>
+
+  <div class="status" id="status" aria-live="polite"><strong id="state">Tap to talk</strong><p id="note"></p></div>
+
+  <div class="captions" id="captions">
+    <p id="heard"></p>
+    <p id="reply" aria-live="polite"></p>
+  </div>
+
+  <audio id="audioPlayback" preload="metadata" aria-label="Henry speech playback" controls hidden></audio>
+</div>
+
+<script src="/vendor/vad/bundle.min.js"></script>
+<script>
+/* ---------- The orb ----------
+ * Ported from Kelly's talk page with Henry's palette: layered translucent blobs whose outlines
+ * ripple with a few slow sines. `level` (0..1) comes from a live analyser on the microphone or on
+ * Henry's playback, so silence is calm and speech makes the rings swell. One
+ * requestAnimationFrame, paused when the tab is hidden; a still ring under reduced motion.
+ */
+const HenryOrb = (() => {
+  const BLOBS = [
+    { rgb:[38,230,255],  base:.66, k:[.10,.06,.04], f:[3,5,2],  s:[.55,-.37,.23], p:0.0, drift:.11 },
+    { rgb:[78,125,255],  base:.56, k:[.08,.05,.05], f:[2,4,7],  s:[-.41,.29,.19], p:1.9, drift:-.09 },
+    { rgb:[53,239,195],  base:.48, k:[.09,.07,.03], f:[4,3,6],  s:[.33,-.51,.27], p:3.3, drift:.14 },
+    { rgb:[141,92,255],  base:.42, k:[.07,.06,.05], f:[5,2,3],  s:[-.29,.44,-.21], p:4.7, drift:-.12 },
+    { rgb:[255,122,146], base:.34, k:[.06,.05,.04], f:[3,6,4],  s:[.47,.25,-.36], p:0.8, drift:.08 },
+  ];
+  const MOOD = {
+    idle:         { alpha:[.50,.42,.34,.44,.10], scale:.86, wobble:.35, spin:.25 },
+    recording:    { alpha:[.74,.56,.40,.34,.12], scale:1.0, wobble:1.0, spin:.6 },
+    transcribing: { alpha:[.34,.58,.30,.62,.10], scale:.82, wobble:.25, spin:1.8 },
+    speaking:     { alpha:[.34,.30,.84,.54,.10], scale:.95, wobble:.9, spin:.5 },
+    error:        { alpha:[.26,.22,.10,.14,.95], scale:.9, wobble:.2, spin:.2 },
+  };
+  function mount(canvas) {
+    const ctx = canvas.getContext('2d');
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let state = 'idle', level = 0, shown = 0, raf = 0, t0 = performance.now(), errorAt = -1, alive = true;
+    const mix = { alpha:[...MOOD.idle.alpha], scale:MOOD.idle.scale, wobble:MOOD.idle.wobble, spin:MOOD.idle.spin };
+    function fit() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const size = Math.max(1, Math.round(rect.width));
+      canvas.width = Math.round(size * dpr); canvas.height = Math.round(size * dpr);
+    }
+    const ro = 'ResizeObserver' in window ? new ResizeObserver(fit) : null; ro?.observe(canvas); fit();
+    function blobPath(cx, cy, r, b, t, wobble, spin) {
+      ctx.beginPath();
+      const steps = 72, rot = t * b.drift * spin;
+      for (let i = 0; i <= steps; i++) {
+        const a = (i / steps) * Math.PI * 2 + rot;
+        let d = 0;
+        for (let j = 0; j < 3; j++) d += b.k[j] * wobble * Math.sin(b.f[j] * a + t * b.s[j] * 2.2 + b.p);
+        const rr = r * (1 + d);
+        const x = cx + Math.cos(a) * rr, y = cy + Math.sin(a) * rr;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.closePath();
+    }
+    function frame(now) {
+      if (!alive) return;
+      raf = 0;
+      const t = (now - t0) / 1000;
+      shown += (level - shown) * (level > shown ? .38 : .07);
+      const mood = MOOD[state] || MOOD.idle;
+      for (let i = 0; i < 5; i++) mix.alpha[i] += (mood.alpha[i] - mix.alpha[i]) * .06;
+      mix.scale += (mood.scale - mix.scale) * .06; mix.wobble += (mood.wobble - mix.wobble) * .08; mix.spin += (mood.spin - mix.spin) * .05;
+      const W = canvas.width, c = W / 2, R = W / 3.6;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, W);
+      const breath = reduced ? 0 : Math.sin(t * (Math.PI * 2 / 4.2)) * .025;
+      const live = state === 'recording' || state === 'speaking' ? shown : 0;
+      const scale = mix.scale * (1 + breath + live * .24);
+      const errorFlash = errorAt >= 0 ? Math.max(0, 1 - (t - errorAt) / .9) : 0;
+      ctx.globalCompositeOperation = 'screen';
+      ctx.filter = 'blur(' + (W * (reduced ? .012 : .016)) + 'px)';
+      for (let i = 0; i < 5; i++) {
+        const b = BLOBS[i];
+        const a = Math.min(1, mix.alpha[i] + (i === 4 ? errorFlash : 0) + live * (i < 2 ? .15 : i === 2 ? .12 : .06));
+        if (a < .02) continue;
+        const wobble = reduced ? 0 : mix.wobble + live * 1.6;
+        const r = R * (.78 + .07 * i) * scale * (1 + (reduced ? 0 : .02 * Math.sin(t * .8 + i)));
+        const swing = R * (.12 + .10 * mix.spin + live * .08);
+        const ox = reduced ? 0 : Math.cos(t * .35 + b.p) * swing, oy = reduced ? 0 : Math.sin(t * .29 + b.p) * swing;
+        const g = ctx.createRadialGradient(c + ox, c + oy, r * .4, c + ox, c + oy, r);
+        g.addColorStop(0, 'rgba(' + b.rgb + ',' + (a * .35) + ')'); g.addColorStop(.62, 'rgba(' + b.rgb + ',' + a + ')'); g.addColorStop(1, 'rgba(' + b.rgb + ',0)');
+        ctx.fillStyle = g;
+        blobPath(c + ox, c + oy, r, b, reduced ? 0 : t, wobble, mix.spin);
+        ctx.fill();
+      }
+      ctx.filter = 'none';
+      if (state === 'transcribing' && !reduced && ctx.createConicGradient) {
+        const g = ctx.createConicGradient(t * 3.2, c, c);
+        g.addColorStop(0, 'rgba(78,125,255,0)'); g.addColorStop(.7, 'rgba(78,125,255,0)'); g.addColorStop(.92, 'rgba(38,230,255,.9)'); g.addColorStop(1, 'rgba(78,125,255,0)');
+        ctx.strokeStyle = g; ctx.lineWidth = W * .012; ctx.beginPath(); ctx.arc(c, c, R * .9 * scale, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+      const inner = R * .52 * (1 + live * .06);
+      const disc = ctx.createRadialGradient(c, c - inner * .3, inner * .1, c, c, inner);
+      disc.addColorStop(0, 'rgba(12,28,52,.97)'); disc.addColorStop(1, 'rgba(3,9,18,.95)');
+      ctx.fillStyle = disc; ctx.beginPath(); ctx.arc(c, c, inner, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = state === 'recording' ? 'rgba(38,230,255,' + (.35 + live * .5) + ')' : 'rgba(155,190,255,.14)'; ctx.lineWidth = Math.max(1, W * .004); ctx.stroke();
+      if (!reduced || state !== 'idle') raf = requestAnimationFrame(frame);
+    }
+    function kick() { if (!raf && alive && !document.hidden) raf = requestAnimationFrame(frame); }
+    document.addEventListener('visibilitychange', () => { if (document.hidden) { cancelAnimationFrame(raf); raf = 0; } else kick(); });
+    kick();
+    return {
+      setState(next) {
+        if (next === 'error') { errorAt = (performance.now() - t0) / 1000; next = 'idle'; }
+        state = next in MOOD ? next : 'idle';
+        if (state !== 'recording' && state !== 'speaking') level = 0;
+        kick();
+      },
+      setLevel(v) { level = Math.max(0, Math.min(1, Number(v) || 0)); kick(); },
+      get state() { return state; },
+      destroy() { alive = false; cancelAnimationFrame(raf); ro?.disconnect(); },
+    };
+  }
+  return { mount };
+})();
+window.HenryOrb = HenryOrb;
+
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const talkBtn = $('talk'), status = $('status'), stateEl = $('state'), noteEl = $('note');
+  const muteBtn = $('mute');
+  const captionsEl = $('captions'), heardEl = $('heard'), replyEl = $('reply');
+  const ownerBadge = $('ownerBadge');
+  const playback = $('audioPlayback');
+  const orb = HenryOrb.mount($('orbCanvas'));
+
+  const TARGET_RATE = 16000;
+
+  /* Testing hook: every timing constant and threshold is overridable so a headless run
+     (fake microphone, no real silence) can drive the state machine deterministically. */
+  const testing = {
+    speechMs: 250,
+    silenceMs: 700,
+    longSilenceMs: 1400,
+    longSilenceAfterMs: 4000,
+    hardCapMs: 25000,
+    repromptMs: 8000,
+    sleepMs: 15000,
+    rearmMs: 300,
+    fillerMs: 1200,
+    secondFillerMs: 12000,
+    toolFillerMs: 300,
+    preSpeechPadMs: 300,
+    sileroPositive: .55,
+    sileroNegative: .35,
+    speechThreshold: .12,
+    silenceThreshold: .06,
+    floor: .008,
+    levelOverride: null,
+    get vadMode() { return vadMode; },
+    get micActive() { return !!(stream && stream.getTracks().some(t => t.readyState === 'live')); },
+    get fillersPlayed() { return fillersPlayed; },
+    get vadRunning() { return sileroRunning; },
+    get voiceStatus() { return voiceStatus; },
+  };
+  window.HenryTalk = {
+    testing,
+    get state() { return state; },
+  };
+
+  const params = new URLSearchParams(location.search);
+
+  /* ---------- captions: on by default (the owner reads too); ?captions=0 hides them ---------- */
+  const captionsOn = params.get('captions') !== '0';
+  captionsEl.hidden = !captionsOn;
+  function clearCaptions() { heardEl.textContent = ''; replyEl.textContent = ''; }
+  function setHeard(text) { heardEl.textContent = text || ''; }
+  function setReply(text) { replyEl.textContent = text || ''; }
+  function setNote(text) { noteEl.textContent = text || ''; }
+
+  /* ---------- mute ---------- */
+  let muted = false;
+  try { muted = localStorage.getItem('henry.public.talk.muted') === '1'; } catch {}
+  function applyMuted() {
+    muteBtn.setAttribute('aria-pressed', String(muted));
+    muteBtn.setAttribute('aria-label', muted ? "Unmute Henry's voice" : "Mute Henry's voice");
+  }
+  applyMuted();
+  muteBtn.addEventListener('click', () => {
+    muted = !muted;
+    try { localStorage.setItem('henry.public.talk.muted', muted ? '1' : '0'); } catch {}
+    applyMuted();
+  });
+
+  /* ---------- public face status: the server's /api/public/config ---------- */
+  let voiceStatus = null;
+  const canSpeak = () => !muted && !(voiceStatus && voiceStatus.ttsEnabled === false);
+  function applyStatus(config) {
+    const owner = (config && typeof config.ownerName === 'string' && config.ownerName.trim()) || 'the owner';
+    ownerBadge.lastChild.textContent = owner + "'s AI twin";
+    $('pingLink').textContent = 'Ping ' + (owner.split(/\s+/)[0] || owner);
+    if (!config.ping) $('pingLink').hidden = true;
+    const voice = config.voice || {};
+    voiceStatus = { available: config.available !== false && voice.stt !== false, ttsEnabled: voice.tts !== false };
+    if (config.available === false) {
+      talkBtn.disabled = true;
+      setState('error', 'Not published yet');
+      setNote("Henry's public profile isn't published yet. Please check back soon.");
+    } else if (voice.stt === false) {
+      talkBtn.disabled = true;
+      setState('error', 'Voice is off');
+      setNote('Voice is not available right now. You can chat by text instead.');
+    } else {
+      talkBtn.disabled = false;
+      if (state === 'idle' || state === 'error') setState('idle', 'Tap to talk');
+      setNote(voice.tts === false ? 'Henry can hear you; replies appear as captions.' : '');
+    }
+  }
+  const statusReady = fetch('/api/public/config', { credentials: 'same-origin' })
+    .then((r) => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    .then(applyStatus)
+    .catch(() => { setNote("Couldn't reach Henry. You can still try."); });
+
+  /* ---------- state ---------- */
+  let state = 'idle'; // idle | greeting | listening | thinking | speaking | error
+  let sessionId = 0, sessionActive = false, sessionTurns = 0;
+
+  /* ---------- the conversation lives server-side, keyed by the visitor cookie ---------- */
+  let stream = null, mimeType = null;
+  let meterCtx = null, analyser = null;
+  let playCtx = null, playAnalyser = null, playRaf = 0;
+  let listenRaf = 0;
+  let capturing = false, recorder = null, chunks = [], recordingStartedAt = 0;
+  let speechSince = 0, silenceSince = 0;
+  let lastActivityAt = 0, repromptedYet = false, repromptAt = 0;
+  let playbackBusy = false;
+  let speaking = false, speakAbort = null, playQueue = [], playingUrl = null, activePlaybackAbort = null;
+  let vadMode = 'energy', sileroVad = null;
+  let sileroSpeechAt = 0, sileroLong = false, sileroDiscard = false, sileroRunning = false;
+  let fillerTimers = [], fillerDone = Promise.resolve(), fillersPlayed = 0;
+  let turnCounter = 0, turnSpeech = null, chatAbort = null;
+
+  function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+  function paintOrb() {
+    let mood = 'idle';
+    if (state === 'listening') mood = capturing ? 'recording' : 'idle';
+    else if (state === 'thinking') mood = 'transcribing';
+    else if (state === 'speaking' || state === 'greeting') mood = 'speaking';
+    else if (state === 'error') mood = 'error';
+    orb.setState(mood);
+  }
+  function setState(next, label) {
+    state = next;
+    status.dataset.mode = next;
+    if (label != null) stateEl.textContent = label;
+    paintOrb();
+  }
+  function setCapturing(value) { capturing = value; paintOrb(); }
+
+  /* ---------- mic level metering ---------- */
+  function startMeter() {
+    try {
+      meterCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = meterCtx.createAnalyser(); analyser.fftSize = 512; analyser.smoothingTimeConstant = .5;
+      meterCtx.createMediaStreamSource(stream).connect(analyser);
+      if (meterCtx.state === 'suspended') meterCtx.resume().catch(() => {});
+    } catch { meterCtx = null; analyser = null; }
+  }
+  function stopMeter() {
+    if (meterCtx) { const old = meterCtx; meterCtx = null; analyser = null; old.close().catch(() => {}); }
+  }
+  function readLevel() {
+    if (testing.levelOverride != null) return testing.levelOverride;
+    if (!analyser) return 0;
+    const buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
+    return Math.max(0, Math.min(1, (rms - testing.floor) / .16));
+  }
+
+  /* ---------- playback metering (greeting, reprompt, fillers, and chunked replies share this) ---------- */
+  function ensurePlayMeter() {
+    if (playAnalyser) return;
+    try {
+      playCtx = playCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (playCtx.state !== 'running') { playCtx.resume().catch(() => {}); if (playCtx.state !== 'running') return; }
+      const source = playCtx.createMediaElementSource(playback);
+      playAnalyser = playCtx.createAnalyser(); playAnalyser.fftSize = 512; playAnalyser.smoothingTimeConstant = .6;
+      source.connect(playAnalyser); playAnalyser.connect(playCtx.destination);
+    } catch { playAnalyser = null; }
+  }
+  function meterFrom(sourceAnalyser, target, floor, span) {
+    const buffer = new Float32Array(sourceAnalyser.fftSize);
+    return () => {
+      sourceAnalyser.getFloatTimeDomainData(buffer);
+      let sum = 0; for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
+      const rms = Math.sqrt(sum / buffer.length);
+      target(Math.sqrt(Math.max(0, Math.min(1, (rms - floor) / span))));
+    };
+  }
+  function startPlayMeter() {
+    cancelAnimationFrame(playRaf);
+    const read = playAnalyser ? meterFrom(playAnalyser, (v) => orb.setLevel(v), .01, .22) : null;
+    const t0 = performance.now();
+    const tick = () => {
+      if (playback.paused || playback.ended) { orb.setLevel(0); return; }
+      if (read) read(); else orb.setLevel(.35 + .3 * Math.abs(Math.sin((performance.now() - t0) / 260)));
+      playRaf = requestAnimationFrame(tick);
+    };
+    playRaf = requestAnimationFrame(tick);
+  }
+  playback.onplay = () => { playCtx?.resume?.().catch(() => {}); startPlayMeter(); };
+
+  /* ---------- single-file playback: greeting, reprompt, fillers ---------- */
+  function playSingle(blob) {
+    return new Promise((resolve) => {
+      if (playingUrl) { URL.revokeObjectURL(playingUrl); playingUrl = null; }
+      playingUrl = URL.createObjectURL(blob);
+      playback.src = playingUrl;
+      let done = false;
+      const finish = () => {
+        if (done) return; done = true; activePlaybackAbort = null;
+        if (playingUrl) { URL.revokeObjectURL(playingUrl); playingUrl = null; }
+        playback.onended = playback.onerror = null;
+        playback.hidden = true;
+        resolve();
+      };
+      activePlaybackAbort = finish;
+      playback.onended = finish;
+      playback.onerror = finish;
+      playback.play().then(() => { playback.hidden = true; }).catch((error) => {
+        if (error && error.name === 'NotAllowedError') { playback.hidden = false; }
+        else finish();
+      });
+    });
+  }
+  async function playPrompt(kind) {
+    playbackBusy = true;
+    try {
+      if (canSpeak()) {
+        const response = await fetch('/api/public/voice/' + kind, { credentials: 'same-origin' });
+        if (response.ok) {
+          const blob = await response.blob();
+          if (blob.size > 44) await playSingle(blob);
+        }
+      }
+    } catch {}
+    playbackBusy = false;
+    await sleep(testing.rearmMs);
+  }
+
+  /* ---------- chunked reply playback: application/x-henry-wav-seq ---------- */
+  function stopSpeaking() {
+    speakAbort?.abort(); speakAbort = null;
+    activePlaybackAbort?.(); activePlaybackAbort = null;
+    playQueue = [];
+    cancelAnimationFrame(playRaf); orb.setLevel(0);
+    playback.onended = playback.onerror = null;
+    playback.pause(); playback.removeAttribute('src'); playback.load(); playback.hidden = true;
+    if (playingUrl) { URL.revokeObjectURL(playingUrl); playingUrl = null; }
+    speaking = false;
+  }
+  function playNextFrame() {
+    if (!playQueue.length) return;
+    const blob = playQueue.shift();
+    playingUrl = URL.createObjectURL(blob);
+    playback.src = playingUrl;
+    playback.onended = () => { URL.revokeObjectURL(playingUrl); playingUrl = null; playNextFrame(); };
+    playback.onerror = () => {};
+    playback.play().catch((error) => { if (error.name === 'NotAllowedError') playback.hidden = false; });
+  }
+  function queueFrame(blob) {
+    const wasEmpty = playQueue.length === 0 && !playingUrl;
+    playQueue.push(blob);
+    if (wasEmpty) playNextFrame();
+  }
+  async function readFramed(reader) {
+    let buf = new Uint8Array(0);
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (value) {
+        const merged = new Uint8Array(buf.length + value.length);
+        merged.set(buf); merged.set(value, buf.length); buf = merged;
+      }
+      while (buf.length >= 4) {
+        const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0, false);
+        if (buf.length < 4 + len) break;
+        const frame = buf.slice(4, 4 + len);
+        buf = buf.slice(4 + len);
+        queueFrame(new Blob([frame], { type: 'audio/wav' }));
+      }
+      if (done) break;
+    }
+  }
+  /* ---------- reply speech: one queue per turn ----------
+     A turn can send more than one spoken line (an acknowledgement, then the answer). Lines play
+     in order and never cut each other off; the mic stays off until the turn is finished AND the
+     queue is empty (half-duplex); between lines the orb shows Thinking. A press while Henry
+     speaks drops the rest of the turn (abortTurn). */
+  function beginTurnSpeech(id, turn) { turnSpeech = { id, turn, queue: [], running: false, done: false, spoke: false }; }
+  function turnIsCurrent(t) { return !!t && t === turnSpeech && t.id === sessionId && t.turn === turnCounter; }
+  function queueSpeech(turn, line) {
+    const t = turnSpeech;
+    if (!t || t.turn !== turn) return;
+    cancelFillers();
+    if (line && line.replyId && line.text && line.text.trim()) t.queue.push(line);
+    void drainSpeech(t);
+  }
+  function finishTurnSpeech(turn) {
+    const t = turnSpeech;
+    if (!t || t.turn !== turn) return;
+    t.done = true;
+    void drainSpeech(t);
+  }
+  async function drainSpeech(t) {
+    if (t.running) return;
+    t.running = true;
+    try {
+      while (t.queue.length && turnIsCurrent(t)) {
+        const line = t.queue.shift();
+        t.spoke = true;
+        const finished = await speakOnce(line);
+        if (!finished) return; // interrupted: abortTurn already moved on
+      }
+    } finally { t.running = false; }
+    if (!turnIsCurrent(t)) return;
+    if (t.queue.length) { void drainSpeech(t); return; }
+    if (!t.done) { if (state === 'speaking') setState('thinking', 'Thinking'); return; }
+    await fillerDone;
+    if (turnIsCurrent(t) && (state === 'speaking' || state === 'thinking')) { turnSpeech = null; enterListening(true); }
+  }
+  /** Speaks one reply (by the id the server gave it); resolves true when it played to the end, false when interrupted. */
+  async function speakOnce(line) {
+    await fillerDone;
+    stopSpeaking();
+    ensurePlayMeter();
+    speaking = true; speakAbort = new AbortController();
+    setState('speaking', 'Speaking');
+    setReply(line.text);
+    try {
+      const response = await fetch('/api/public/voice/speak', {
+        method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ replyId: line.replyId }), signal: speakAbort.signal,
+      });
+      if (!response.ok) { let data = {}; try { data = await response.json(); } catch {} throw new Error(data.error || 'Speech is unavailable.'); }
+      const ct = response.headers.get('content-type') || '';
+      if (ct.includes('application/x-henry-wav-seq') && response.body) await readFramed(response.body.getReader());
+      else { const audio = await response.blob(); if (audio.size > 44) queueFrame(audio); }
+      await new Promise((resolve) => {
+        const originalOnEnded = playback.onended;
+        playback.onended = () => { originalOnEnded?.(); if (!playQueue.length) { speaking = false; resolve(); } };
+        const check = () => { if (!playQueue.length && (playback.paused || playback.ended) && !speaking) return resolve(); requestAnimationFrame(check); };
+        check();
+      });
+      return true;
+    } catch (error) {
+      speaking = false;
+      // Interrupted by a press, or the line could not be synthesised: either way the turn goes on.
+      return !(error && error.name === 'AbortError');
+    }
+  }
+  /** Drops whatever the current turn still had to say or stream. */
+  function abortTurn() {
+    turnCounter++;
+    turnSpeech = null;
+    try { chatAbort?.abort(); } catch {}
+    chatAbort = null;
+    cancelFillers();
+  }
+
+  /* ---------- WAV encoding: mono 16-bit PCM at 16 kHz ---------- */
+  function resample(input, fromRate) {
+    if (fromRate === TARGET_RATE) return input;
+    const ratio = fromRate / TARGET_RATE, length = Math.floor(input.length / ratio), output = new Float32Array(length);
+    for (let i = 0; i < length; i++) {
+      const start = Math.floor(i * ratio), end = Math.max(start + 1, Math.floor((i + 1) * ratio));
+      let sum = 0; for (let j = start; j < end && j < input.length; j++) sum += input[j];
+      output[i] = sum / (end - start);
+    }
+    return output;
+  }
+  function toWav(parts, fromRate) {
+    const size = parts.reduce((total, part) => total + part.length, 0), joined = new Float32Array(size);
+    let offset = 0; for (const part of parts) { joined.set(part, offset); offset += part.length; }
+    const floats = resample(joined, fromRate);
+    const buffer = new ArrayBuffer(44 + floats.length * 2), view = new DataView(buffer);
+    const write = (at, text) => { for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i)); };
+    write(0, 'RIFF'); view.setUint32(4, 36 + floats.length * 2, true); write(8, 'WAVE'); write(12, 'fmt '); view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, TARGET_RATE, true); view.setUint32(28, TARGET_RATE * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); write(36, 'data'); view.setUint32(40, floats.length * 2, true);
+    for (let i = 0; i < floats.length; i++) { const sample = Math.max(-1, Math.min(1, floats[i])); view.setInt16(44 + i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true); }
+    return new Blob([buffer], { type: 'audio/wav' });
+  }
+
+  /* ---------- listening watchdog: energy VAD speech onset/offset, plus the shared
+     reprompt/sleep silence timers that also apply when Silero drives speech events ---------- */
+  function listenLoop() {
+    listenRaf = 0;
+    if (state !== 'listening') return;
+    const now = performance.now();
+    if (!playbackBusy) {
+      const level = readLevel();
+      orb.setLevel(level);
+      if (vadMode === 'silero') {
+        if (sileroSpeechAt) {
+          const duration = now - sileroSpeechAt;
+          // Long requests get the longer end-of-turn window, switched mid-utterance.
+          if (!sileroLong && duration > testing.longSilenceAfterMs) { sileroLong = true; try { sileroVad.setOptions({ redemptionMs: testing.longSilenceMs }); } catch {} }
+          if (duration >= testing.hardCapMs) {
+            // Submits the speech so far (onSpeechEnd moves to thinking). If Silero held no
+            // speech after all, listening simply carries on.
+            listenRaf = 0;
+            void sileroSubmitNow().then(() => {
+              if (state !== 'listening') return;
+              sileroSpeechAt = 0; setCapturing(false); void resumeVad();
+              if (!listenRaf) listenRaf = requestAnimationFrame(listenLoop);
+            });
+            return;
+          }
+        }
+      } else {
+        if (capturing) {
+          const duration = now - recordingStartedAt;
+          const silenceLimit = duration > testing.longSilenceAfterMs ? testing.longSilenceMs : testing.silenceMs;
+          if (level >= testing.speechThreshold) silenceSince = 0;
+          else { if (!silenceSince) silenceSince = now; if (now - silenceSince >= silenceLimit) { endCapture(); return; } }
+          if (duration >= testing.hardCapMs) { endCapture(); return; }
+        } else {
+          if (level >= testing.speechThreshold) {
+            if (!speechSince) speechSince = now;
+            if (now - speechSince >= testing.speechMs) beginCapture();
+          } else speechSince = 0;
+        }
+      }
+      if (!capturing) {
+        if (!repromptedYet) {
+          if (now - lastActivityAt >= testing.repromptMs) { triggerReprompt(); return; }
+        } else if (now - repromptAt >= testing.sleepMs) { endSessionSilently(); return; }
+      }
+    } else {
+      orb.setLevel(0);
+    }
+    listenRaf = requestAnimationFrame(listenLoop);
+  }
+  function enterListening(resetWatchdog) {
+    setState('listening', 'Listening');
+    setCapturing(false);
+    speechSince = 0; silenceSince = 0;
+    if (resetWatchdog) { lastActivityAt = performance.now(); repromptedYet = false; repromptAt = 0; }
+    void resumeVad();
+    if (!listenRaf) listenRaf = requestAnimationFrame(listenLoop);
+  }
+  async function triggerReprompt() {
+    const id = sessionId;
+    repromptedYet = true;
+    stateEl.textContent = 'Still there?';
+    await pauseVad();
+    await playPrompt('reprompt');
+    if (id !== sessionId || state !== 'listening') return;
+    repromptAt = performance.now();
+    stateEl.textContent = 'Listening';
+    void resumeVad();
+    if (!listenRaf) listenRaf = requestAnimationFrame(listenLoop);
+  }
+  async function endSessionSilently() {
+    const id = sessionId;
+    await chime();
+    if (id !== sessionId) return;
+    teardownSession('sleep');
+  }
+  function chime() {
+    return new Promise((resolve) => {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator(), gain = ctx.createGain();
+        osc.type = 'sine'; osc.frequency.value = 440;
+        gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.start(); osc.stop(ctx.currentTime + 0.55);
+        osc.onended = () => { ctx.close().catch(() => {}); resolve(); };
+      } catch { resolve(); }
+    });
+  }
+
+  /* ---------- energy-VAD capture: one MediaRecorder per utterance on the session's stream ---------- */
+  function beginCapture() {
+    setCapturing(true);
+    recordingStartedAt = performance.now(); silenceSince = 0; chunks = [];
+    const id = sessionId;
+    try {
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      recorder.ondataavailable = (event) => { if (id === sessionId && event.data.size) chunks.push(event.data); };
+      recorder.onstop = () => { if (id === sessionId) void handleCaptureStop(id); };
+      recorder.start(250);
+    } catch { setCapturing(false); }
+  }
+  function endCapture() {
+    if (!capturing) return;
+    setCapturing(false);
+    setState('thinking', 'Thinking');
+    try { if (recorder && recorder.state !== 'inactive') recorder.stop(); else void handleCaptureStop(sessionId); }
+    catch { void handleCaptureStop(sessionId); }
+  }
+  async function handleCaptureStop(id) {
+    if (id !== sessionId) return;
+    const encoded = new Blob(chunks, { type: recorder?.mimeType || 'audio/webm' });
+    chunks = [];
+    if (!encoded.size) { if (id === sessionId) enterListening(false); return; }
+    try {
+      const decoder = new (window.AudioContext || window.webkitAudioContext)();
+      const decoded = await decoder.decodeAudioData(await encoded.arrayBuffer());
+      if (id !== sessionId) { decoder.close().catch(() => {}); return; }
+      const mono = new Float32Array(decoded.length);
+      for (let channel = 0; channel < decoded.numberOfChannels; channel++) {
+        const samples = decoded.getChannelData(channel);
+        for (let i = 0; i < mono.length; i++) mono[i] += samples[i] / decoded.numberOfChannels;
+      }
+      await decoder.close();
+      if (!decoded.length) { enterListening(false); return; }
+      await transcribeAndRespond(id, toWav([mono], decoded.sampleRate));
+    } catch { if (id === sessionId) enterListening(false); }
+  }
+  async function transcribeAndRespond(id, wavBlob) {
+    try {
+      const response = await fetch('/api/public/voice/transcribe', {
+        method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'audio/wav' }, body: wavBlob,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Transcription failed.');
+      const text = (data.text || '').trim();
+      if (id !== sessionId) return;
+      setHeard(text);
+      if (!text) { enterListening(false); return; }
+      sessionTurns++;
+      await sendPrompt(id, text);
+    } catch (error) {
+      if (id !== sessionId) return;
+      setReply("I didn't catch that. " + (error && error.message ? error.message : ''));
+      enterListening(false);
+    }
+  }
+
+  /* ---------- Silero VAD (vad-web 0.0.31); the energy VAD above is the fallback ----------
+     The library's defaults would open a second microphone and stop its tracks on pause, which
+     would also kill the recorder and meter. So it is handed the session's one stream through
+     getStream/resumeStream, pauseStream is a no-op, and it shares the meter's AudioContext. It
+     runs only while listening and is paused whenever Henry speaks (half-duplex). Timing is in
+     milliseconds in this version (minSpeechMs, redemptionMs, preSpeechPadMs); redemptionMs is
+     switched from the short to the long window mid-utterance by listenLoop, and the hard cap
+     submits the speech so far by pausing with submitUserSpeechOnPause. */
+  function onSileroSpeechStart() {
+    if (state !== 'listening') return;
+    sileroSpeechAt = performance.now(); sileroLong = false;
+    try { sileroVad.setOptions({ redemptionMs: testing.silenceMs }); } catch {}
+  }
+  function onSileroSpeechRealStart() {
+    if (state !== 'listening') return;
+    setCapturing(true);
+  }
+  function onSileroMisfire() { sileroSpeechAt = 0; if (state === 'listening') setCapturing(false); }
+  async function onSileroSpeechEnd(audio) {
+    sileroSpeechAt = 0;
+    if (sileroDiscard || state !== 'listening') return;
+    setCapturing(false);
+    const id = sessionId;
+    setState('thinking', 'Thinking');
+    await pauseVad();
+    try { await transcribeAndRespond(id, toWav([audio], TARGET_RATE)); }
+    catch { if (id === sessionId) enterListening(false); }
+  }
+  async function sileroSubmitNow() {
+    if (!sileroVad || !sileroRunning) return;
+    sileroDiscard = false; sileroRunning = false;
+    try { await sileroVad.pause(); } catch {}
+  }
+  async function pauseVad() {
+    if (vadMode !== 'silero' || !sileroVad || !sileroRunning) return;
+    sileroRunning = false; sileroDiscard = true; sileroSpeechAt = 0;
+    try { await sileroVad.pause(); } catch {}
+    sileroDiscard = false;
+  }
+  async function resumeVad() {
+    if (vadMode !== 'silero' || !sileroVad || sileroRunning || state !== 'listening') return;
+    sileroRunning = true;
+    try { await sileroVad.start(); } catch { sileroRunning = false; vadMode = 'energy'; }
+  }
+  async function initVad() {
+    vadMode = 'energy'; sileroVad = null; sileroRunning = false;
+    if (!window.vad || !window.vad.MicVAD) return;
+    try {
+      const shared = stream;
+      const instance = await window.vad.MicVAD.new({
+        model: 'v5',
+        baseAssetPath: '/vendor/vad/',
+        onnxWASMBasePath: '/vendor/vad/',
+        startOnLoad: false,
+        getStream: async () => shared,
+        resumeStream: async () => shared,
+        pauseStream: async () => {},
+        ...(meterCtx ? { audioContext: meterCtx } : {}),
+        positiveSpeechThreshold: testing.sileroPositive,
+        negativeSpeechThreshold: testing.sileroNegative,
+        minSpeechMs: testing.speechMs,
+        preSpeechPadMs: testing.preSpeechPadMs,
+        redemptionMs: testing.silenceMs,
+        submitUserSpeechOnPause: true,
+        onSpeechStart: onSileroSpeechStart,
+        onSpeechRealStart: onSileroSpeechRealStart,
+        onVADMisfire: onSileroMisfire,
+        onSpeechEnd: onSileroSpeechEnd,
+      });
+      if (stream !== shared) { try { await instance.destroy(); } catch {} return; }
+      sileroVad = instance;
+      vadMode = 'silero';
+    } catch { vadMode = 'energy'; sileroVad = null; }
+  }
+
+  /* ---------- holding phrases while a model turn runs ----------
+     Only a turn that is actually gathering information hears one: the server sends a `gathering`
+     SSE event when the request clearly asks for research or a lookup (reason "request") or when
+     the model starts a command, tool call, or web search (reason "tool"). Chit-chat never gets
+     that event, so it never hears a filler; the orb just shows Thinking. The first phrase (v=0)
+     plays fillerMs after a "request" event (toolFillerMs after "tool"); the second (v=1) keeps
+     the same spacing after it. The reply waits for a phrase already playing rather than cutting
+     it off mid-word. */
+  function cancelFillers() { fillerTimers.forEach(clearTimeout); fillerTimers = []; }
+  function scheduleFillers(id, firstDelay) {
+    cancelFillers();
+    if (!canSpeak()) return;
+    [firstDelay, firstDelay + Math.max(0, testing.secondFillerMs - testing.fillerMs)].forEach((delay, phrase) => {
+      fillerTimers.push(setTimeout(() => {
+        if (id !== sessionId || state !== 'thinking') return;
+        fillerDone = (async () => {
+          try {
+            const response = await fetch('/api/public/voice/filler?v=' + phrase, { credentials: 'same-origin' });
+            if (!response.ok || id !== sessionId || state !== 'thinking') return;
+            const blob = await response.blob();
+            if (blob.size <= 44 || id !== sessionId || state !== 'thinking') return;
+            fillersPlayed++;
+            await playSingle(blob);
+          } catch {}
+        })();
+      }, delay));
+    });
+  }
+
+  /* ---------- chat turn: SSE status / gathering / done / error ---------- */
+  async function sendPrompt(id, prompt) {
+    let gatheringSeen = false;
+    const turn = ++turnCounter;
+    if (id !== sessionId || turn !== turnCounter) return;
+    beginTurnSpeech(id, turn);
+    cancelFillers(); // a holding phrase only once the server says this turn is waiting
+    chatAbort = new AbortController();
+    const stale = () => id !== sessionId || turn !== turnCounter;
+    try {
+      const response = await fetch('/api/public/chat', {
+        method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: prompt, voice: true }), signal: chatAbort.signal,
+      });
+      if (!response.ok) { let data = {}; try { data = await response.json(); } catch {} throw new Error(data.error || 'Henry could not answer.'); }
+      const reader = response.body.getReader(), decoder = new TextDecoder(); let pending = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (stale()) { try { await reader.cancel(); } catch {} return; }
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        const blocks = pending.split('\n\n'); pending = blocks.pop();
+        for (const block of blocks) {
+          const ev = block.match(/^event: (.+)$/m)?.[1], raw = block.match(/^data: (.+)$/m)?.[1]; if (!raw) continue;
+          let data; try { data = JSON.parse(raw); } catch { continue; }
+          if (stale()) return;
+          if (ev === 'gathering') {
+            if (!gatheringSeen) { gatheringSeen = true; scheduleFillers(id, testing.fillerMs); }
+          } else if (ev === 'done') {
+            cancelFillers();
+            const text = data.spoken || data.response || '';
+            if (canSpeak() && data.replyId) queueSpeech(turn, { replyId: data.replyId, text });
+            else setReply(text);
+            finishTurnSpeech(turn);
+          } else if (ev === 'error') throw new Error(data.error || 'Henry could not answer.');
+        }
+      }
+    } catch (error) {
+      if (stale()) return;
+      abortTurn();
+      stateEl.textContent = 'Sorry';
+      setReply(error && error.message ? error.message : 'Something went wrong.');
+      await sleep(1500);
+      if (id === sessionId && (state === 'thinking' || state === 'speaking')) enterListening(true);
+    }
+  }
+
+  /* ---------- session lifecycle ---------- */
+  async function startSession() {
+    if (sessionActive) return;
+    sessionId++; const id = sessionId; sessionActive = true; sessionTurns = 0;
+    clearCaptions(); setNote(voiceStatus && voiceStatus.reason ? voiceStatus.reason : '');
+    talkBtn.setAttribute('aria-pressed', 'true'); talkBtn.setAttribute('aria-label', 'End session');
+    ensurePlayMeter();
+    setState('greeting', 'Speaking');
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch {
+      sessionActive = false; sessionId++;
+      talkBtn.setAttribute('aria-pressed', 'false'); talkBtn.setAttribute('aria-label', 'Tap to talk');
+      setState('error', 'Microphone blocked');
+      setNote('Allow microphone access for this page, then tap again.');
+      return;
+    }
+    if (id !== sessionId) { stream.getTracks().forEach((t) => t.stop()); return; }
+    const supportedTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+    mimeType = (window.MediaRecorder && supportedTypes.find((t) => MediaRecorder.isTypeSupported(t))) || null;
+    startMeter();
+    // The Silero model loads while the greeting plays, so the welcome is not held up by it.
+    const vadReady = initVad();
+    lastActivityAt = performance.now(); repromptedYet = false; repromptAt = 0;
+    await playPrompt('greeting');
+    await vadReady;
+    if (id !== sessionId || state !== 'greeting') return;
+    enterListening(true);
+  }
+  function teardownSession(reason) {
+    abortTurn(); fillerDone = Promise.resolve();
+    sileroDiscard = true; sileroRunning = false; sileroSpeechAt = 0;
+    sessionId++;
+    sessionActive = false;
+    setCapturing(false); speechSince = 0; silenceSince = 0; repromptedYet = false; repromptAt = 0;
+    cancelAnimationFrame(listenRaf); listenRaf = 0;
+    stopMeter();
+    if (recorder) { try { recorder.ondataavailable = recorder.onstop = recorder.onerror = null; if (recorder.state !== 'inactive') recorder.stop(); } catch {} recorder = null; }
+    if (sileroVad) { const old = sileroVad; sileroVad = null; Promise.resolve().then(() => old.destroy?.()).catch(() => {}).finally(() => { sileroDiscard = false; }); }
+    vadMode = 'energy';
+    if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+    stopSpeaking();
+    talkBtn.setAttribute('aria-pressed', 'false'); talkBtn.setAttribute('aria-label', 'Tap to talk');
+    setState('idle', 'Tap to talk');
+  }
+  function endSessionManual() {
+    if (capturing) { try { recorder && recorder.state !== 'inactive' && recorder.stop(); } catch {} }
+    teardownSession('press');
+  }
+
+  function onPress() {
+    if (talkBtn.disabled) return;
+    if (state === 'idle' || state === 'error') void startSession();
+    else if (state === 'greeting' || state === 'speaking' || (state === 'thinking' && turnSpeech && turnSpeech.spoke)) {
+      abortTurn(); stopSpeaking(); enterListening(true);
+    }
+    else if (state === 'listening' || state === 'thinking') endSessionManual();
+  }
+
+  /* ---------- input ---------- */
+  talkBtn.addEventListener('click', onPress);
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      if (sessionActive) { event.preventDefault(); endSessionManual(); }
+      return;
+    }
+    if (event.code === 'Space') {
+      const active = document.activeElement;
+      if (active === muteBtn || (active && active.tagName === 'A')) return;
+      event.preventDefault();
+      onPress();
+    }
+  });
+  window.addEventListener('pagehide', () => { teardownSession(); });
+  void statusReady;
+})();
+</script>
+</body>
+</html>

@@ -40,6 +40,8 @@ source of truth for identity and address.
 
 The dashboard must remain loopback-only unless a token-protected remote mode is explicitly configured. Never expose a full-access provider or outbound approval controls on an unauthenticated remote interface.
 
+Public mode (`docs/modules/public-mode.md`) is the one exception to "loopback only", and it is narrow: through the Cloudflare tunnel an unauthenticated request reaches only the explicit allowlist (landing page, public chat/talk faces and `/api/public/*`, `/api/health`, owner login). Everything else needs the owner's password session. Public visitor turns have no tools, never read memory, run under `HENRY_PUBLIC_TURN=1` (every approval/send path refuses), and answer only from the published public knowledge pack. Visitor messages and visit notes are untrusted data. When adding a dashboard route, keep `tests/public-routes.test.ts` green: a new route must not answer an unauthenticated tunnel request.
+
 ## Provider policy
 
 Use the provider selected during setup. Keep provider-specific behavior behind the provider interface; never assume the user has authenticated Codex or Claude.

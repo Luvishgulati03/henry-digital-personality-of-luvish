@@ -33,7 +33,17 @@ export type SessionUser = {
 /** Session cookie name (server.ts reads request cookies by this name). */
 export const SESSION_COOKIE = "henry_sess";
 
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days, slid forward on every authenticated read
+/**
+ * Session lifetime. IDLE: a session unused for 12 hours dies (the expiry slides forward on every
+ * authenticated read). ABSOLUTE: whatever its use, a session dies 7 days after it was issued. Both
+ * matter since the owner's dashboard can be reached through the public link after a login.
+ */
+export const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
+export const SESSION_ABSOLUTE_MS = 7 * 24 * 60 * 60 * 1000;
+/** The one account `henry admin password` manages; the landing page's Owner button signs in as it. */
+export const OWNER_USERNAME = "owner";
+/** `henry admin password` refuses anything shorter. */
+export const MIN_OWNER_PASSWORD_LENGTH = 12;
 const ROLES: readonly Role[] = ["admin"];
 const TOKEN_BYTES = 32;
 const SALT_BYTES = 16;
@@ -253,34 +263,44 @@ export function verifyLogin(username: string, password: string): SessionUser | u
   return passwordMatches(password, row) ? toSessionUser(row) : undefined;
 }
 
-/** Mints a session row and returns the Set-Cookie value for it. */
-export function issueSession(user: SessionUser): { cookie: string } {
+/**
+ * Mints a session row and returns the Set-Cookie value for it. HttpOnly and SameSite=Strict always;
+ * `secure` (set when the login arrived through the public https link) adds Secure. The cookie's
+ * Max-Age is the absolute lifetime; the idle limit is enforced server-side in readSession.
+ */
+export function issueSession(user: SessionUser, options: { secure?: boolean; now?: number } = {}): { cookie: string } {
   const token = crypto.randomBytes(TOKEN_BYTES).toString("hex");
-  const now = Date.now();
+  const now = options.now ?? Date.now();
   db().prepare("INSERT INTO sessions (tokenHash, userId, expiresAt, createdAt) VALUES (?, ?, ?, ?)").run(
     hashToken(token),
     user.userId,
-    new Date(now + SESSION_TTL_MS).toISOString(),
+    new Date(now + SESSION_IDLE_MS).toISOString(),
     new Date(now).toISOString(),
   );
-  const maxAge = Math.floor(SESSION_TTL_MS / 1000);
-  return { cookie: `${SESSION_COOKIE}=${token}.${signToken(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}` };
+  const maxAge = Math.floor(SESSION_ABSOLUTE_MS / 1000);
+  return { cookie: `${SESSION_COOKIE}=${token}.${signToken(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${options.secure ? "; Secure" : ""}` };
 }
 
-/** Resolves the caller from their cookie: HMAC first, then the database. Expired rows are purged on the way past, and a live session slides forward 7 days. */
-export function readSession(cookieHeader: string | undefined): SessionUser | undefined {
+/**
+ * Resolves the caller from their cookie: HMAC first, then the database. Expired rows (idle past
+ * 12 hours, or issued more than 7 days ago) are purged on the way past; a live session's idle
+ * expiry slides forward, never past its absolute limit.
+ */
+export function readSession(cookieHeader: string | undefined, nowMs: number = Date.now()): SessionUser | undefined {
   const token = firstVerifiedToken(cookieHeader);
   if (!token) return undefined; // no candidate verified — forged, tampered, or absent; never reaches SQLite
   const database = db();
-  const now = new Date();
-  database.prepare("DELETE FROM sessions WHERE expiresAt <= ?").run(now.toISOString());
+  const now = new Date(nowMs);
+  database.prepare("DELETE FROM sessions WHERE expiresAt <= ? OR createdAt <= ?")
+    .run(now.toISOString(), new Date(nowMs - SESSION_ABSOLUTE_MS).toISOString());
   const tokenHash = hashToken(token);
   const row = database.prepare(`
-    SELECT users.* FROM sessions JOIN users ON users.userId = sessions.userId WHERE sessions.tokenHash = ?
-  `).get(tokenHash) as UserRow | undefined;
+    SELECT users.*, sessions.createdAt AS sessionCreatedAt FROM sessions JOIN users ON users.userId = sessions.userId WHERE sessions.tokenHash = ?
+  `).get(tokenHash) as (UserRow & { sessionCreatedAt: string }) | undefined;
   if (!row) return undefined;
+  const absoluteEnd = new Date(row.sessionCreatedAt).getTime() + SESSION_ABSOLUTE_MS;
   database.prepare("UPDATE sessions SET expiresAt = ? WHERE tokenHash = ?")
-    .run(new Date(now.getTime() + SESSION_TTL_MS).toISOString(), tokenHash);
+    .run(new Date(Math.min(nowMs + SESSION_IDLE_MS, absoluteEnd)).toISOString(), tokenHash);
   return toSessionUser(row);
 }
 
@@ -299,6 +319,109 @@ export function endSession(cookieHeader: string | undefined): void {
 }
 
 /** Set-Cookie value that expires the session cookie in the browser. */
-export function clearedSessionCookie(): string {
-  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
+export function clearedSessionCookie(options: { secure?: boolean } = {}): string {
+  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${options.secure ? "; Secure" : ""}`;
+}
+
+/** `henry admin logout-all`: deletes every session row, so every outstanding cookie (local or remote) is dead. */
+export function endAllSessions(): number {
+  return db().prepare("DELETE FROM sessions").run().changes;
+}
+
+// --- the owner account (`henry admin password`) ---
+
+/** True once `henry admin password` has set the owner's password. */
+export function ownerAccountExists(): boolean {
+  return Boolean(db().prepare("SELECT userId FROM users WHERE username = ?").get(OWNER_USERNAME));
+}
+
+/**
+ * Creates or replaces the owner's password (scrypt hash + fresh salt in dashboard.db; never
+ * plaintext, never .env). Changing it also ends every existing session.
+ */
+export function setOwnerPassword(password: string): { created: boolean; sessionsEnded: number } {
+  if (typeof password !== "string" || password.length < MIN_OWNER_PASSWORD_LENGTH) {
+    throw new Error(`The owner password must be at least ${MIN_OWNER_PASSWORD_LENGTH} characters.`);
+  }
+  const database = db();
+  const existing = database.prepare("SELECT userId FROM users WHERE username = ?").get(OWNER_USERNAME) as { userId: string } | undefined;
+  if (!existing) {
+    createUser({ username: OWNER_USERNAME, password, role: "admin" });
+    return { created: true, sessionsEnded: endAllSessions() };
+  }
+  const salt = crypto.randomBytes(SALT_BYTES);
+  database.prepare("UPDATE users SET passwordHash = ?, passwordSalt = ? WHERE userId = ?")
+    .run(scryptHash(password, salt).toString("hex"), salt.toString("hex"), existing.userId);
+  return { created: false, sessionsEnded: endAllSessions() };
+}
+
+// ---------------------------------------------------------------------------
+// login throttle (ported from Kelly, with escalating locks)
+// ---------------------------------------------------------------------------
+
+/**
+ * In-memory, keyed by lower-cased USERNAME alone. Behind the tunnel every request's socket peer is
+ * 127.0.0.1, and a forwarded client address (X-Forwarded-For, even CF-Connecting-IP) must never
+ * decide who may try a password, so no address takes part in the key. Five failures inside 15
+ * minutes lock that username; each further lock doubles (15 min, 30, 60 ... capped at 24 h) until
+ * a successful login clears the slate. The cost: a stranger can lock the owner out of REMOTE
+ * login for a while. Loopback access on the owner's Mac is never affected.
+ */
+const LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_LOCK_BASE_MS = 15 * 60 * 1000;
+const LOGIN_LOCK_MAX_MS = 24 * 60 * 60 * 1000;
+export const LOGIN_FAILURE_LIMIT = 5;
+
+interface LoginThrottleState {
+  failures: number[];
+  lockedUntil?: number;
+  locks: number;
+}
+
+const loginThrottle = new Map<string, LoginThrottleState>();
+
+function throttleKey(username: string): string {
+  return username.trim().toLowerCase();
+}
+
+/** Records one bad attempt; the 5th inside the window locks the username (escalating). Returns true when this attempt started a lock. */
+export function recordLoginFailure(username: string, now: number = Date.now()): boolean {
+  if (!username.trim()) return false;
+  const key = throttleKey(username);
+  const state = loginThrottle.get(key) ?? { failures: [], locks: 0 };
+  state.failures = state.failures.filter((at) => now - at < LOGIN_FAILURE_WINDOW_MS);
+  state.failures.push(now);
+  let locked = false;
+  if (state.failures.length >= LOGIN_FAILURE_LIMIT) {
+    state.locks += 1;
+    state.lockedUntil = now + Math.min(LOGIN_LOCK_MAX_MS, LOGIN_LOCK_BASE_MS * 2 ** (state.locks - 1));
+    state.failures = [];
+    locked = true;
+  }
+  loginThrottle.delete(key);
+  loginThrottle.set(key, state);
+  // Bounded: a flood of made-up usernames cannot grow this map without limit (oldest dropped first).
+  while (loginThrottle.size > 5_000) loginThrottle.delete(loginThrottle.keys().next().value as string);
+  return locked;
+}
+
+/** A successful login clears the username's failures and its lock escalation. */
+export function clearLoginFailures(username: string): void {
+  if (!username.trim()) return;
+  loginThrottle.delete(throttleKey(username));
+}
+
+/** Seconds left on an active lock, or 0. An expired lock keeps its escalation count. */
+export function loginLockedFor(username: string, now: number = Date.now()): number {
+  if (!username.trim()) return 0;
+  const state = loginThrottle.get(throttleKey(username));
+  if (!state?.lockedUntil) return 0;
+  const remainingMs = state.lockedUntil - now;
+  if (remainingMs <= 0) { state.lockedUntil = undefined; return 0; }
+  return Math.ceil(remainingMs / 1000);
+}
+
+/** Test-only: clears every tracked failure and lock. */
+export function resetLoginThrottleForTests(): void {
+  loginThrottle.clear();
 }

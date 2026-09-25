@@ -46,6 +46,8 @@ import type { ProviderName, RunResult } from "./types.ts";
 import { claudeArgs, execute, readFallbackPolicy, type RunOptions } from "./providers/runner.ts";
 import { isLongResearchAsk, type DispatchReportHandle } from "./orchestration/luna.ts";
 import type { ReflexSnapshot } from "./reflex.ts";
+import type { TunnelManager, TunnelStatus } from "./remote/tunnel.ts";
+import { createTunnelFromEnv } from "./remote/env.ts";
 
 export type InteractiveTurn =
   | { delegated: false; completion: Promise<RunResult> }
@@ -399,6 +401,30 @@ export class HenryRuntime {
     return this._jobScout;
   }
 
+  private _tunnel?: TunnelManager;
+  private tunnelStarted = false;
+
+  /**
+   * The public-link tunnel (src/remote/): a Cloudflare named tunnel into the loopback dashboard,
+   * off unless HENRY_TUNNEL=cloudflare (set only by `henry start --public`). Lazy, because most
+   * runs never touch it. What arrives through it is gated in src/dashboard/server.ts (public
+   * allowlist unauthenticated, the dashboard only with an owner session).
+   */
+  get tunnel(): TunnelManager {
+    this._tunnel ??= createTunnelFromEnv({ port: this.config.port, dataDir: this.config.dataDir, activity: this.activity });
+    return this._tunnel;
+  }
+
+  /** Starts the tunnel if HENRY_TUNNEL configures one. Never throws; failures live in the returned status. */
+  async startTunnel(): Promise<TunnelStatus> {
+    this.tunnelStarted = true;
+    try {
+      return await this.tunnel.start();
+    } catch (error) {
+      return { mode: this.tunnel.status().mode, active: false, restarts: 0, lastError: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   /**
    * Arms the ONE Telegram reader inside long-lived processes (repl / scheduler daemon).
    * Replaces the old standup-only `startStandupPoller` — same interval, same lock, same
@@ -577,6 +603,7 @@ export class HenryRuntime {
   close(): void {
     this.scheduler.stop(); this._workflowEngine?.stop(); this._telegramPump?.stop(); this._standupPoller?.stop(); this._standupStore?.close();
     this._voiceTranscripts?.close();
+    if (this.tunnelStarted) void this._tunnel?.stop();
     // Agent replies stream/return before durable conversation capture completes.
     // Defer only the memory close; shutting it immediately caused one-shot `ask`
     // commands to log "database connection is not open" and lose the memory.
