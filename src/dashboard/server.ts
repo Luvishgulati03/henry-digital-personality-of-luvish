@@ -25,8 +25,14 @@ import type { ActivityEvent, ProviderEvent, ProviderName } from "../types.ts";
 import { classifyIntentTier } from "../agent/intent.ts";
 import { isLongResearchAsk } from "../orchestration/luna.ts";
 import { reflexKind, renderReflex } from "../reflex.ts";
-import { createSpokenFenceFilter, speakableSummary, stripSpokenBlock } from "../voice/speakable.ts";
-import { finalizeSpoken, readVoicePolicy, type VoicePolicy } from "../voice/policy.ts";
+import { createSpokenFenceFilter, speakableSummary, splitSentences, stripSpokenBlock } from "../voice/speakable.ts";
+import {
+  PRIVATE_SPOKEN_DONE, PRIVATE_SPOKEN_INPUT, PRIVATE_SPOKEN_WORKING, finalizeSpoken, readVoicePolicy, type VoicePolicy,
+} from "../voice/policy.ts";
+import { LocalVoiceService, VoiceError, voiceConfigFromEnv, type VoiceLanguage } from "../voice/index.ts";
+import { VoiceTranscriptStore, readVoiceSettings, updateVoiceSettings } from "../voice/transcripts.ts";
+import { isLookupRequest, isToolStart } from "../voice/intent.ts";
+import { readSettings, updateSettings } from "../util/settings.ts";
 
 const EVENTS_POLL_MS = 2000;
 
@@ -235,6 +241,155 @@ let loginHtmlCache: string | null = null;
 async function loginHtml(): Promise<string> {
   loginHtmlCache ??= await fs.readFile(LOGIN_HTML_PATH, "utf8");
   return loginHtmlCache;
+}
+
+// Henry Talk: the hands-free voice page. Standalone .html for the same escaping-safety reason
+// as chat.html; cached for the process lifetime.
+const TALK_HTML_PATH = fileURLToPath(new URL("./talk.html", import.meta.url));
+let talkHtmlCache: string | null = null;
+async function talkHtml(): Promise<string> {
+  talkHtmlCache ??= await fs.readFile(TALK_HTML_PATH, "utf8");
+  return talkHtmlCache;
+}
+
+/**
+ * Henry Talk's client-side speech-onset detector: Silero VAD via @ricky0123/vad-web, running on
+ * onnxruntime-web. Served straight from node_modules under a FIXED allowlist of basenames, so
+ * `GET /vendor/vad/<name>` can never traverse outside the two package dirs this map points at.
+ * talk.html falls back to its energy VAD when any of this 404s or MicVAD fails to start.
+ */
+const VAD_WEB_DIST = fileURLToPath(new URL("../../node_modules/@ricky0123/vad-web/dist/", import.meta.url));
+const ONNXRUNTIME_WEB_DIST = fileURLToPath(new URL("../../node_modules/onnxruntime-web/dist/", import.meta.url));
+const JS = "application/javascript; charset=utf-8";
+const MJS = "text/javascript; charset=utf-8";
+const VENDOR_VAD_ASSETS: Record<string, { dir: string; contentType: string }> = {
+  "bundle.min.js": { dir: VAD_WEB_DIST, contentType: JS },
+  "vad.worklet.bundle.min.js": { dir: VAD_WEB_DIST, contentType: JS },
+  "silero_vad_v5.onnx": { dir: VAD_WEB_DIST, contentType: "application/octet-stream" },
+  "silero_vad_v6.onnx": { dir: VAD_WEB_DIST, contentType: "application/octet-stream" },
+  "silero_vad_legacy.onnx": { dir: VAD_WEB_DIST, contentType: "application/octet-stream" },
+  "ort-wasm-simd-threaded.mjs": { dir: ONNXRUNTIME_WEB_DIST, contentType: MJS },
+  "ort-wasm-simd-threaded.wasm": { dir: ONNXRUNTIME_WEB_DIST, contentType: "application/wasm" },
+  "ort-wasm-simd-threaded.asyncify.mjs": { dir: ONNXRUNTIME_WEB_DIST, contentType: MJS },
+  "ort-wasm-simd-threaded.asyncify.wasm": { dir: ONNXRUNTIME_WEB_DIST, contentType: "application/wasm" },
+  "ort-wasm-simd-threaded.jsep.mjs": { dir: ONNXRUNTIME_WEB_DIST, contentType: MJS },
+  "ort-wasm-simd-threaded.jsep.wasm": { dir: ONNXRUNTIME_WEB_DIST, contentType: "application/wasm" },
+  "ort-wasm-simd-threaded.jspi.mjs": { dir: ONNXRUNTIME_WEB_DIST, contentType: MJS },
+  "ort-wasm-simd-threaded.jspi.wasm": { dir: ONNXRUNTIME_WEB_DIST, contentType: "application/wasm" },
+};
+const vendorVadCache = new Map<string, Buffer>();
+
+export async function vendorVadAsset(name: string): Promise<{ bytes: Buffer; contentType: string } | null> {
+  if (!Object.prototype.hasOwnProperty.call(VENDOR_VAD_ASSETS, name)) return null; // allowlist only
+  const entry = VENDOR_VAD_ASSETS[name];
+  const cached = vendorVadCache.get(name);
+  if (cached) return { bytes: cached, contentType: entry.contentType };
+  try {
+    const bytes = await fs.readFile(path.join(entry.dir, name));
+    vendorVadCache.set(name, bytes);
+    return { bytes, contentType: entry.contentType };
+  } catch {
+    return null;
+  }
+}
+
+/** Seconds of audio in a PCM WAV, for the transcript record; undefined when unreadable. */
+function wavDurationSeconds(audio: Buffer): number | undefined {
+  try {
+    let offset = 12; let byteRate = 0; let dataLength = 0;
+    while (offset + 8 <= audio.length) {
+      const name = audio.toString("ascii", offset, offset + 4);
+      const size = audio.readUInt32LE(offset + 4);
+      if (name === "fmt " && size >= 16) byteRate = audio.readUInt32LE(offset + 16);
+      if (name === "data") dataLength = Math.min(size, audio.length - offset - 8);
+      offset += 8 + size + (size & 1);
+    }
+    return byteRate > 0 && dataLength > 0 ? Math.round((dataLength / byteRate) * 10) / 10 : undefined;
+  } catch { return undefined; }
+}
+
+/** The local voice engine surface the dashboard uses; injectable so tests never need whisper/Kokoro. */
+export type DashboardVoice = Pick<LocalVoiceService, "sttEnabled" | "ttsEnabled" | "transcribe" | "synthesize">;
+
+export interface DashboardOptions {
+  /** Defaults to `new LocalVoiceService(voiceConfigFromEnv())` (HENRY_* env, set by `henry start`). */
+  voice?: DashboardVoice;
+  /** Pre-synthesise the Talk phrases at startup when TTS is on. Default true. */
+  warmVoicePrompts?: boolean;
+}
+
+/** Henry Talk's fixed phrases. Fillers play only after a `gathering` event (src/voice/intent.ts). */
+export const TALK_PHRASES = Object.freeze({
+  greeting: "Hey Luvish. I'm listening.",
+  reprompt: "Still here. What do you need?",
+  fillers: Object.freeze(["Give me a moment while I look into it.", "Still working on it, almost there."]),
+});
+type TalkPromptKind = "greeting" | "reprompt" | "filler";
+
+function talkPromptText(kind: TalkPromptKind, variant = 0): string {
+  if (kind === "greeting") return TALK_PHRASES.greeting;
+  if (kind === "reprompt") return TALK_PHRASES.reprompt;
+  const fillers = TALK_PHRASES.fillers;
+  return fillers[((variant % fillers.length) + fillers.length) % fillers.length];
+}
+
+/**
+ * The Talk phrases are fixed, so each is synthesised once and cached in memory and on disk
+ * under `<dataDir>/voice/cache/<sha256 of text>.wav` (0600), making the first greeting after a
+ * restart instant. Memory is keyed by dataDir + text so two dashboards never share a cache.
+ */
+const ttsPromptCache = new Map<string, Buffer>();
+
+async function synthesizeCachedPrompt(voice: DashboardVoice, dataDir: string, text: string): Promise<Buffer> {
+  const key = `${dataDir}\u0000${text}`;
+  const cached = ttsPromptCache.get(key);
+  if (cached) return cached;
+  const hash = crypto.createHash("sha256").update(text, "utf8").digest("hex");
+  const cacheDir = path.join(dataDir, "voice", "cache");
+  const cachePath = path.join(cacheDir, `${hash}.wav`);
+  try {
+    const onDisk = await fs.readFile(cachePath);
+    ttsPromptCache.set(key, onDisk);
+    return onDisk;
+  } catch { /* not cached on disk yet */ }
+  const audio = await voice.synthesize(text, { language: "en" });
+  ttsPromptCache.set(key, audio);
+  try {
+    await fs.mkdir(cacheDir, { recursive: true, mode: 0o700 });
+    await fs.writeFile(cachePath, audio, { mode: 0o600 });
+  } catch { /* best effort: an unwritable cache dir still serves from memory */ }
+  return audio;
+}
+
+/**
+ * Whisper's --prompt vocabulary hint: the proper nouns Henry hears most, so "Codex" is not
+ * transcribed as "code X". Private project names belong in HENRY_VOICE_VOCABULARY
+ * (comma-separated, local .env), never in this file.
+ */
+const VOICE_VOCABULARY = ["Henry", "Luvish", "Kelly", "Codex", "Claude", "Engram", "Luna", "Kokoro", "Whisper", "Telegram", "Gmail", "GitHub", "LinkedIn", "standup", "approvals", "dashboard"];
+
+export function voiceVocabularyPrompt(env: NodeJS.ProcessEnv = process.env): string {
+  const extra = (env.HENRY_VOICE_VOCABULARY || "").split(",").map((term) => term.trim()).filter(Boolean);
+  const terms = [...new Set([...VOICE_VOCABULARY, ...extra])];
+  return `Luvish talking to Henry. Names: ${terms.join(", ")}.`;
+}
+
+const VOICE_ON = ["1", "true", "on", "yes", "0", "false", "off", "no"];
+function envForces(value: string | undefined): boolean {
+  return Boolean(value && VOICE_ON.includes(value.trim().toLowerCase()));
+}
+
+/**
+ * The text actually synthesised by POST /api/voice/speak. Private mode never speaks content: the
+ * three neutral status lines pass through unchanged, anything else becomes one of them. With
+ * private mode off, the text is redacted (emails, phones, OTPs, keys) before synthesis.
+ */
+export function speakableForRoute(text: string, policy: Pick<VoicePolicy, "privateMode">): string {
+  if (policy.privateMode) {
+    const neutral = [PRIVATE_SPOKEN_DONE, PRIVATE_SPOKEN_INPUT, PRIVATE_SPOKEN_WORKING].find((line) => line === text.trim());
+    return neutral ?? finalizeSpoken(text, policy);
+  }
+  return finalizeSpoken(text, policy);
 }
 
 /**
@@ -592,9 +747,38 @@ function roleGate(user: SessionUser | undefined, roles: Role[], request: http.In
   return false;
 }
 
-export function startDashboard(runtime: HenryRuntime): http.Server {
+export function startDashboard(runtime: HenryRuntime, options: DashboardOptions = {}): http.Server {
   if (!loopback(runtime.config.host) && (!runtime.config.allowRemoteDashboard || !runtime.config.dashboardToken)) {
     throw new Error("Remote dashboard is disabled; bind HENRY_HOST to loopback or configure HENRY_ALLOW_REMOTE_DASHBOARD=true with HENRY_DASHBOARD_TOKEN");
+  }
+  // Local voice (Henry Talk). `henry start` resolves the HENRY_* voice env; with STT/TTS absent
+  // the service simply reports disabled and every /api/voice route says so cleanly.
+  const voice: DashboardVoice = options.voice ?? new LocalVoiceService(voiceConfigFromEnv());
+  let sttBusy = false;
+  let ttsBusy = false;
+  // Opened on first use, so a dashboard that never hears a word never creates the voice DB.
+  let transcriptStore: VoiceTranscriptStore | undefined;
+  const transcripts = (): VoiceTranscriptStore => {
+    transcriptStore ??= new VoiceTranscriptStore(runtime.config.dataDir, runtime.config.settingsPath);
+    return transcriptStore;
+  };
+  const voiceSettingsPayload = (): Record<string, unknown> => {
+    const persisted = readSettings(runtime.config.settingsPath).voice as Record<string, unknown> | undefined;
+    return {
+      settings: { ...readVoiceSettings(runtime.config.settingsPath), allowWrites: persisted?.allowWrites === true },
+      effective: readVoicePolicy(runtime.config.settingsPath),
+      forced: { privateMode: envForces(process.env.HENRY_VOICE_PRIVATE), allowWrites: envForces(process.env.HENRY_VOICE_ALLOW_WRITES) },
+      stats: transcripts().stats(),
+    };
+  };
+  // The Talk phrases are fixed; synthesise them once at startup (fire-and-forget) so the first
+  // greeting of the day does not pay TTS latency. A failure here is not an error: the first
+  // real request tries, and reports, its own synthesis.
+  if (options.warmVoicePrompts !== false && voice.ttsEnabled()) {
+    const phrases: Array<[TalkPromptKind, number]> = [["greeting", 0], ["reprompt", 0], ...TALK_PHRASES.fillers.map((_, i): [TalkPromptKind, number] => ["filler", i])];
+    for (const [kind, variant] of phrases) {
+      void synthesizeCachedPrompt(voice, runtime.config.dataDir, talkPromptText(kind, variant)).catch(() => undefined);
+    }
   }
   // WRITABLE voice turns (voice.allowWrites on) in flight in THIS process. While > 0, approval
   // routes and the typed approval grammar refuse: that turn's own shell could otherwise reach
@@ -654,6 +838,36 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
       if (request.method === "GET" && (url.pathname === "/chat" || url.pathname === "/chat/")) {
         response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         response.end(await chatHtml());
+        return;
+      }
+      if (request.method === "GET" && route === "/talk") {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        response.end(await talkHtml());
+        return;
+      }
+      const vendorVadRoute = url.pathname.match(/^\/vendor\/vad\/([^/]+)$/);
+      if (request.method === "GET" && vendorVadRoute) {
+        let name = "";
+        try { name = decodeURIComponent(vendorVadRoute[1]); } catch { /* malformed escape: not on the allowlist */ }
+        const asset = name ? await vendorVadAsset(name) : null;
+        if (!asset) { json(response, 404, { error: "asset not found" }); return; }
+        response.writeHead(200, { "content-type": asset.contentType, "content-length": asset.bytes.length, "cache-control": "public, max-age=86400", "x-content-type-options": "nosniff" });
+        response.end(asset.bytes);
+        return;
+      }
+      if (request.method === "GET" && route === "/api/voice/status") {
+        const policy = readVoicePolicy(runtime.config.settingsPath);
+        const { talkEnabled } = readVoiceSettings(runtime.config.settingsPath);
+        const sttEnabled = voice.sttEnabled();
+        const ttsEnabled = voice.ttsEnabled();
+        const reason = !talkEnabled ? "Talk is turned off in voice settings."
+          : !sttEnabled ? "Speech-to-text is not set up. Start Henry with `henry start` so it can find whisper.cpp and a Whisper model."
+          : !ttsEnabled ? "Henry can hear you but has no voice (text-to-speech is not set up); replies appear as captions."
+          : undefined;
+        json(response, 200, {
+          available: talkEnabled && sttEnabled, sttEnabled, ttsEnabled, talkEnabled,
+          privateMode: policy.privateMode, allowWrites: policy.allowWrites, ...(reason ? { reason } : {}),
+        });
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/chat/history") {
@@ -878,6 +1092,173 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
         redirect(response, "/", { "set-cookie": issueSession(account).cookie });
         return;
       }
+      // ---- Henry Talk voice routes (owner-only like everything above; same-origin enforced) ----
+      if (request.method === "GET" && route === "/api/voice/settings") {
+        json(response, 200, voiceSettingsPayload());
+        return;
+      }
+      if (request.method === "POST" && route === "/api/voice/settings") {
+        const input = await body(request);
+        const before = readVoiceSettings(runtime.config.settingsPath);
+        const settings = updateVoiceSettings(runtime.config.settingsPath, {
+          ...(typeof input.privateMode === "boolean" ? { privateMode: input.privateMode } : {}),
+          ...(typeof input.talkEnabled === "boolean" ? { talkEnabled: input.talkEnabled } : {}),
+          ...(typeof input.retentionDays === "number" ? { retentionDays: input.retentionDays } : {}),
+          ...(typeof input.recordAudio === "boolean" ? { recordAudio: input.recordAudio } : {}),
+          ...(typeof input.audioRetentionDays === "number" ? { audioRetentionDays: input.audioRetentionDays } : {}),
+        });
+        if (typeof input.allowWrites === "boolean") updateSettings(runtime.config.settingsPath, { voice: { allowWrites: input.allowWrites } });
+        // "Recording off" must mean nothing on disk, not just nothing new.
+        const discarded = before.recordAudio && !settings.recordAudio ? transcripts().discardAllAudio() : 0;
+        transcripts().prune();
+        const effective = readVoicePolicy(runtime.config.settingsPath);
+        await runtime.activity.record("voice.settings.updated", `Voice settings updated: private ${effective.privateMode ? "on" : "off"}, writes ${effective.allowWrites ? "on" : "off"}, text kept ${settings.retentionDays}d`, {
+          voice: true, privateMode: effective.privateMode, allowWrites: effective.allowWrites, talkEnabled: settings.talkEnabled, retentionDays: settings.retentionDays, discarded,
+        }).catch(() => undefined);
+        json(response, 200, voiceSettingsPayload());
+        return;
+      }
+      if (request.method === "GET" && (route === "/api/voice/greeting" || route === "/api/voice/reprompt" || route === "/api/voice/filler")) {
+        if (!voice.ttsEnabled()) { json(response, 404, { error: "Speech is unavailable." }); return; }
+        const kind: TalkPromptKind = route === "/api/voice/greeting" ? "greeting" : route === "/api/voice/reprompt" ? "reprompt" : "filler";
+        const variant = Math.max(0, Math.min(99, Number.parseInt(url.searchParams.get("v") ?? "0", 10) || 0));
+        try {
+          const audio = await synthesizeCachedPrompt(voice, runtime.config.dataDir, talkPromptText(kind, variant));
+          response.writeHead(200, { "content-type": "audio/wav", "content-length": audio.length, "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" });
+          response.end(audio);
+        } catch (error) {
+          json(response, error instanceof VoiceError && error.code === "timeout" ? 504 : 503, { error: error instanceof Error ? error.message : "Speech is unavailable." });
+        }
+        return;
+      }
+      if (request.method === "POST" && route === "/api/voice/talk/session") {
+        const input = await body(request);
+        if (input.event === "start") {
+          await runtime.activity.record("talk.session.started", "Henry Talk session started", { voice: true }).catch(() => undefined);
+          json(response, 200, { ok: true });
+          return;
+        }
+        if (input.event === "end") {
+          const turns = typeof input.turns === "number" && Number.isFinite(input.turns) ? Math.max(0, Math.round(input.turns)) : undefined;
+          const reason = input.reason === "press" || input.reason === "sleep" || input.reason === "error" ? input.reason : undefined;
+          await runtime.activity.record("talk.session.ended", "Henry Talk session ended", {
+            voice: true, ...(turns !== undefined ? { turns } : {}), ...(reason ? { reason } : {}),
+          }).catch(() => undefined);
+          json(response, 200, { ok: true });
+          return;
+        }
+        json(response, 400, { error: 'event must be "start" or "end"' });
+        return;
+      }
+      if (request.method === "GET" && route === "/api/voice/transcripts") {
+        // Text only: no audio paths, no legacy pre-conversion script.
+        const list = transcripts().list({
+          ...(url.searchParams.get("q") ? { q: url.searchParams.get("q") ?? undefined } : {}),
+          limit: Number(url.searchParams.get("limit")) || 100,
+        }).map((record) => ({
+          id: record.id, at: record.at, surface: record.surface, state: record.state, text: record.text,
+          ...(record.language ? { language: record.language } : {}),
+          ...(record.durationSeconds !== undefined ? { durationSeconds: record.durationSeconds } : {}),
+          ...(record.conversationId ? { conversationId: record.conversationId } : {}),
+        }));
+        json(response, 200, { transcripts: list });
+        return;
+      }
+      if (request.method === "POST" && route === "/api/voice/transcribe") {
+        if (!voice.sttEnabled()) { json(response, 503, { error: "Speech-to-text is not set up. Start Henry with `henry start`." }); return; }
+        if (sttBusy) { json(response, 429, { error: "Another transcription is in progress. Please wait." }); return; }
+        const mime = (request.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+        if (mime !== "audio/wav" && mime !== "audio/x-wav") { json(response, 415, { error: "Send audio/wav." }); return; }
+        const length = Number(request.headers["content-length"] || 0);
+        if (length > 8 * 1024 * 1024) { json(response, 413, { error: "Audio is too large (max 8 MB)." }); return; }
+        sttBusy = true;
+        try {
+          const audio = await binaryBody(request, 8 * 1024 * 1024);
+          if (audio.length < 44 || audio.toString("ascii", 0, 4) !== "RIFF" || audio.toString("ascii", 8, 12) !== "WAVE") {
+            json(response, 400, { error: "Audio must be a valid WAV file." }); return;
+          }
+          let language: VoiceLanguage = "auto";
+          const languageHeader = request.headers["x-henry-voice-language"];
+          if (typeof languageHeader === "string" && ["auto", "hi", "en", "hi-en"].includes(languageHeader)) language = languageHeader;
+          // Private mode keeps nothing: no transcript row, no activity line, only the in-flight turn.
+          const privateMode = readVoicePolicy(runtime.config.settingsPath).privateMode;
+          const started = Date.now();
+          const durationSeconds = wavDurationSeconds(audio);
+          let result: { text: string; language?: string };
+          try {
+            result = await voice.transcribe(audio, { language, prompt: voiceVocabularyPrompt() });
+          } catch (error) {
+            if (!privateMode && !(error instanceof VoiceError && error.code === "disabled")) {
+              transcripts().record({ surface: "talk", text: "", state: "failed", durationSeconds, bytes: audio.length, sttMs: Date.now() - started, error: error instanceof Error ? error.message : String(error) });
+              await runtime.activity.record("voice.failed", "Talk voice note could not be transcribed", { voice: true, code: error instanceof VoiceError ? error.code : undefined }).catch(() => undefined);
+            }
+            throw error;
+          }
+          const sttMs = Date.now() - started;
+          // Keep Whisper's native script (Devanagari and Latin as heard); src/voice/roman.ts stays
+          // available but is deliberately not applied, as in Kelly after poor real-world output.
+          const transcript = result.text.trim();
+          if (privateMode) { json(response, 200, { text: transcript, language: result.language, private: true }); return; }
+          const record = transcripts().record({ surface: "talk", text: transcript, language: result.language, durationSeconds, bytes: audio.length, sttMs });
+          const audioKept = Boolean(transcripts().saveAudio(record.id, audio));
+          // Timing and size only: the words stay in the transcript store, never in the log.
+          await runtime.activity.record("voice.transcribed", "Talk voice note transcribed", {
+            voice: true, chars: transcript.length, bytes: audio.length, sttMs, audioKept,
+            ...(durationSeconds !== undefined ? { durationSeconds } : {}), ...(result.language ? { language: result.language } : {}),
+          }).catch(() => undefined);
+          json(response, 200, { text: transcript, transcriptId: record.id, audioKept, language: result.language });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Transcription is unavailable.";
+          const status = error instanceof VoiceError && error.code === "too_large" ? 413
+            : error instanceof VoiceError && error.code === "invalid_audio" ? 400
+            : error instanceof VoiceError && error.code === "timeout" ? 504 : 503;
+          if (!response.headersSent) json(response, status, { error: message });
+        } finally { sttBusy = false; }
+        return;
+      }
+      if (request.method === "POST" && route === "/api/voice/speak") {
+        if (!voice.ttsEnabled()) { json(response, 503, { error: "Text-to-speech is not set up." }); return; }
+        if (ttsBusy) { json(response, 429, { error: "Henry is already speaking. Please wait." }); return; }
+        ttsBusy = true;
+        try {
+          const input = await body(request);
+          const raw = typeof input.text === "string" ? input.text.trim() : "";
+          if (!raw) { json(response, 400, { error: "text is required" }); return; }
+          if (raw.length > 10_000) { json(response, 413, { error: "Text is too long (max 10,000 characters)." }); return; }
+          // The server, not the page, decides what may be said: private mode's neutral line, or
+          // redacted text. Whatever a client posts, nothing private reaches the speaker.
+          const text = speakableForRoute(raw, readVoicePolicy(runtime.config.settingsPath));
+          if (!text) { json(response, 400, { error: "nothing speakable" }); return; }
+          let language: VoiceLanguage = "en";
+          if (typeof input.language === "string" && ["auto", "hi", "en", "hi-en"].includes(input.language)) language = input.language;
+          if (input.chunk === true) {
+            // Chunked speech: one WAV per sentence so playback starts on the first. The body is
+            // `application/x-henry-wav-seq`: frames of a 4-byte big-endian length, then that many
+            // bytes of a complete WAV file, until the stream ends.
+            const sentences = splitSentences(text);
+            const pieces = sentences.length ? sentences : [text];
+            response.writeHead(200, { "content-type": "application/x-henry-wav-seq", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+            for (const piece of pieces) {
+              if (response.destroyed) break;
+              const audio = await voice.synthesize(piece, { language });
+              const prefix = Buffer.alloc(4);
+              prefix.writeUInt32BE(audio.length, 0);
+              response.write(prefix);
+              response.write(audio);
+            }
+            response.end();
+            return;
+          }
+          const audio = await voice.synthesize(text, { language });
+          response.writeHead(200, { "content-type": "audio/wav", "content-length": audio.length, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+          response.end(audio);
+        } catch (error) {
+          // Chunked frames may already be on the wire; a JSON error body is no longer possible.
+          if (response.headersSent) { if (!response.writableEnded) response.end(); }
+          else json(response, error instanceof VoiceError && error.code === "timeout" ? 504 : error instanceof Error && error.message === "Invalid JSON body" ? 400 : 503, { error: error instanceof Error ? error.message : "Speech is unavailable." });
+        } finally { ttsBusy = false; }
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/api/settings/provider") {
         const input = await body(request);
         json(response, 200, { provider: await runtime.setProvider(String(input.provider) as "codex" | "claude") }); return;
@@ -1002,7 +1383,21 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
             // Same surface-session model as the REPL, one surface PER CONVERSATION:
             // provider-side context persists across messages in a thread and never
             // bleeds between threads. `voice` rides to the agent's prompt builder only.
-            const onEvent = chatStreamHandler((event, data) => sseWrite(response, event, data), voicePolicy);
+            const streamHandler = chatStreamHandler((event, data) => sseWrite(response, event, data), voicePolicy);
+            // Henry Talk plays a holding phrase ONLY after a `gathering` event: the words clearly
+            // ask for research or a lookup, or the provider actually starts a command, tool call,
+            // or web search (src/voice/intent.ts). Once per turn, voice turns only, and the event
+            // never carries the command or its arguments.
+            let gatheringSent = false;
+            const signalGathering = (reason: "request" | "tool"): void => {
+              if (!voiceMode || gatheringSent) return;
+              gatheringSent = true;
+              sseWrite(response, "gathering", { reason });
+            };
+            const onEvent = voiceMode
+              ? (event: ProviderEvent): void => { if (!gatheringSent && isToolStart(event.parsed)) signalGathering("tool"); streamHandler(event); }
+              : streamHandler;
+            if (voiceMode && isLookupRequest(prompt)) signalGathering("request");
             // allowWrites decides the sandbox: absent/false → agent.run makes the turn read-only.
             const voiceOption = voicePolicy ? { voice: { privateMode: voicePolicy.privateMode, allowWrites: voicePolicy.allowWrites } } : {};
             const runOptions = { surface: conversation.surface, onEvent, ...voiceOption };
@@ -1211,7 +1606,11 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
   });
   // Attachment retention runs with the dashboard (owner's decision: 30 days) and stops with it.
   const attachmentPurge = scheduleAttachmentPurge(runtime);
-  server.on("close", () => clearInterval(attachmentPurge));
+  server.on("close", () => {
+    clearInterval(attachmentPurge);
+    try { transcriptStore?.close(); } catch { /* already closed */ }
+    transcriptStore = undefined;
+  });
   server.listen(runtime.config.port, runtime.config.host);
   return server;
 }

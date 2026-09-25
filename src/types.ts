@@ -39,7 +39,12 @@ export type ActivityKind =
   | "task.completed"
   | "social.drafted"
   | "social.posted"
-  | "gmail.drafted";
+  | "gmail.drafted"
+  | "talk.session.started"
+  | "talk.session.ended"
+  | "voice.transcribed"
+  | "voice.failed"
+  | "voice.settings.updated";
 
 export interface ActivityEvent {
   id: string;

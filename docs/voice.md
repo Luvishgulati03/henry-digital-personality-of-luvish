@@ -146,3 +146,80 @@ In both modes the spoken reply is also filtered before speech. Private mode (`vo
 or `HENRY_VOICE_PRIVATE=1`) replaces it with a neutral status line. With private mode off,
 emails, phone numbers, OTPs, account numbers, and keys are redacted. A read-only turn can still
 *read* local files, so what it shows on screen is governed by the prompt's privacy rules.
+
+## Henry Talk (phase 3: dashboard voice)
+
+`/talk` is the hands-free voice page: tap the orb, Henry greets you ("Hey Luvish. I'm
+listening."), and from then on the mic re-arms itself after every reply until you tap again,
+press Escape, or stay silent (a "Still here. What do you need?" reprompt after 8 s, then a
+soft chime and sleep). It is owner-only like every other dashboard page (single admin role,
+loopback bypass) and runs entirely on this Mac.
+
+Entry points:
+
+- `http://127.0.0.1:7337/talk` directly (the URL `henry start` prints);
+- the **talk ↗** link on the dashboard rail;
+- the **Talk** chip in chat, which opens the page in an overlay joined to the open
+  conversation (`/talk?embed=1&captions=1&conversationId=…`). Spoken turns land in that thread
+  and the chat refreshes after each one; closing the overlay (✕ or Escape) blanks the frame so
+  the microphone is released.
+
+### One ongoing voice conversation
+
+Opened directly, Talk uses ONE conversation titled **Voice** for every session, so Henry
+remembers earlier voice sessions. Its id is kept in the browser's `localStorage` under
+`henry.voice.conversationId`; if that conversation was deleted, the next session (or the next
+turn, on a 404) creates a fresh "Voice" thread. The embedded overlay never touches this key.
+
+### How a turn flows
+
+1. **Speech onset.** Silero VAD (`@ricky0123/vad-web` 0.0.31 on `onnxruntime-web`) runs in the
+   page, served from `node_modules` through `/vendor/vad/<name>` under a fixed allowlist
+   (anything else, including traversal attempts, is a 404). If the bundle or model cannot load,
+   the page falls back to a simple energy VAD. Short end-of-turn window (700 ms), switched to a
+   longer one (1.4 s) for requests over 4 s, hard cap 25 s.
+2. **Transcription.** The page uploads a 16 kHz mono WAV to `POST /api/voice/transcribe`.
+   whisper.cpp gets a short vocabulary prompt (Henry, Luvish, Kelly, Codex, Claude, Engram, Luna,
+   …) and Whisper's native script is kept (Devanagari stays Devanagari). Private project names go
+   in `HENRY_VOICE_VOCABULARY` (comma-separated, local `.env`), never in code. The words are stored
+   in the transcript store with surface `talk`; the activity log gets timing and size only.
+3. **The turn.** The transcript goes to `/api/chat/send` with `voice: true`, so every phase-2
+   rail applies (read-only sandbox by default, `HENRY_VOICE_TURN`, no typed approval grammar).
+4. **Holding phrases.** Only a lookup hears one. The server sends a `gathering` SSE event once
+   per voice turn: `{reason:"request"}` up front when the words clearly ask for research or a
+   lookup (research, look up, search, find, check my, what's the latest, summarise, news, jobs,
+   email/inbox/mail, calendar), or `{reason:"tool"}` the first time the provider starts a command,
+   tool call, or web search. Chit-chat never gets it. The page then plays "Give me a moment while
+   I look into it." and, if still waiting, "Still working on it, almost there."
+5. **Speech.** Each `spoken` line is queued and played in order (half-duplex: the mic is off
+   while Henry speaks). `POST /api/voice/speak` re-applies the privacy filter on the server
+   before synthesis: private mode turns anything into a neutral status line, otherwise emails,
+   phones, OTPs, account numbers and keys are redacted. With `chunk: true` the response is
+   `application/x-henry-wav-seq`: frames of a 4-byte big-endian length followed by one WAV each.
+
+Captions are on by default (you read along); `?captions=0` hides them. The mute button stops
+Henry's voice but keeps captions.
+
+### Routes
+
+| Route | Purpose |
+| --- | --- |
+| `GET /talk` | The Talk page. |
+| `GET /api/voice/status` | `{available, sttEnabled, ttsEnabled, talkEnabled, privateMode, allowWrites, reason?}`. |
+| `POST /api/voice/transcribe` | 16 kHz WAV body (max 8 MB) → `{text, transcriptId}`; nothing kept in private mode. |
+| `POST /api/voice/speak` | `{text, chunk?}` → WAV, or the framed sequence; redacted / private-mode line only. |
+| `GET /api/voice/greeting`, `/reprompt`, `/filler?v=0|1` | Fixed phrases, synthesised once and cached in `data/voice/cache/` (0600). |
+| `POST /api/voice/talk/session` | `{event:"start"}` / `{event:"end", turns, reason}` → `talk.session.started/ended` activity. |
+| `GET/POST /api/voice/settings` | `privateMode`, `allowWrites`, `talkEnabled`, `retentionDays` (same-origin writes). |
+| `GET /api/voice/transcripts` | Recent transcripts, text only (no audio paths). |
+| `GET /vendor/vad/<name>` | Allowlisted VAD/ONNX runtime assets from `node_modules`. |
+
+With STT or TTS not configured these routes answer cleanly (503/404 with a plain message), the
+status says why, and the Talk page shows "Voice is off" instead of a broken orb.
+
+### Voice settings card
+
+The dashboard's **voice** card toggles private mode, allow writes (with the warning "Voice can
+stage drafts; approvals and sends stay typed." and a confirm), the Talk page itself, and how many
+days transcripts are kept. A value forced by `HENRY_VOICE_PRIVATE` or `HENRY_VOICE_ALLOW_WRITES`
+shows its effective state, locked, with a note saying which variable set it.
