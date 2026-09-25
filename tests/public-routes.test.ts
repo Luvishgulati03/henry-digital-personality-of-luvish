@@ -7,7 +7,7 @@ import { PUBLIC_ORIGIN, cookieFrom, publicHarness, tunnel } from "./public-harne
 import { TUNNEL_LOGIN_ROUTES } from "../src/dashboard/server.ts";
 import { PUBLIC_TUNNEL_ROUTES, isPublicRequest, matchPublicRoute } from "../src/public/surface.ts";
 import {
-  MIN_OWNER_PASSWORD_LENGTH, SESSION_ABSOLUTE_MS, SESSION_IDLE_MS, endAllSessions, issueSession, ownerAccountExists, readSession, setOwnerPassword, verifyLogin,
+  MIN_OWNER_PASSWORD_LENGTH, SESSION_ABSOLUTE_MS, createUser, SESSION_IDLE_MS, endAllSessions, issueSession, ownerAccountExists, readSession, setOwnerPassword, verifyLogin,
 } from "../src/dashboard/auth.ts";
 import { remoteAdminEnabled } from "../src/dashboard/remote-admin.ts";
 
@@ -218,6 +218,23 @@ test("owner through the tunnel: not set up until `henry admin password`; then a 
     assert.equal((await fetch(`${h.base}/api/approvals`, { headers: { ...tunnel(), cookie: again } })).status, 200);
     assert.ok(endAllSessions() >= 1);
     assert.equal((await fetch(`${h.base}/api/approvals`, { headers: { ...tunnel(), cookie: again } })).status, 401);
+  } finally { await h.close(); }
+});
+
+test("only the owner account works through the tunnel; any other account is refused there and still works locally", async () => {
+  const h = await publicHarness();
+  try {
+    setOwnerPassword(OWNER_PASSWORD);
+    createUser({ username: "other", password: OWNER_PASSWORD, role: "admin" });
+    const other = await fetch(`${h.base}/login`, {
+      method: "POST", redirect: "manual",
+      headers: { ...tunnel(), origin: PUBLIC_ORIGIN, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ username: "other", password: OWNER_PASSWORD }).toString(),
+    });
+    assert.equal(other.headers.get("location"), "/login?error=1");
+    const localAccount = verifyLogin("other", OWNER_PASSWORD)!;
+    const localCookie = issueSession(localAccount).cookie.split(";")[0];
+    assert.equal((await fetch(`${h.base}/api/approvals`, { headers: { ...tunnel(), cookie: localCookie } })).status, 401, "a non-owner session is never honoured through the tunnel");
   } finally { await h.close(); }
 });
 

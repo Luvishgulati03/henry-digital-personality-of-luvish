@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { DASHBOARD_HTML } from "./page.ts";
 import {
   clearLoginFailures, clearedSessionCookie, endSession, issueSession, loginLockedFor, ownerAccountExists, readSession,
-  recordLoginFailure, requireRole, verifyLogin, type Role, type SessionUser,
+  recordLoginFailure, requireRole, verifyLogin, OWNER_USERNAME, type Role, type SessionUser,
 } from "./auth.ts";
 import { RemoteLoginAlerts, remoteAdminEnabled } from "./remote-admin.ts";
 import { KnowledgeBase } from "../knowledge/store.ts";
@@ -890,7 +890,9 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
       const route = url.pathname.replace(/\/$/, "") || "/";
       let tunnelOwner: SessionUser | undefined;
       if (tunnelled) {
-        tunnelOwner = remoteAdminEnabled() ? readSession(request.headers.cookie) : undefined;
+        // Only the `owner` account (`henry admin password`) is ever honoured through the link.
+        const session = remoteAdminEnabled() ? readSession(request.headers.cookie) : undefined;
+        tunnelOwner = session?.username === OWNER_USERNAME ? session : undefined;
         const loginRoute = TUNNEL_LOGIN_ROUTES.includes(`${request.method} ${route}`);
         if (!tunnelOwner && !loginRoute) {
           if (matchPublicRoute(request.method, url.pathname)) { await publicSurface.handle(request, response, url, true); return; }
@@ -1214,7 +1216,8 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
         // Throttled by USERNAME alone (auth.ts): behind the tunnel the peer is always 127.0.0.1
         // and a forwarded client address is never allowed to decide who may try a password.
         if (loginLockedFor(username) > 0) { redirect(response, "/login?error=locked"); return; }
-        const account = username && password ? verifyLogin(username, password) : undefined;
+        const account = username && password && (!tunnelled || username.toLowerCase() === OWNER_USERNAME)
+          ? verifyLogin(username, password) : undefined;
         // Never echo the attempt back in the URL — no username, no reason, no timing tell.
         if (!account) {
           const locked = recordLoginFailure(username);
