@@ -61,11 +61,18 @@ export interface Visitor {
   pinged: boolean;
   /** Recent replies by id, so the talk page can ask for speech of a reply Henry actually gave. */
   replies: Map<string, string>;
+  /**
+   * Streamed sentences of a voice reply, by id, so the talk page can speak the first sentence
+   * while the rest is still being written. `free` marks a follow-on sentence of a reply whose
+   * first sentence already paid the speech rate limit; it is free once, then spent.
+   */
+  segments: Map<string, { text: string; free: boolean }>;
 }
 
 const MAX_QUESTIONS = 30;
 const MAX_QUESTION_CHARS = 300;
 const MAX_REPLIES_KEPT = 6;
+const MAX_SEGMENTS_KEPT = 24;
 
 export class VisitorStore {
   private readonly visitors = new Map<string, Visitor>();
@@ -93,7 +100,7 @@ export class VisitorStore {
     }
     const visitor: Visitor = {
       id, createdAt: at, lastSeen: at, history: [], questions: [], details: {}, turns: 0,
-      channels: new Set(), busy: false, noticeSent: false, pinged: false, replies: new Map(),
+      channels: new Set(), busy: false, noticeSent: false, pinged: false, replies: new Map(), segments: new Map(),
     };
     this.visitors.set(id, visitor);
     return { visitor, created: true, ...(evicted ? { evicted } : {}) };
@@ -110,6 +117,12 @@ export class VisitorStore {
     while (visitor.replies.size > MAX_REPLIES_KEPT) visitor.replies.delete(visitor.replies.keys().next().value as string);
   }
 
+  /** Registers one streamed, already-guarded sentence as speakable by id. */
+  recordSegment(visitor: Visitor, segmentId: string, text: string, free: boolean): void {
+    visitor.segments.set(segmentId, { text, free });
+    while (visitor.segments.size > MAX_SEGMENTS_KEPT) visitor.segments.delete(visitor.segments.keys().next().value as string);
+  }
+
   recordQuestion(visitor: Visitor, message: string): void {
     const clean = message.replace(/\s+/g, " ").trim();
     if (!clean) return;
@@ -122,6 +135,7 @@ export class VisitorStore {
   resetConversation(visitor: Visitor): void {
     visitor.history = [];
     visitor.replies.clear();
+    visitor.segments.clear();
   }
 
   /** Removes and returns every visitor idle for at least idleMs (never one mid-turn). */

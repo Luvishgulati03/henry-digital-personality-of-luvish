@@ -80,7 +80,11 @@ export interface RunOptions {
    * `connector`, `outputSchemaPath` and `voiceTurn` are ignored. `systemPrompt` carries the public
    * rules: Claude receives it via --system-prompt; Codex receives it prepended to the prompt.
    */
-  publicTurn?: { systemPrompt: string };
+  publicTurn?: {
+    systemPrompt: string;
+    /** A model per provider for this public turn (HENRY_PUBLIC_MODEL); absent keeps the tier's model. */
+    models?: Partial<Record<ProviderName, string>>;
+  };
   onEvent?: (event: ProviderEvent) => void;
 }
 
@@ -807,7 +811,7 @@ export class ProviderRunner {
             ? { id: options.session.id, fresh: options.session.fresh }
             : this.sessions().acquire(options.surface, provider))
         : undefined;
-      const publicModel = options.publicTurn ? resolveProviderRoute(provider, {
+      const publicModel = options.publicTurn ? options.publicTurn.models?.[provider] ?? resolveProviderRoute(provider, {
         tier: options.tier,
         codexModel: this.config.codexModel, codexT0Model: this.config.codexT0Model, codexT2Model: this.config.codexT2Model,
         claudeModel: this.config.claudeModel, claudeT0Model: this.config.claudeT0Model, claudeT2Model: this.config.claudeT2Model,
@@ -880,7 +884,7 @@ export class ProviderRunner {
         "run.started",
         `Starting ${provider} run`,
         {
-          cwd, tier: route.tier, requestedTier: options.tier ?? null, model: route.model ?? null,
+          cwd, tier: route.tier, requestedTier: options.tier ?? null, model: (options.publicTurn ? publicModel : route.model) ?? null,
           role: options.role ?? null, roleModelOverride: route.roleModelOverride,
           promptBuildMs: options.promptBuildMs ?? null, queuedMs: decision.queuedMs, ...(queued ? { queued: true } : {}),
         },

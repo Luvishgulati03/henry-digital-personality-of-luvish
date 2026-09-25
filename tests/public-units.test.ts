@@ -84,6 +84,17 @@ test("public mode config: the pack lives under <dataDir>/public-pack/published; 
   assert.equal(publicModeConfig({ dataDir: "/d" }, { HENRY_PUBLIC_PROVIDER: "codex", HENRY_PUBLIC_MAX_CONCURRENT: "999" }).maxConcurrent, 8);
 });
 
+test("public mode config: Claude public turns default to the measured fast model; HENRY_PUBLIC_MODEL/TIER override", () => {
+  assert.equal(publicModeConfig({ dataDir: "/d" }, {}).model, "sonnet");
+  assert.equal(publicModeConfig({ dataDir: "/d" }, {}).tier, "t1");
+  assert.equal(publicModeConfig({ dataDir: "/d" }, { HENRY_PUBLIC_MODEL: "haiku" }).model, "haiku");
+  assert.equal(publicModeConfig({ dataDir: "/d" }, { HENRY_PUBLIC_MODEL: "default" }).model, undefined, "default = the CLI's own default");
+  assert.equal(publicModeConfig({ dataDir: "/d" }, { HENRY_PUBLIC_MODEL: "--dangerously-skip-permissions" }).model, undefined, "never an argv flag");
+  assert.equal(publicModeConfig({ dataDir: "/d" }, { HENRY_PUBLIC_TIER: "t0" }).model, undefined, "an explicit tier uses that tier's model");
+  assert.equal(publicModeConfig({ dataDir: "/d" }, { HENRY_PUBLIC_PROVIDER: "codex" }).model, undefined, "Codex keeps its tier model unless named");
+  assert.equal(publicModeConfig({ dataDir: "/d" }, { HENRY_PUBLIC_PROVIDER: "codex", HENRY_PUBLIC_MODEL: "gpt-5.5" }).model, "gpt-5.5");
+});
+
 /* ---------------------------- persona ---------------------------- */
 
 test("persona: only the soul.md 'Public mode' section is used, never the private contract", async () => {

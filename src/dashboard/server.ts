@@ -37,7 +37,9 @@ import { LocalVoiceService, VoiceError, voiceConfigFromEnv, type VoiceLanguage }
 import { VoiceTranscriptStore, readVoiceSettings, updateVoiceSettings } from "../voice/transcripts.ts";
 import { isLookupRequest, isToolStart } from "../voice/intent.ts";
 import { readSettings, updateSettings } from "../util/settings.ts";
-import { createPublicSurface, isPublicPath, isPublicRequest, matchPublicRoute, trustedPublicOrigins, type PublicSurface, type PublicSurfaceDeps } from "../public/surface.ts";
+import { VENDOR_CACHE_CONTROL, createPublicSurface, isPublicPath, isPublicRequest, matchPublicRoute, trustedPublicOrigins, type PublicSurface, type PublicSurfaceDeps } from "../public/surface.ts";
+import { PublicLog } from "../public/log.ts";
+import type { TunnelStatusEvent } from "../remote/tunnel.ts";
 import { sendTelegram } from "../notify/telegram.ts";
 
 const EVENTS_POLL_MS = 2000;
@@ -317,6 +319,40 @@ function wavDurationSeconds(audio: Buffer): number | undefined {
 /** The local voice engine surface the dashboard uses; injectable so tests never need whisper/Kokoro. */
 export type DashboardVoice = Pick<LocalVoiceService, "sttEnabled" | "ttsEnabled" | "transcribe" | "synthesize">;
 
+/**
+ * Mirrors the tunnel's transitions into the public request log, and records a `public.tunnel`
+ * activity event when a connected link drops or comes back (with how long it was down). The
+ * TunnelManager already journals every remote.* transition; this adds the visitor-facing view.
+ * Returns the unsubscribe.
+ */
+function watchTunnelForLog(runtime: HenryRuntime, log: PublicLog): () => void {
+  let tunnel: HenryRuntime["tunnel"];
+  try { tunnel = runtime.tunnel; } catch { return () => undefined; }
+  let wasActive = tunnel.active;
+  let lostAt: number | undefined;
+  const handler = ({ kind, status }: TunnelStatusEvent): void => {
+    if (kind === "remote.started" && status.active) {
+      const downMs = lostAt !== undefined ? Date.now() - lostAt : undefined;
+      log.event("tunnel", { event: downMs !== undefined ? "reconnected" : "connected", restarts: status.restarts, ...(downMs !== undefined ? { downMs } : {}) });
+      if (downMs !== undefined) void runtime.activity.record("public.tunnel", "Public link reconnected", { public: true, downMs, restarts: status.restarts }).catch(() => undefined);
+      lostAt = undefined;
+    } else if (kind === "remote.failed") {
+      const reason = (status.lastError ?? "unknown").slice(0, 200);
+      log.event("tunnel", { event: wasActive ? "lost" : "failed", restarts: status.restarts, reason });
+      if (wasActive) {
+        lostAt = Date.now();
+        void runtime.activity.record("public.tunnel", "Public link lost", { public: true, reason, restarts: status.restarts }).catch(() => undefined);
+      }
+    } else if (kind === "remote.stopped") {
+      log.event("tunnel", { event: "stopped" });
+      lostAt = undefined;
+    }
+    wasActive = status.active;
+  };
+  tunnel.on("status", handler);
+  return () => { tunnel.off("status", handler); };
+}
+
 export interface DashboardOptions {
   /** Defaults to `new LocalVoiceService(voiceConfigFromEnv())` (HENRY_* env, set by `henry start`). */
   voice?: DashboardVoice;
@@ -328,6 +364,8 @@ export interface DashboardOptions {
   ownerSend?: (text: string) => Promise<boolean>;
   /** Receives the public face once built (tests drive its idle sweep directly). */
   onPublicSurface?: (surface: PublicSurface) => void;
+  /** The public request log (`<dataDir>/logs/public.log`); tests pass one with a fixed key. */
+  publicLog?: PublicLog;
 }
 
 /**
@@ -891,6 +929,11 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
   const ownerSend = options.ownerSend ?? ((text: string) => sendTelegram(runtime.config, text));
   const loginAlerts = new RemoteLoginAlerts(ownerSend);
   const tunnelUrl = (): string | undefined => { try { return runtime.tunnel.status().url; } catch { return undefined; } };
+  // THE PUBLIC REQUEST LOG (src/public/log.ts): every tunnelled request and every local /public/*
+  // preview gets one JSON line in <dataDir>/logs/public.log, plus the tunnel's transitions, so a
+  // "the site went down" report can be diagnosed afterwards. No message text, audio, IPs or cookies.
+  const publicLog = options.publicLog ?? new PublicLog(runtime.config.dataDir);
+  const tunnelWatch = watchTunnelForLog(runtime, publicLog);
   // HENRY'S PUBLIC FACE (src/public/surface.ts): all an unauthenticated tunnel visitor can reach.
   const publicSurface = createPublicSurface({
     config: runtime.config,
@@ -905,6 +948,7 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
     tunnelUrl,
     ownerAccess: () => (!remoteAdminEnabled() ? "off" : ownerAccountExists() ? "ready" : "not-set-up"),
     send: ownerSend,
+    log: publicLog,
     ...(options.publicSurface?.mode ? { mode: options.publicSurface.mode } : {}),
     ...(options.publicSurface?.now ? { now: options.publicSurface.now } : {}),
     ...(options.publicSurface?.env ? { env: options.publicSurface.env } : {}),
@@ -923,12 +967,14 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
       // valid owner session (and HENRY_REMOTE_ADMIN not off) it falls through to the full
       // dashboard below, under the exact-origin CSRF rule in localOrigin().
       const tunnelled = isPublicRequest(request, { allowRemoteDashboard: runtime.config.allowRemoteDashboard });
+      if (tunnelled || isPublicPath(url.pathname)) publicLog.track(request, response, url, tunnelled);
       const route = url.pathname.replace(/\/$/, "") || "/";
       let tunnelOwner: SessionUser | undefined;
       if (tunnelled) {
         // Only the `owner` account (`henry admin password`) is ever honoured through the link.
         const session = remoteAdminEnabled() ? readSession(request.headers.cookie) : undefined;
         tunnelOwner = session?.username === OWNER_USERNAME ? session : undefined;
+        if (tunnelOwner) publicLog.annotate(response, { owner: true });
         const loginRoute = TUNNEL_LOGIN_ROUTES.includes(`${request.method} ${route}`);
         if (!tunnelOwner && !loginRoute) {
           if (matchPublicRoute(request.method, url.pathname)) { await publicSurface.handle(request, response, url, true); return; }
@@ -1012,7 +1058,7 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
         try { name = decodeURIComponent(vendorVadRoute[1]); } catch { /* malformed escape: not on the allowlist */ }
         const asset = name ? await vendorVadAsset(name) : null;
         if (!asset) { json(response, 404, { error: "asset not found" }); return; }
-        response.writeHead(200, { "content-type": asset.contentType, "content-length": asset.bytes.length, "cache-control": "public, max-age=86400", "x-content-type-options": "nosniff" });
+        response.writeHead(200, { "content-type": asset.contentType, "content-length": asset.bytes.length, "cache-control": VENDOR_CACHE_CONTROL, "x-content-type-options": "nosniff" });
         response.end(asset.bytes);
         return;
       }
@@ -1790,6 +1836,7 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
   const attachmentPurge = scheduleAttachmentPurge(runtime);
   server.on("close", () => {
     clearInterval(attachmentPurge);
+    tunnelWatch();
     void publicSurface.close().catch(() => undefined);
     try { transcriptStore?.close(); } catch { /* already closed */ }
     transcriptStore = undefined;

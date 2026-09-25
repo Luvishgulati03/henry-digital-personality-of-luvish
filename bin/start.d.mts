@@ -29,6 +29,14 @@ export declare function waitReady(url: string | URL, options?: {
 export declare function supervise(
   commands: Array<{ file: string; args: string[] }>,
   ready: (alive: () => boolean) => Promise<void>,
-  options?: { spawnProcess?: unknown; graceMs?: number; env?: NodeJS.ProcessEnv },
+  options?: { spawnProcess?: unknown; graceMs?: number; env?: NodeJS.ProcessEnv; pipeOutput?: boolean },
 ): Promise<void>;
+export declare function teeServiceOutput(
+  dataDir: string,
+  options?: {
+    streams?: { stdout: { write: (...args: any[]) => boolean }; stderr: { write: (...args: any[]) => boolean } };
+    createLog?: () => { append(text: string): void };
+    now?: () => Date;
+  },
+): Promise<() => void>;
 export declare function startHenry(args: string[]): Promise<void>;

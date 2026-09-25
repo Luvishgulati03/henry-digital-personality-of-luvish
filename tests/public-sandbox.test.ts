@@ -62,6 +62,8 @@ test("Claude public argv: no tools at all, no MCP, no settings, no session, the 
     assert.ok(args.includes("--no-session-persistence"));
     assert.ok(args.includes("--disable-slash-commands"));
     assert.equal(flag("--system-prompt"), system);
+    assert.equal(flag("--output-format"), "stream-json");
+    assert.ok(args.includes("--include-partial-messages"), "text deltas stream to the public face");
     for (const forbidden of ["--dangerously-skip-permissions", "--allowedTools", "--add-dir", "--resume", "--session-id", "--continue", "--settings", "--plugin-dir", "--agents"]) {
       assert.ok(!args.includes(forbidden), `${forbidden} must never appear on a public turn`);
     }
@@ -168,6 +170,24 @@ test("ProviderRunner.run(publicTurn): public argv, scratch cwd, no session, no c
   assert.equal(attempt.options.voiceTurn, false);
   assert.equal(attempt.options.surface, undefined);
   assert.equal(attempt.options.connector, undefined);
+});
+
+test("ProviderRunner.run(publicTurn): HENRY_PUBLIC_MODEL picks the first provider's model; the reply reports the model that answered", async () => {
+  const init = { timestamp: "", stream: "stdout", text: "", parsed: { type: "system", subtype: "init", tools: [], mcp_servers: [], model: "claude-sonnet-x" } } as ProviderEvent;
+  const { runner, attempts, activity } = await runnerHarness(() => ({ response: "Hi.", events: [init, claudeResult("Hi.")], firstTextMs: 1234 }));
+  const turn = await runPublicModelTurn(runner, { provider: "claude", failover: true, tier: "t1", turnTimeoutMs: 30_000, model: "sonnet" }, prompt("hi"));
+  const args = attempts[0].args;
+  assert.equal(args[args.indexOf("--model") + 1], "sonnet");
+  assert.equal(turn.model, "claude-sonnet-x", "the model the CLI reported, not just the alias asked for");
+  assert.equal(turn.firstTextMs, 1234);
+  const started = (await activity.list(20)).find((event) => event.kind === "run.started");
+  assert.equal(started?.metadata?.model, "sonnet", "run.started records the public model actually requested");
+
+  // The visit-summary turn passes model: null and keeps the tier's model (t0 → haiku by default).
+  const summary = await runnerHarness(() => ({ response: "{}", events: [claudeResult("{}")] }));
+  await runPublicModelTurn(summary.runner, { provider: "claude", failover: true, tier: "t1", turnTimeoutMs: 30_000, model: "sonnet" }, prompt("hi"), { tier: "t0", model: null });
+  const summaryArgs = summary.attempts[0].args;
+  assert.equal(summaryArgs[summaryArgs.indexOf("--model") + 1], "haiku");
 });
 
 test("ProviderRunner.run(publicTurn): a tool call or a loaded tool discards the answer, with no failover", async () => {

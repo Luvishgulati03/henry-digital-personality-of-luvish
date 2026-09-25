@@ -34,6 +34,13 @@ export interface PublicModeConfig {
   /** Let a public turn fail over to the other (equally locked-down) CLI when the first is out of quota. */
   failover: boolean;
   tier: DispatchTier;
+  /**
+   * Model the FIRST-CHOICE public provider runs (HENRY_PUBLIC_MODEL; a failover CLI keeps its own
+   * tier model). Claude defaults to "sonnet": measured 2026-09 it reaches first text faster than
+   * haiku (the t0 model) on a public prompt, and naming it keeps a CLI default change from
+   * silently moving the public face onto a slower model. "default" means the CLI's own default.
+   */
+  model?: string;
   /** Opening line shown and spoken on both faces; the default is generic. */
   opening?: string;
   /** Global cap on "ping the owner" messages per rolling hour. */
@@ -59,8 +66,23 @@ export function publicPackDir(dataDir: string): string {
   return path.join(dataDir, "public-pack", "published");
 }
 
+/** The fast model public Claude turns use unless HENRY_PUBLIC_MODEL or HENRY_PUBLIC_TIER says otherwise. */
+export const DEFAULT_PUBLIC_CLAUDE_MODEL = "sonnet";
+
+/** CLI model aliases and ids: letters, digits, dot, dash, underscore, colon, slash, brackets. */
+const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,63}$/;
+
+function publicModel(value: string | undefined, provider: ProviderName, tier: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (trimmed) return trimmed.toLowerCase() === "default" || !MODEL_NAME.test(trimmed) ? undefined : trimmed;
+  // An explicit tier choice means "that tier's model"; otherwise Claude gets the measured fast model.
+  if (tier === "t0" || tier === "t2") return undefined;
+  return provider === "claude" ? DEFAULT_PUBLIC_CLAUDE_MODEL : undefined;
+}
+
 export function publicModeConfig(config: Pick<HenryConfig, "dataDir">, env: NodeJS.ProcessEnv = process.env): PublicModeConfig {
   const tier = env.HENRY_PUBLIC_TIER === "t0" || env.HENRY_PUBLIC_TIER === "t2" ? env.HENRY_PUBLIC_TIER : "t1";
+  const provider: ProviderName = env.HENRY_PUBLIC_PROVIDER === "codex" ? "codex" : "claude";
   return {
     packDir: publicPackDir(config.dataDir),
     maxPackBytes: int(env.HENRY_PUBLIC_PACK_MAX_BYTES, 60_000, 4_000, 200_000),
@@ -78,9 +100,10 @@ export function publicModeConfig(config: Pick<HenryConfig, "dataDir">, env: Node
     perClientPerHour: int(env.HENRY_PUBLIC_CLIENT_PER_HOUR, 120, 1, 5_000),
     maxAudioBytes: int(env.HENRY_PUBLIC_MAX_AUDIO_BYTES, 2_000_000, 64_000, 8 * 1024 * 1024),
     maxAudioSeconds: int(env.HENRY_PUBLIC_MAX_AUDIO_SECONDS, 30, 3, 120),
-    provider: env.HENRY_PUBLIC_PROVIDER === "codex" ? "codex" : "claude",
+    provider,
     failover: flag(env.HENRY_PUBLIC_FAILOVER, true),
     tier,
+    model: publicModel(env.HENRY_PUBLIC_MODEL, provider, env.HENRY_PUBLIC_TIER),
     opening: env.HENRY_PUBLIC_OPENING?.trim() || undefined,
     pingsPerHour: int(env.HENRY_PUBLIC_PINGS_PER_HOUR, 5, 0, 100),
     noticeIntervalMs: int(env.HENRY_PUBLIC_NOTICE_MINUTES, 10, 0, 1_440) * 60_000,

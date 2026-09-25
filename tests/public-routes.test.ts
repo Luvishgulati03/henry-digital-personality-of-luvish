@@ -63,6 +63,29 @@ function allowlisted(method: string, pathName: string): boolean {
   return Boolean(matchPublicRoute(method, route)) || TUNNEL_LOGIN_ROUTES.includes(`${method} ${route}`);
 }
 
+test("the tunnel allowlist is exactly this list (a new public route must be added here on purpose)", () => {
+  assert.deepEqual([...PUBLIC_TUNNEL_ROUTES], [
+    "GET /",
+    "GET /public/chat",
+    "GET /public/talk",
+    "GET /public/manifest.webmanifest",
+    "GET /public/icon.svg",
+    "GET /vendor/vad/*",
+    "GET /api/health",
+    "GET /api/public/config",
+    "GET /api/public/voice/greeting",
+    "GET /api/public/voice/reprompt",
+    "GET /api/public/voice/filler",
+    "POST /api/public/chat",
+    "POST /api/public/reset",
+    "POST /api/public/ping",
+    "POST /api/public/voice/transcribe",
+    "POST /api/public/voice/speak",
+    "POST /api/public/client-log",
+  ]);
+  assert.deepEqual([...TUNNEL_LOGIN_ROUTES], ["GET /login", "POST /login", "GET /logout"]);
+});
+
 test("route walk: an unauthenticated tunnel request reaches ONLY the landing, login, public allowlist, and health", async () => {
   const h = await publicHarness();
   try {
