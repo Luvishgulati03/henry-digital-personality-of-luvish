@@ -7,7 +7,8 @@ import { startDashboard, type DashboardVoice } from "../src/dashboard/server.ts"
 import { resetLoginThrottleForTests } from "../src/dashboard/auth.ts";
 import { publicModeConfig, type PublicModeConfig } from "../src/public/config.ts";
 import type { RunOptions } from "../src/providers/runner.ts";
-import type { RunResult } from "../src/types.ts";
+import type { ProviderEvent, RunResult } from "../src/types.ts";
+import { PublicLog } from "../src/public/log.ts";
 
 /**
  * A loopback dashboard on a temp root with the public face wired to fakes: a scripted provider
@@ -32,6 +33,13 @@ export interface PublicHarness {
   runtime: HenryRuntime;
   runs: Array<{ prompt: string; options: RunOptions }>;
   reply: { current: string | ((prompt: string) => string | Promise<string>) };
+  /**
+   * When set, the fake runner plays these provider events through options.onEvent (one per tick,
+   * like a real CLI's stdout) and answers with them; `error` makes the run fail as the runner would.
+   */
+  stream: { current?: (prompt: string) => { events: ProviderEvent[]; error?: string } };
+  /** The public request log, with a fixed HMAC key. */
+  log: PublicLog;
   sends: string[];
   notes: Array<{ content: string; input: Record<string, unknown> | undefined }>;
   tts: string[];
@@ -59,9 +67,20 @@ export async function publicHarness(options: { pack?: boolean; mode?: Partial<Pu
   }
   const runs: PublicHarness["runs"] = [];
   const reply: PublicHarness["reply"] = { current: "Alex Example builds products." };
+  const stream: PublicHarness["stream"] = {};
   const runner = {
     run: async (prompt: string, runOptions: RunOptions): Promise<RunResult> => {
       runs.push({ prompt, options: runOptions });
+      if (stream.current) {
+        const scripted = stream.current(prompt);
+        for (const event of scripted.events) {
+          await new Promise((resolve) => setImmediate(resolve));
+          runOptions.onEvent?.(event);
+        }
+        const result = [...scripted.events].reverse().find((event) => event.parsed?.type === "result");
+        const text = typeof result?.parsed?.result === "string" ? result.parsed.result : "";
+        return { runId: `run-${runs.length}`, provider: "claude", response: scripted.error ? "" : text, exitCode: scripted.error ? 1 : 0, durationMs: 1, events: scripted.events, firstTextMs: 5, ...(scripted.error ? { error: scripted.error } : {}) };
+      }
       const text = typeof reply.current === "function" ? await reply.current(prompt) : reply.current;
       return {
         runId: `run-${runs.length}`, provider: "claude", response: text, exitCode: 0, durationMs: 1,
@@ -81,8 +100,10 @@ export async function publicHarness(options: { pack?: boolean; mode?: Partial<Pu
   } as unknown as DashboardVoice;
   const mode: PublicModeConfig = { ...publicModeConfig(runtime.config, {}), ...options.mode };
   let sweep: () => Promise<number> = async () => 0;
+  const log = new PublicLog(runtime.config.dataDir, { key: Buffer.alloc(32, 7) });
   const server = startDashboard(runtime, {
     voice,
+    publicLog: log,
     warmVoicePrompts: false,
     publicSurface: {
       runner,
@@ -99,7 +120,7 @@ export async function publicHarness(options: { pack?: boolean; mode?: Partial<Pu
   assert.ok(address && typeof address !== "string");
   return {
     base: `http://127.0.0.1:${address.port}`,
-    runtime, runs, reply, sends, notes, tts, stt,
+    runtime, runs, reply, stream, log, sends, notes, tts, stt,
     sweep: () => sweep(),
     async close() {
       await new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); });
@@ -123,6 +144,17 @@ export function cookieFrom(response: Response, existing = ""): string {
     jar.set(pair.split("=")[0], pair);
   }
   return [...jar.values()].join("; ");
+}
+
+/** Claude stream-json events for a reply streamed in `chunks` (init, text deltas, final result). */
+export function claudeStream(chunks: string[], options: { result?: string; extra?: ProviderEvent[] } = {}): ProviderEvent[] {
+  const event = (parsed: Record<string, unknown>): ProviderEvent => ({ timestamp: "", stream: "stdout", text: "", parsed });
+  return [
+    event({ type: "system", subtype: "init", tools: [], mcp_servers: [], model: "claude-test-model" }),
+    ...chunks.map((text) => event({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } } })),
+    ...(options.extra ?? []),
+    event({ type: "result", result: options.result ?? chunks.join("").trim(), is_error: false }),
+  ];
 }
 
 /** Parses an SSE body into [event, data] pairs. */

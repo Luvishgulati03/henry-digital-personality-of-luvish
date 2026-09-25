@@ -489,6 +489,12 @@ async function main(): Promise<void> {
   const command = args[0] || "repl";
   if (command === "tunnel") { await tunnelCommand(); return; }
   if (command === "admin") { await adminCommand(); return; }
+  if (command === "public" && (args[1] === "logs" || args[1] === "status")) {
+    // Read-only views of the public surface's logs and health: no runtime, no memory, no DBs.
+    const [{ runPublicOpsCommand }, { loadConfig }] = await Promise.all([import("./public/cli.ts"), import("./config.ts")]);
+    await runPublicOpsCommand(loadConfig(), args[1], args.slice(2));
+    return;
+  }
   const runtime = await HenryRuntime.create();
   let keepAlive = false;
   try {
@@ -971,7 +977,7 @@ async function main(): Promise<void> {
       } else throw new Error("Usage: henry mailwatch check|status|tracker|backfill --days <n>|digest [--send]");
     } else if (command === "public") {
       const sub = args[1];
-      if (sub !== "pack") throw new Error("Usage: henry public pack init|lint|show|publish [--yes]");
+      if (sub !== "pack") throw new Error("Usage: henry public pack init|lint|show|publish [--yes] | henry public logs [--follow] [--errors] [--start] | henry public status");
       await runPublicPackCommand(runtime.config, args.slice(2));
     } else if (command === "pm") {
       const sub = args[1] || "status";

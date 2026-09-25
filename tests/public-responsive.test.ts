@@ -52,6 +52,8 @@ test("public landing, chat and talk pass the mobile/tablet checks and link no ad
         viewport: { width: viewport.width, height: viewport.height }, isMobile: viewport.width < 500, hasTouch: true, deviceScaleFactor: 2,
         extraHTTPHeaders: { "cf-connecting-ip": "203.0.113.7", "cf-ray": "8f00000000000000-LHR" },
       });
+      // Tests never reach the network: the talk page's CDN preload is refused (it falls back locally).
+      await context.route("https://cdn.jsdelivr.net/**", (route) => route.abort());
       for (const route of ["/", "/public/chat", "/public/talk"]) {
         const page = await context.newPage();
         await page.goto(h.base + route, { waitUntil: "networkidle" });

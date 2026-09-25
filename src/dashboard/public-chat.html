@@ -160,7 +160,16 @@
         return;
       }
       const reader = response.body.getReader(), decoder = new TextDecoder();
-      let buffer = '', answered = false;
+      // The reply streams a sentence at a time (each already through the server's output guard).
+      // `reset`/`replace` withdraw what was streamed; `done` carries the final reply, which wins.
+      let buffer = '', answered = false, live = null, text = '';
+      const show = (value) => {
+        text = value;
+        if (!live) { pending.remove(); live = add('henry', ''); }
+        live.textContent = text;
+        log.scrollTop = log.scrollHeight;
+      };
+      const withdraw = () => { text = ''; if (live) { live.remove(); live = null; log.appendChild(pending); } };
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -171,12 +180,16 @@
           const raw = (block.match(/^data: (.+)$/m) || [])[1];
           if (!raw) continue;
           let data; try { data = JSON.parse(raw); } catch { continue; }
+          if (answered) continue;
           if (event === 'status' && data.state === 'queued') pending.setAttribute('aria-label', 'Henry will answer in a moment');
-          else if (event === 'done' && !answered) { answered = true; pending.remove(); add('henry', data.response || ''); }
-          else if (event === 'error') { answered = true; pending.remove(); add('error', data.error || 'Sorry, something went wrong.'); }
+          else if (event === 'token') show(text + (data.text || ''));
+          else if (event === 'reset') withdraw();
+          else if (event === 'replace') show(data.text || '');
+          else if (event === 'done') { answered = true; show(data.response || ''); }
+          else if (event === 'error') { answered = true; withdraw(); pending.remove(); add('error', data.error || 'Sorry, something went wrong.'); }
         }
       }
-      if (!answered) { pending.remove(); add('error', 'The connection dropped. Please ask again.'); }
+      if (!answered) { withdraw(); pending.remove(); add('error', 'The connection dropped. Please ask again.'); }
     } catch {
       pending.remove(); add('error', 'The connection dropped. Please ask again.');
     } finally {

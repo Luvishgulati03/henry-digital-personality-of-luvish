@@ -116,6 +116,45 @@ export async function waitReady(url, options = {}) {
   throw new Error("Henry startup timed out. Check the service output and local voice configuration.");
 }
 
+const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+
+/**
+ * Tees everything this service window prints (its own lines and, with supervise's pipeOutput, the
+ * dashboard's and speech worker's output, cloudflared status lines included) into
+ * `<dataDir>/logs/henry-start.log`: one timestamped line each, stderr marked `!`, colour codes
+ * stripped, rotated at 5 MB keeping 3 files. So when the public link "went down" there is a record
+ * of why. The screen output is unchanged. `streams` and `createLog` are test seams.
+ * Returns a function that flushes any partial line and restores the streams.
+ */
+export async function teeServiceOutput(dataDir, options = {}) {
+  const { RotatingLog, logsDir, START_LOG_FILE } = await import("../src/public/log.ts");
+  const log = options.createLog ? options.createLog() : new RotatingLog(path.join(logsDir(dataDir), START_LOG_FILE));
+  const streams = options.streams || { stdout: process.stdout, stderr: process.stderr };
+  const now = options.now || (() => new Date());
+  const carry = { stdout: "", stderr: "" };
+  const line = (name, text) => log.append(`${now().toISOString()} ${name === "stderr" ? "! " : ""}${text.replace(ANSI, "").replace(/\r/g, "")}\n`);
+  const restore = [];
+  for (const name of ["stdout", "stderr"]) {
+    const stream = streams[name];
+    const original = stream.write;
+    stream.write = function write(chunk, ...rest) {
+      try {
+        const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+        const lines = (carry[name] + text).split("\n");
+        carry[name] = lines.pop() ?? "";
+        for (const piece of lines) line(name, piece);
+      } catch { /* the screen matters more than the log */ }
+      return original.call(stream, chunk, ...rest);
+    };
+    restore.push(() => { stream.write = original; });
+  }
+  line("stdout", `--- henry start (pid ${process.pid}) ---`);
+  return () => {
+    for (const name of ["stdout", "stderr"]) if (carry[name]) { line(name, carry[name]); carry[name] = ""; }
+    for (const undo of restore) undo();
+  };
+}
+
 export async function supervise(commands, ready, options = {}) {
   const children = [];
   const launch = options.spawnProcess || spawn;
@@ -145,11 +184,17 @@ export async function supervise(commands, ready, options = {}) {
   process.once("SIGHUP", onSignal);
   try {
     for (const command of commands) {
+      // pipeOutput: the children's output goes through this process's (teed) stdout/stderr, so the
+      // service log sees it too; otherwise they write straight to the terminal as before.
       const child = launch(command.file, command.args, {
         cwd: root, env: options.env || process.env, shell: false,
-        detached: process.platform !== "win32", stdio: ["ignore", "inherit", "inherit"],
+        detached: process.platform !== "win32", stdio: ["ignore", options.pipeOutput ? "pipe" : "inherit", options.pipeOutput ? "pipe" : "inherit"],
       });
       children.push(child);
+      if (options.pipeOutput) {
+        child.stdout?.on("data", (chunk) => { process.stdout.write(chunk); });
+        child.stderr?.on("data", (chunk) => { process.stderr.write(chunk); });
+      }
       child.once("error", (error) => { console.error(`Henry service could not start: ${error.message}`); void stop(true); });
       child.once("exit", (code) => {
         if (!stopping) { console.error(`Henry service exited (${code ?? "signal"}); stopping the other service.`); void stop(true); }
@@ -215,6 +260,8 @@ export async function startHenry(args) {
   // Avoid reading another project's .env when launched from an arbitrary directory.
   process.chdir(root);
   const config = loadConfig();
+  // Everything this window prints from here on also lands in <dataDir>/logs/henry-start.log.
+  await teeServiceOutput(config.dataDir);
 
   let voiceUrl;
   try { voiceUrl = new URL(process.env.HENRY_KOKORO_URL); }
@@ -254,7 +301,7 @@ export async function startHenry(args) {
       if (!alive()) return;
       console.log(`Henry is ready.\nDashboard: ${dashboard}\nTalk: ${dashboard}/talk (voice disabled)\nPress Ctrl+C to stop.`);
       await keepAwakeWhenPublic();
-    }, { env: childEnv });
+    }, { env: childEnv, pipeOutput: true });
     return;
   }
 
@@ -279,6 +326,7 @@ export async function startHenry(args) {
   }, {
     // The Kokoro worker reads its bearer token from KELLY_KOKORO_TOKEN (scripts/voice/kokoro_server.py
     // is shared verbatim with Kelly); wire Henry's own token through under that name.
-    env: { ...childEnv, KELLY_KOKORO_TOKEN: token },
+    env: { ...childEnv, KELLY_KOKORO_TOKEN: token, PYTHONUNBUFFERED: "1" },
+    pipeOutput: true,
   });
 }

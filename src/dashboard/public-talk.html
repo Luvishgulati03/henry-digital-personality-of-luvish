@@ -9,6 +9,7 @@
 <title>Henry · talk</title>
 <link rel="manifest" href="/public/manifest.webmanifest">
 <link rel="icon" href="/public/icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <style>
   :root {
     /* Henry's constellation palette (src/dashboard/page.ts). */
@@ -119,7 +120,6 @@
   <audio id="audioPlayback" preload="metadata" aria-label="Henry speech playback" controls hidden></audio>
 </div>
 
-<script src="/vendor/vad/bundle.min.js"></script>
 <script>
 /* ---------- The orb ----------
  * Ported from Kelly's talk page with Henry's palette: layered translucent blobs whose outlines
@@ -272,6 +272,51 @@ window.HenryOrb = HenryOrb;
     testing,
     get state() { return state; },
   };
+
+  /* ---------- page-side trouble reports (POST /api/public/client-log, a fixed small schema) ---------- */
+  function reportClient(event, detail) {
+    try {
+      fetch('/api/public/client-log', {
+        method: 'POST', credentials: 'same-origin', keepalive: true, headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event, detail: String(detail || '').slice(0, 200) }),
+      }).catch(() => {});
+    } catch {}
+  }
+
+  /* ---------- where Silero VAD comes from ----------
+     jsDelivr first, pinned to the exact versions Henry installs (vad-web 0.0.31, onnxruntime-web
+     1.30.0; the bundle carries Subresource Integrity), so a visitor never pulls ~16 MB through the
+     owner's home upload. /vendor/vad/ (same files, cached for a year) is the fallback when the CDN
+     script, model, or wasm fails. Each source is a separate copy of the bundle with its own
+     onnxruntime instance, so a failed CDN wasm start cannot poison the local attempt. One thread
+     (no SharedArrayBuffer, no cross-origin isolation needed): the bundled runtime then fetches
+     only ort-wasm-simd-threaded.mjs + .wasm, never the jsep/asyncify/jspi builds. */
+  const VAD_SOURCES = [
+    {
+      name: 'cdn',
+      script: 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.31/dist/bundle.min.js',
+      integrity: 'sha384-BLK6Iw3Zbz9hHmHYBgWHJ8GaGVHf3hfnz95vXOla64ZQHHL/T7r9PeIl6jUx8eer',
+      assets: 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.31/dist/',
+      wasm: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/',
+    },
+    { name: 'local', script: '/vendor/vad/bundle.min.js', assets: '/vendor/vad/', wasm: '/vendor/vad/' },
+  ];
+  const vadScripts = {};
+  let vadPreferred = null; // the source that last worked, tried first next session
+  function loadVadScript(source) {
+    vadScripts[source.name] ??= new Promise((resolve, reject) => {
+      const tag = document.createElement('script');
+      tag.src = source.script; tag.async = true;
+      if (source.integrity) { tag.integrity = source.integrity; tag.crossOrigin = 'anonymous'; }
+      // Each bundle assigns window.vad when it runs; keep the copy this tag produced.
+      tag.onload = () => (window.vad && window.vad.MicVAD) ? resolve(window.vad) : reject(new Error('no MicVAD'));
+      tag.onerror = () => reject(new Error('script did not load'));
+      document.head.appendChild(tag);
+    });
+    return vadScripts[source.name];
+  }
+  // The 69 KB CDN script loads while the visitor reads the page; the model and wasm wait for a tap.
+  setTimeout(() => { loadVadScript(VAD_SOURCES[0]).catch(() => {}); }, 0);
 
   const params = new URLSearchParams(location.search);
 
@@ -513,6 +558,13 @@ window.HenryOrb = HenryOrb;
     if (line && line.replyId && line.text && line.text.trim()) t.queue.push(line);
     void drainSpeech(t);
   }
+  /** A streamed reply was withdrawn (reset/replace): drop its queued and playing sentences, keep the turn. */
+  function dropTurnSpeech(turn) {
+    const t = turnSpeech;
+    if (!t || t.turn !== turn) return;
+    t.queue.length = 0;
+    if (t.running || speaking) stopSpeaking();
+  }
   function finishTurnSpeech(turn) {
     const t = turnSpeech;
     if (!t || t.turn !== turn) return;
@@ -543,7 +595,8 @@ window.HenryOrb = HenryOrb;
     ensurePlayMeter();
     speaking = true; speakAbort = new AbortController();
     setState('speaking', 'Speaking');
-    setReply(line.text);
+    // A streamed sentence leaves the caption alone: it already shows the reply so far.
+    if (line.caption !== false) setReply(line.text);
     try {
       const response = await fetch('/api/public/voice/speak', {
         method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
@@ -798,36 +851,68 @@ window.HenryOrb = HenryOrb;
     sileroRunning = true;
     try { await sileroVad.start(); } catch { sileroRunning = false; vadMode = 'energy'; }
   }
+  /* While Silero loads, the energy VAD already listens; the note just says the better ears are coming. */
+  let sileroLoading = false, noteBeforeEars = '';
+  const EARS_NOTE = 'Getting my ears ready\u2026';
+  function earsNote(loading) {
+    sileroLoading = loading;
+    if (loading && sessionActive) {
+      if (noteEl.textContent !== EARS_NOTE) noteBeforeEars = noteEl.textContent;
+      setNote(EARS_NOTE);
+    } else if (!loading && noteEl.textContent === EARS_NOTE) setNote(noteBeforeEars);
+  }
   async function initVad() {
     vadMode = 'energy'; sileroVad = null; sileroRunning = false;
-    if (!window.vad || !window.vad.MicVAD) return;
+    const shared = stream, began = performance.now();
+    const sources = vadPreferred ? [vadPreferred, ...VAD_SOURCES.filter((source) => source !== vadPreferred)] : VAD_SOURCES;
+    earsNote(true);
+    const slow = setTimeout(() => { if (sileroLoading && stream === shared) reportClient('vad.slow', 'still loading after 8s'); }, 8000);
+    let firstFailure = '';
     try {
-      const shared = stream;
-      const instance = await window.vad.MicVAD.new({
-        model: 'v5',
-        baseAssetPath: '/vendor/vad/',
-        onnxWASMBasePath: '/vendor/vad/',
-        startOnLoad: false,
-        getStream: async () => shared,
-        resumeStream: async () => shared,
-        pauseStream: async () => {},
-        ...(meterCtx ? { audioContext: meterCtx } : {}),
-        positiveSpeechThreshold: testing.sileroPositive,
-        negativeSpeechThreshold: testing.sileroNegative,
-        minSpeechMs: testing.speechMs,
-        preSpeechPadMs: testing.preSpeechPadMs,
-        redemptionMs: testing.silenceMs,
-        submitUserSpeechOnPause: true,
-        onSpeechStart: onSileroSpeechStart,
-        onSpeechRealStart: onSileroSpeechRealStart,
-        onVADMisfire: onSileroMisfire,
-        onSpeechEnd: onSileroSpeechEnd,
-      });
-      if (stream !== shared) { try { await instance.destroy(); } catch {} return; }
-      sileroVad = instance;
-      // Loaded late (mid-session): switch only between utterances, never mid-capture.
-      if (!capturing) { vadMode = 'silero'; if (state === 'listening') void resumeVad(); }
-    } catch { vadMode = 'energy'; sileroVad = null; }
+      for (const source of sources) {
+        let instance;
+        try {
+          const lib = await loadVadScript(source);
+          if (stream !== shared) return;
+          instance = await lib.MicVAD.new({
+            model: 'v5',
+            baseAssetPath: source.assets,
+            onnxWASMBasePath: source.wasm,
+            ortConfig: (ort) => { ort.env.wasm.numThreads = 1; ort.env.wasm.proxy = false; },
+            startOnLoad: false,
+            getStream: async () => shared,
+            resumeStream: async () => shared,
+            pauseStream: async () => {},
+            ...(meterCtx ? { audioContext: meterCtx } : {}),
+            positiveSpeechThreshold: testing.sileroPositive,
+            negativeSpeechThreshold: testing.sileroNegative,
+            minSpeechMs: testing.speechMs,
+            preSpeechPadMs: testing.preSpeechPadMs,
+            redemptionMs: testing.silenceMs,
+            submitUserSpeechOnPause: true,
+            onSpeechStart: onSileroSpeechStart,
+            onSpeechRealStart: onSileroSpeechRealStart,
+            onVADMisfire: onSileroMisfire,
+            onSpeechEnd: onSileroSpeechEnd,
+          });
+        } catch (error) {
+          const why = source.name + ': ' + (error && error.message ? error.message : 'failed');
+          if (!firstFailure) { firstFailure = why; if (source.name === 'cdn') reportClient('vad.cdn_failed', why); }
+          continue;
+        }
+        if (stream !== shared) { try { await instance.destroy(); } catch {} return; }
+        sileroVad = instance;
+        vadPreferred = source;
+        reportClient('vad.ready', source.name + ' ' + Math.round(performance.now() - began) + 'ms' + (firstFailure ? ' after ' + firstFailure : ''));
+        // Loaded late (mid-session): switch only between utterances, never mid-capture.
+        if (!capturing) { vadMode = 'silero'; if (state === 'listening') void resumeVad(); }
+        return;
+      }
+      reportClient('vad.failed', firstFailure || 'no source');
+    } finally {
+      clearTimeout(slow);
+      if (stream === shared || !sessionActive) earsNote(false);
+    }
   }
 
   /* ---------- holding phrases while a model turn runs ----------
@@ -859,9 +944,13 @@ window.HenryOrb = HenryOrb;
     });
   }
 
-  /* ---------- chat turn: SSE status / gathering / done / error ---------- */
+  /* ---------- chat turn: SSE status / gathering / token / reset / replace / done / error ----------
+     Replies stream a sentence at a time (each already through the server's output guard); the
+     first sentence starts speaking while the rest is still being written. `reset` or `replace`
+     withdraws what was streamed; `done` carries the final reply, and `streamed: true` says the
+     tokens already delivered all of it. */
   async function sendPrompt(id, prompt) {
-    let gatheringSeen = false;
+    let gatheringSeen = false, streamedText = '', streamSpoken = false;
     const turn = ++turnCounter;
     if (id !== sessionId || turn !== turnCounter) return;
     beginTurnSpeech(id, turn);
@@ -887,13 +976,27 @@ window.HenryOrb = HenryOrb;
           if (stale()) return;
           if (ev === 'gathering') {
             if (!gatheringSeen) { gatheringSeen = true; scheduleFillers(id, testing.fillerMs); }
+          } else if (ev === 'token') {
+            cancelFillers();
+            streamedText += data.text || '';
+            setReply(streamedText);
+            if (canSpeak() && data.replyId) { streamSpoken = true; queueSpeech(turn, { replyId: data.replyId, text: data.text || '', caption: false }); }
+          } else if (ev === 'reset' || ev === 'replace') {
+            dropTurnSpeech(turn);
+            streamSpoken = false;
+            streamedText = ev === 'replace' ? (data.text || '') : '';
+            setReply(streamedText);
           } else if (ev === 'done') {
             cancelFillers();
             const text = data.spoken || data.response || '';
-            if (canSpeak() && data.replyId) queueSpeech(turn, { replyId: data.replyId, text });
+            if (data.streamed && streamSpoken) setReply(text);
+            else if (canSpeak() && data.replyId) queueSpeech(turn, { replyId: data.replyId, text });
             else setReply(text);
             finishTurnSpeech(turn);
-          } else if (ev === 'error') throw new Error(data.error || 'Henry could not answer.');
+          } else if (ev === 'error') {
+            dropTurnSpeech(turn);
+            throw new Error(data.error || 'Henry could not answer.');
+          }
         }
       }
     } catch (error) {
@@ -921,6 +1024,7 @@ window.HenryOrb = HenryOrb;
       talkBtn.setAttribute('aria-pressed', 'false'); talkBtn.setAttribute('aria-label', 'Tap to talk');
       setState('error', 'Microphone blocked');
       setNote('Allow microphone access for this page, then tap again.');
+      reportClient('mic.denied', '');
       return;
     }
     if (id !== sessionId) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -948,6 +1052,7 @@ window.HenryOrb = HenryOrb;
     if (recorder) { try { recorder.ondataavailable = recorder.onstop = recorder.onerror = null; if (recorder.state !== 'inactive') recorder.stop(); } catch {} recorder = null; }
     if (sileroVad) { const old = sileroVad; sileroVad = null; Promise.resolve().then(() => old.destroy?.()).catch(() => {}).finally(() => { sileroDiscard = false; }); }
     vadMode = 'energy';
+    if (noteEl.textContent === EARS_NOTE) setNote(noteBeforeEars);
     if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
     stopSpeaking();
     talkBtn.setAttribute('aria-pressed', 'false'); talkBtn.setAttribute('aria-label', 'Tap to talk');

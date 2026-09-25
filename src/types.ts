@@ -52,7 +52,9 @@ export type ActivityKind =
   | "public.turn"
   | "public.refused"
   | "public.ping"
-  | "public.note";
+  | "public.note"
+  | "public.tunnel"
+  | "public.client";
 
 export interface ActivityEvent {
   id: string;

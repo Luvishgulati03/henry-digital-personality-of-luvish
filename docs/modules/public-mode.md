@@ -56,6 +56,7 @@ POST /api/public/chat           one sandboxed model turn, SSE
 POST /api/public/reset          new conversation
 POST /api/public/ping           ping the owner (Telegram)
 POST /api/public/voice/transcribe, /api/public/voice/speak
+POST /api/public/client-log     page-reported asset/VAD/audio trouble (fixed schema, rate-limited)
 GET  /login, POST /login, GET /logout
 ```
 
@@ -95,6 +96,73 @@ with `publicTurn` set (`src/providers/public-sandbox.ts`):
   capped, and the visitor's message is quoted and labelled untrusted.
 - An output guard replaces any reply that looks like a local path, a private file
   name, a credential, a configured secret, or the prompt's own scaffolding.
+
+### Model
+
+Public Claude turns run `--model sonnet` by default (`HENRY_PUBLIC_MODEL`; `default`
+means the CLI's own default; setting `HENRY_PUBLIC_TIER=t0|t2` without a model uses that
+tier's model). Measured on a public prompt it reaches first text faster than `haiku`
+(the t0 model), and naming it keeps a CLI default change from moving the public face
+onto a slower model. A failover CLI keeps its own tier model. Subscription CLIs only.
+
+### Streaming replies, guarded by sentence
+
+Claude runs with `--include-partial-messages`, so text arrives as it is generated
+(Codex's JSON stream has no deltas; its message is released when it completes). The
+server (`src/public/stream.ts`) buffers the text and releases a **whole sentence** only
+when everything already sent plus that sentence passes the output guard, so a secret
+that straddles a sentence break is caught before its second half leaves. The SSE events:
+
+```text
+status   {state: thinking|queued}
+token    {text, replyId?}      one guarded sentence; voice turns get a speech id per sentence
+reset    {}                    withdraw everything streamed so far (failover restart, or a
+                               tool call seen mid-stream: the violation rail still discards
+                               the answer and the turn ends in `error`)
+replace  {text}                the guard tripped mid-stream (or the final reply differs):
+                               show this instead
+done     {response, replyId, streamed, spoken?}   the final guarded reply; streamed=true
+                               means the tokens already carried all of it
+error    {error}
+```
+
+The talk page starts speaking the first sentence while the rest is still being written.
+A follow-on sentence of a streamed reply may be spoken once without paying the speech
+rate limit (its first sentence already did); replays pay as usual. Text that looks like
+a CLI usage-limit or logged-out notice is held, never streamed.
+
+## Talk page assets (Silero VAD)
+
+The talk page loads `@ricky0123/vad-web` and the onnxruntime-web runtime from
+`https://cdn.jsdelivr.net`, pinned to the exact installed versions (the script carries
+Subresource Integrity), so a visitor never downloads ~16 MB through the owner's home
+upload. If the CDN script, model, or wasm fails, it falls back to `/vendor/vad/`
+(served with `cache-control: public, max-age=31536000, immutable`). The runtime is
+single-threaded, so only `ort-wasm-simd-threaded.mjs` and `.wasm` are fetched. The page
+listens with its energy VAD while Silero loads ("Getting my ears ready…"). The talk
+page's CSP adds exactly `https://cdn.jsdelivr.net` to `script-src` and `connect-src`; the
+landing and chat pages load nothing external. `tests/public-streaming.test.ts` fails if the pins drift from `node_modules`; bump the
+versions and the SRI hash together.
+
+## Logs and status
+
+- `<data dir>/logs/public.log`: one JSON line per tunnelled request and local
+  `/public/*` preview (timestamp, method, path without query, status, duration, bytes,
+  tunnelled, CF-Ray, a per-process HMAC of the visitor cookie, and for turns provider,
+  model, first-text/first-sentence/total/queue ms, stt/tts ms, blocked/busy/rate-limited
+  flags), plus tunnel transitions and page-reported asset errors. Never message text,
+  audio, IP addresses, cookies, or contact details (contact-looking path segments are
+  masked). Rotated at 5 MB, three files kept.
+- `<data dir>/logs/henry-start.log`: everything the `henry start` service window prints
+  (the dashboard's and speech worker's output, cloudflared status lines included),
+  timestamped, rotated the same way.
+- `henry public logs [--follow] [--errors] [--start] [--json] [-n N]` prints either log;
+  `--errors` keeps failures, refusals, guard blocks, page errors and tunnel drops.
+- `henry public status`: dashboard and tunnel up or down, the published pack, visitors in
+  the last 15 minutes, the last 10 turns' timings, and last-hour problem counts.
+- The activity journal adds `public.tunnel` (link lost / reconnected with downtime),
+  `public.client` (page-reported errors), and samples refusals: the first of each kind
+  per minute, with a count of the ones folded into it.
 
 ## Limits
 

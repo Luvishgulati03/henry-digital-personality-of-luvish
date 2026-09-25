@@ -72,8 +72,10 @@ export function publicClaudeArgs(userPrompt: string, systemPrompt: string, optio
     "--permission-mode", "dontAsk",
     "--disallowedTools", CLAUDE_PUBLIC_DENIED_TOOLS.join(","),
     "--no-session-persistence",
-    // stream-json so the init event proves, per run, that no tool or MCP server was loaded.
-    "--verbose", "--output-format", "stream-json",
+    // stream-json so the init event proves, per run, that no tool or MCP server was loaded, and
+    // partial messages so the public face can stream text deltas (stream_event/text_delta) as
+    // they are generated; publicTurnViolation() also inspects those partial content blocks.
+    "--verbose", "--output-format", "stream-json", "--include-partial-messages",
   ];
 }
 

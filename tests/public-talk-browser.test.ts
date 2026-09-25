@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chromium, type Browser, type Page } from "playwright";
-import { publicHarness } from "./public-harness.ts";
+import { claudeStream, publicHarness } from "./public-harness.ts";
+import { readLogEntries } from "../src/public/log.ts";
 
 /**
  * The public talk face in headless Chromium against the REAL public surface (fake provider runner
- * and fake voice engine), through the owner's local /public/talk preview. Silero's bundle is blocked so the page runs
- * its energy VAD, and `HenryTalk.testing.levelOverride` plays the microphone.
+ * and fake voice engine), through the owner's local /public/talk preview. Silero's bundle is blocked
+ * (the CDN and /vendor/vad/) so the page runs its energy VAD, and `HenryTalk.testing.levelOverride`
+ * plays the microphone. Tests never reach the network.
  */
 
 async function launch(): Promise<Browser | undefined> {
@@ -16,6 +18,12 @@ async function launch(): Promise<Browser | undefined> {
 }
 
 const waitState = (page: Page, text: string) => page.waitForFunction((t) => document.querySelector("#state")?.textContent === t, text, { timeout: 15_000 });
+
+async function speakOneUtterance(page: Page): Promise<void> {
+  await page.evaluate(() => { const t = (window as any).HenryTalk.testing; t.speechMs = 50; t.silenceMs = 5000; t.levelOverride = 0.9; });
+  await page.waitForTimeout(300);
+  await page.evaluate(() => { const t = (window as any).HenryTalk.testing; t.silenceMs = 100; t.levelOverride = 0; });
+}
 
 test("public talk: greeting is the public opening line, a spoken turn runs sandboxed, and the reply is spoken by id", { timeout: 120_000 }, async (t) => {
   const h = await publicHarness();
@@ -27,6 +35,7 @@ test("public talk: greeting is the public opening line, a spoken turn runs sandb
     // through the tunnel only the exact public https origin is accepted: tests/public-mode.test.ts).
     const context = await browser.newContext();
     const page = await context.newPage();
+    await page.route("https://cdn.jsdelivr.net/**", (route) => route.abort());
     await page.route("**/vendor/vad/**", (route) => route.abort());
     const speakBodies: string[] = [];
     page.on("request", (request) => { if (request.url().endsWith("/api/public/voice/speak")) speakBodies.push(request.postData() ?? ""); });
@@ -40,9 +49,7 @@ test("public talk: greeting is the public opening line, a spoken turn runs sandb
     await waitState(page, "Listening");
     assert.equal(h.tts[0], "Hi, I'm Henry, Alex Example's chief of staff and AI twin. Ask me anything about Alex Example's work.");
 
-    await page.evaluate(() => { const t = (window as any).HenryTalk.testing; t.speechMs = 50; t.silenceMs = 5000; t.levelOverride = 0.9; });
-    await page.waitForTimeout(300);
-    await page.evaluate(() => { const t = (window as any).HenryTalk.testing; t.silenceMs = 100; t.levelOverride = 0; });
+    await speakOneUtterance(page);
     await waitState(page, "Speaking");
     await waitState(page, "Listening");
 
@@ -56,7 +63,73 @@ test("public talk: greeting is the public opening line, a spoken turn runs sandb
     assert.ok(h.tts.includes("Alex Example builds products."));
     assert.equal(await page.locator("#heard").textContent(), "What does Alex Example build?");
     assert.equal(await page.locator("#reply").textContent(), "Alex Example builds products.");
+    assert.notEqual(await page.locator("#note").textContent(), "Getting my ears ready…", "the loading note never sticks");
     assert.deepEqual(errors, []);
+
+    // Both VAD sources failed: the page reported it (as data) and kept listening with the energy VAD.
+    await page.waitForTimeout(200);
+    const reports = readLogEntries(h.log.file).filter((entry) => entry.route === "POST /api/public/client-log").map((entry) => entry.event);
+    assert.ok(reports.includes("vad.cdn_failed"));
+    assert.ok(reports.includes("vad.failed"));
+    await context.close();
+  } finally {
+    await browser.close();
+    await h.close();
+  }
+});
+
+test("public talk: a streamed reply starts speaking its first sentence before the turn ends, then listens again", { timeout: 120_000 }, async (t) => {
+  const h = await publicHarness();
+  const browser = await launch();
+  if (!browser) { await h.close(); t.skip("Playwright Chromium is not installed"); return; }
+  const errors: string[] = [];
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("https://cdn.jsdelivr.net/**", (route) => route.abort());
+    await page.route("**/vendor/vad/**", (route) => route.abort());
+    page.on("pageerror", (error) => errors.push(error.message));
+    const speakIds: string[] = [];
+    page.on("request", (request) => { if (request.url().endsWith("/api/public/voice/speak")) speakIds.push(JSON.parse(request.postData() ?? "{}").replyId); });
+    h.stream.current = () => ({ events: claudeStream(["Alex Example builds products. ", "Mostly dashboards. ", "Ask me more!"]) });
+    await page.goto(`${h.base}/public/talk`);
+    await page.waitForFunction(() => (window as any).HenryTalk?.testing.voiceStatus != null);
+    await page.getByRole("button", { name: "Tap to talk", exact: true }).click();
+    await waitState(page, "Listening");
+    await speakOneUtterance(page);
+    await waitState(page, "Speaking");
+    await waitState(page, "Listening");
+    assert.equal(speakIds.length, 3, "one speech request per streamed sentence, none for the whole reply again");
+    assert.equal(new Set(speakIds).size, 3);
+    assert.deepEqual(h.tts.slice(-3), ["Alex Example builds products.", "Mostly dashboards.", "Ask me more!"]);
+    assert.equal(await page.locator("#reply").textContent(), "Alex Example builds products. Mostly dashboards. Ask me more!");
+    assert.deepEqual(errors, []);
+    await context.close();
+  } finally {
+    await browser.close();
+    await h.close();
+  }
+});
+
+test("public talk: with the CDN unreachable, Silero loads from the local /vendor/vad/ fallback", { timeout: 120_000 }, async (t) => {
+  const h = await publicHarness();
+  const browser = await launch();
+  if (!browser) { await h.close(); t.skip("Playwright Chromium is not installed"); return; }
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("https://cdn.jsdelivr.net/**", (route) => route.abort());
+    const fetched: string[] = [];
+    page.on("requestfinished", (request) => { if (request.url().includes("/vendor/vad/")) fetched.push(new URL(request.url()).pathname); });
+    await page.goto(`${h.base}/public/talk`);
+    await page.waitForFunction(() => (window as any).HenryTalk?.testing.voiceStatus != null);
+    await page.getByRole("button", { name: "Tap to talk", exact: true }).click();
+    await page.waitForFunction(() => (window as any).HenryTalk.testing.vadMode === "silero", undefined, { timeout: 60_000 });
+    // Single-threaded plain-SIMD runtime only: never the jsep/asyncify/jspi builds.
+    assert.deepEqual(fetched.filter((name) => name.includes("ort-wasm")).sort(), ["/vendor/vad/ort-wasm-simd-threaded.mjs", "/vendor/vad/ort-wasm-simd-threaded.wasm"]);
+    await page.waitForTimeout(200);
+    const ready = readLogEntries(h.log.file).find((entry) => entry.event === "vad.ready");
+    assert.match(String(ready?.detail), /^local \d+ms after cdn: /);
     await context.close();
   } finally {
     await browser.close();
