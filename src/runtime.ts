@@ -6,7 +6,7 @@ import { ActivityLog } from "./activity.ts";
 import { ApprovalStore } from "./approval/store.ts";
 import { HenryMemory } from "./memory/engram.ts";
 import { KnowledgeBase } from "./knowledge/store.ts";
-import { HenryAgent } from "./agent/henry.ts";
+import { HenryAgent, type AgentRunOptions } from "./agent/henry.ts";
 import { LunaOrchestrator } from "./orchestration/luna.ts";
 import { GmailService } from "./integrations/gmail.ts";
 import { WorkflowScheduler } from "./scheduler/scheduler.ts";
@@ -102,7 +102,7 @@ export class HenryRuntime {
     this.scheduler = new WorkflowScheduler(
       config, this.activity, this.memory, this.gmail, this.reminders,
       this.notifyOperator,
-      (prompt) => this.agent.run(prompt).then((result) => result.response),
+      (prompt, options) => this.agent.run(prompt, options?.voiceTurn ? { voiceTurn: true } : {}).then((result) => result.response),
       (approvalId) => this.executeApproval(approvalId),
     );
     this.mailwatch = new MailWatchService(config, this.activity, this.agent.providerRunner, this.notifyOperator, this.memory);
@@ -225,12 +225,15 @@ export class HenryRuntime {
    * One surface-neutral entry for foreground Henry vs background Luna routing.
    * Starting a delegated turn is synchronous; its completion runs independently.
    */
-  startInteractiveTurn(prompt: string, options: RunOptions = {}): InteractiveTurn {
+  startInteractiveTurn(prompt: string, options: AgentRunOptions = {}): InteractiveTurn {
     if (isLongResearchAsk(prompt)) {
+      // Luna research is read-only (Codex read-only sandbox / Claude dontAsk read allowlist), but
+      // connector tools sit outside the sandbox, so a voice turn still carries the voice rail.
       const handle = this.luna.dispatchAndReport(prompt, {
         cwd: options.cwd,
         timeoutMs: options.timeoutMs,
         onEvent: options.onEvent,
+        ...(options.voice !== undefined || options.voiceTurn ? { voiceTurn: true } : {}),
       });
       return { delegated: true, ...handle };
     }

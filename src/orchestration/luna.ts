@@ -66,6 +66,8 @@ export interface DispatchOptions {
   /** "soft" lets the pinned provider hand off to the other CLI when it is out of quota. */
   pin?: "hard" | "soft";
   onEvent?: (event: ProviderEvent) => void;
+  /** Dispatched from a voice turn: the worker carries HENRY_VOICE_TURN=1 (RunOptions.voiceTurn). */
+  voiceTurn?: boolean;
 }
 
 export interface DispatchReportHandle {
@@ -117,6 +119,7 @@ export class LunaOrchestrator {
         ...(options.onEvent ? { onEvent: options.onEvent } : {}),
         ...(tier ? { tier } : {}),
         ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+        ...(options.voiceTurn ? { voiceTurn: true } : {}),
       });
       try {
         if (agentId) {

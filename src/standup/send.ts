@@ -1,4 +1,5 @@
 import type { HenryConfig } from "../config.ts";
+import { isVoiceTurn } from "../guardrails.ts";
 
 /** Telegram hard-caps message bodies at this length (same constant as notify/telegram.ts — kept local, doctrine rule 7). */
 const TELEGRAM_MAX_CHARS = 4096;
@@ -16,6 +17,8 @@ const TELEGRAM_TIMEOUT_MS = 10_000;
  */
 export async function sendStandupMessage(config: HenryConfig, text: string, replyToMessageId?: number): Promise<boolean> {
   if (!config.telegramBotToken || !config.telegramStandupChatId) return false;
+  // Voice rail: the group is third parties. Fail-open contract (never throws) → not sent.
+  if (isVoiceTurn()) return false;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TELEGRAM_TIMEOUT_MS);
   try {

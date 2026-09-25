@@ -11,7 +11,8 @@ import { sampleResources } from "./resources.ts";
 import { sharedAdmissionController } from "../orchestration/admission.ts";
 import { sharedAgentRegistry } from "../orchestration/agent-registry.ts";
 import { domainPolicy, setDomainEnabled } from "../knowledge/gate.ts";
-import { executeExplicitApproval } from "../approval/explicit.ts";
+import { executeExplicitApproval, explicitApprovalTarget } from "../approval/explicit.ts";
+import { VOICE_TURN_IN_FLIGHT_REFUSAL } from "../guardrails.ts";
 import { ConversationStore, type ChatAttachmentRef } from "./conversations.ts";
 import { listSkills, loadSkill, skillGuidanceBlock } from "./skills.ts";
 import {
@@ -24,6 +25,8 @@ import type { ActivityEvent, ProviderEvent, ProviderName } from "../types.ts";
 import { classifyIntentTier } from "../agent/intent.ts";
 import { isLongResearchAsk } from "../orchestration/luna.ts";
 import { reflexKind, renderReflex } from "../reflex.ts";
+import { createSpokenFenceFilter, speakableSummary, stripSpokenBlock } from "../voice/speakable.ts";
+import { finalizeSpoken, readVoicePolicy, type VoicePolicy } from "../voice/policy.ts";
 
 const EVENTS_POLL_MS = 2000;
 
@@ -47,6 +50,72 @@ function serializeConversationRun<T>(conversationId: string, operation: () => Pr
 function sseWrite(response: http.ServerResponse, event: string, data: unknown): void {
   if (response.writableEnded) return;
   response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+/**
+ * Chat-turn stream handler shared by every /api/chat/send provider path. Forwards visible
+ * reply text as `token` events from all three shapes a provider emits:
+ *   - a top-level `text` (streamed deltas; test stubs and Luna's worker),
+ *   - Claude stream-json: `stream_event` text_delta chunks, or whole `assistant` messages'
+ *     text blocks (Henry runs Claude without partial messages, so the latter is the norm),
+ *   - Codex JSONL: `item.completed` whose item is an `agent_message` (item.started/updated
+ *     for the same item are never forwarded, or the text would double up).
+ * Reasoning, commands, and tool calls/outputs are never forwarded.
+ *
+ * On a voice turn a ```spoken fence is cut out of the visible stream and emitted ONCE per
+ * message as a `spoken` event (speech can start before the reply finishes). Whole messages
+ * (Codex agent_message, Claude assistant message) each get a fresh fence filter because
+ * commentary can precede the final answer; streamed deltas share one filter for the turn.
+ * Every spoken string passes through `finalizeSpoken` (redaction, or private mode's neutral
+ * line) before it is written.
+ */
+export function chatStreamHandler(
+  write: (event: string, data: unknown) => void,
+  voice: VoicePolicy | undefined,
+): (event: ProviderEvent) => void {
+  const emitSpoken = (text: string): void => {
+    const spoken = voice ? finalizeSpoken(text, voice) : "";
+    if (spoken) write("spoken", { text: spoken });
+  };
+  const deltaFilter = voice ? createSpokenFenceFilter(emitSpoken) : undefined;
+  let messageCount = 0;
+  const writeToken = (text: string): void => {
+    if (text.trim()) write("token", { text: text.endsWith("\n") ? text : `${text}\n` });
+  };
+  const emitDelta = (raw: string): void => {
+    writeToken(deltaFilter ? deltaFilter.push(raw) : raw);
+  };
+  const emitMessage = (raw: string): void => {
+    const separator = messageCount > 0 ? "\n\n" : "";
+    messageCount += 1;
+    const visible = voice ? createSpokenFenceFilter(emitSpoken).push(raw) : raw;
+    writeToken(`${separator}${visible}`);
+  };
+  return (event: ProviderEvent) => {
+    const parsed = event.parsed as Record<string, unknown> | undefined;
+    if (!parsed) return;
+    if (typeof parsed.text === "string") { emitDelta(parsed.text); return; }
+    if (parsed.type === "stream_event") {
+      const inner = parsed.event as Record<string, unknown> | undefined;
+      const delta = inner?.delta as Record<string, unknown> | undefined;
+      if (inner?.type === "content_block_delta" && delta?.type === "text_delta" && typeof delta.text === "string") emitDelta(delta.text);
+      return;
+    }
+    if (parsed.type === "assistant") {
+      const content = (parsed.message as Record<string, unknown> | undefined)?.content;
+      if (!Array.isArray(content)) return;
+      const text = content
+        .filter((block): block is { type: string; text: string } => (block as Record<string, unknown> | null)?.type === "text" && typeof (block as Record<string, unknown>).text === "string")
+        .map((block) => block.text)
+        .join("");
+      if (text) emitMessage(text);
+      return;
+    }
+    if (parsed.type !== "item.completed") return;
+    const item = parsed.item as Record<string, unknown> | undefined;
+    if (item?.type !== "agent_message" || typeof item.text !== "string") return;
+    emitMessage(item.text);
+  };
 }
 
 // Lazily constructed and cached: constructing KnowledgeBase is cheap (the local
@@ -527,6 +596,11 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
   if (!loopback(runtime.config.host) && (!runtime.config.allowRemoteDashboard || !runtime.config.dashboardToken)) {
     throw new Error("Remote dashboard is disabled; bind HENRY_HOST to loopback or configure HENRY_ALLOW_REMOTE_DASHBOARD=true with HENRY_DASHBOARD_TOKEN");
   }
+  // WRITABLE voice turns (voice.allowWrites on) in flight in THIS process. While > 0, approval
+  // routes and the typed approval grammar refuse: that turn's own shell could otherwise reach
+  // them over loopback. Read-only voice turns (the default) run in a sandbox with no network
+  // and no writes, so they never block the owner's own dashboard approvals.
+  let activeWritableVoiceTurns = 0;
   const server = http.createServer(async (request, response) => {
     try {
       if (!loopback(runtime.config.host) && !runtime.config.allowRemoteDashboard) throw new Error("Remote dashboard is disabled; bind HENRY_HOST to loopback or explicitly enable a token-protected remote dashboard");
@@ -827,6 +901,15 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
           return;
         }
         const prompt = unescapeMessage(rawPrompt); // `//text` sends a literal leading slash
+        // Voice turn: the prompt is a speech-to-text transcript. It changes what Henry is
+        // told and what is read aloud, and it can NEVER approve or execute anything (see the
+        // approval rail below). transcriptId is display correlation only, validated like Kelly's.
+        const voiceMode = input.voice === true;
+        const transcriptId = voiceMode && typeof input.transcriptId === "string" && /^[A-Za-z0-9-]{1,64}$/.test(input.transcriptId) ? input.transcriptId : undefined;
+        const voicePolicy: VoicePolicy | undefined = voiceMode ? readVoicePolicy(runtime.config.settingsPath) : undefined;
+        const voiceDone = (reply: string): Record<string, unknown> => voicePolicy
+          ? { spoken: finalizeSpoken(speakableSummary({ reply }), voicePolicy), ...(transcriptId ? { transcriptId } : {}) }
+          : {};
         const store = conversations(runtime);
         const { refs: attachmentRefs, paths: attachmentPaths } = await resolveAttachments(runtime, input.attachments);
         if (!prompt && !attachmentRefs.length) { json(response, 400, { error: "prompt is required" }); return; }
@@ -875,7 +958,7 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
             const localAnswer = renderReflex(reflex, await runtime.reflexSnapshot(), Date.now());
             await store.append(conversation.id, [{ role: "henry", text: localAnswer, at: new Date().toISOString() }], { ifGeneration: generation });
             sseWrite(response, "token", { text: localAnswer });
-            sseWrite(response, "done", { response: localAnswer, provider: "local", durationMs: 0, conversationId: conversation.id });
+            sseWrite(response, "done", { response: localAnswer, provider: "local", durationMs: 0, conversationId: conversation.id, ...voiceDone(localAnswer) });
           } catch (error) {
             sseWrite(response, "error", { error: error instanceof Error ? error.message : String(error) });
           }
@@ -889,8 +972,18 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
             return;
           }
           startSse();
+          const writableVoice = voicePolicy?.allowWrites === true;
+          if (writableVoice) activeWritableVoiceTurns += 1;
           try {
-            const approvalResult = await executeExplicitApproval(runtime, prompt);
+            // THE VOICE APPROVAL RAIL: a spoken transcript is never approval. A voice turn skips
+            // the typed approval grammar entirely, so "approve <id>", "approve: <body>", "post
+            // it" etc. said aloud reach the model as ordinary words (and the model is told it
+            // cannot approve or send on this turn) instead of executing a staged action.
+            const approvalResult = voiceMode
+              ? undefined
+              : activeWritableVoiceTurns > 0 && explicitApprovalTarget(prompt)
+                ? VOICE_TURN_IN_FLIGHT_REFUSAL
+                : await executeExplicitApproval(runtime, prompt);
             if (approvalResult !== undefined) {
               await store.append(conversation.id, [{ role: "henry", text: approvalResult, at: new Date().toISOString() }], { ifGeneration: generation });
               sseWrite(response, "done", { response: approvalResult, provider: "local", durationMs: 0, conversationId: conversation.id });
@@ -908,16 +1001,11 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
             }
             // Same surface-session model as the REPL, one surface PER CONVERSATION:
             // provider-side context persists across messages in a thread and never
-            // bleeds between threads.
-            const runOptions = {
-                surface: conversation.surface,
-                onEvent: (event: ProviderEvent) => {
-                  const text = event.parsed && typeof (event.parsed as Record<string, unknown>).text === "string"
-                    ? String((event.parsed as Record<string, unknown>).text)
-                    : undefined;
-                  if (text?.trim()) sseWrite(response, "token", { text: text.endsWith("\n") ? text : `${text}\n` });
-                },
-              };
+            // bleeds between threads. `voice` rides to the agent's prompt builder only.
+            const onEvent = chatStreamHandler((event, data) => sseWrite(response, event, data), voicePolicy);
+            // allowWrites decides the sandbox: absent/false → agent.run makes the turn read-only.
+            const voiceOption = voicePolicy ? { voice: { privateMode: voicePolicy.privateMode, allowWrites: voicePolicy.allowWrites } } : {};
+            const runOptions = { surface: conversation.surface, onEvent, ...voiceOption };
             const turn = attachmentPaths.length === 0
               ? isLongResearchAsk(composed) || classifyIntentTier(composed) === "t0"
                 ? runtime.startInteractiveTurn(composed, runOptions)
@@ -925,18 +1013,15 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
               : { delegated: false as const, completion: runtime.agent.run(composed, {
               surface: conversation.surface,
               provider: "claude" as const,
-              onEvent: (event) => {
-                const text = event.parsed && typeof (event.parsed as Record<string, unknown>).text === "string"
-                  ? String((event.parsed as Record<string, unknown>).text)
-                  : undefined;
-                if (text?.trim()) sseWrite(response, "token", { text: text.endsWith("\n") ? text : `${text}\n` });
-              },
+              onEvent,
+              ...voiceOption,
             }) };
             if (turn.delegated) {
               // Write the acknowledgement to the socket before the first await.
               // dispatchAndReport starts on a microtask, so this ordering guarantees
               // even an instant fake/worker cannot stream a report token first.
               sseWrite(response, "token", { text: `${turn.acknowledgement}\n\n` });
+              if (voicePolicy) sseWrite(response, "spoken", { text: finalizeSpoken(turn.acknowledgement, voicePolicy, "working") });
               sseWrite(response, "notice", { text: "Luna research · Codex gpt-5.6-sol · low reasoning" });
             }
             const result = await turn.completion;
@@ -947,15 +1032,21 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
               sseWrite(response, "error", { error: result.error ?? "Every configured provider is out of quota.", limited: true });
               return;
             }
+            // A voice reply's ```spoken fence is speech only: it never reaches chat history or
+            // the displayed response. `done.spoken` is the finalized (redacted / private-mode)
+            // line for a client that only waits for completion.
+            const displayResponse = voicePolicy ? stripSpokenBlock(result.response) : result.response;
             // The transcript records the authoritative final response even if the
             // browser tab bailed mid-stream — reload shows the full reply.
             await store.append(conversation.id, [
               ...(turn.delegated ? [{ role: "henry" as const, text: turn.acknowledgement, at: new Date().toISOString() }] : []),
-              { role: "henry", text: result.response, at: new Date().toISOString() },
+              { role: "henry", text: displayResponse, at: new Date().toISOString() },
             ], { ifGeneration: generation });
-            sseWrite(response, "done", { response: result.response, provider: result.provider, durationMs: result.durationMs, conversationId: conversation.id });
+            sseWrite(response, "done", { response: displayResponse, provider: result.provider, durationMs: result.durationMs, conversationId: conversation.id, ...voiceDone(result.response) });
           } catch (error) {
             sseWrite(response, "error", { error: error instanceof Error ? error.message : String(error) });
+          } finally {
+            if (writableVoice) activeWritableVoiceTurns -= 1;
           }
         });
         response.end();
@@ -1088,6 +1179,7 @@ export function startDashboard(runtime: HenryRuntime): http.Server {
       const approval = url.pathname.match(/^\/api\/approvals\/([^/]+)\/(approve|execute|approve-execute|retry)$/);
       if (request.method === "POST" && approval) {
         const id = decodeURIComponent(approval[1]);
+        if (activeWritableVoiceTurns > 0 && approval[2] !== "retry") { json(response, 409, { error: VOICE_TURN_IN_FLIGHT_REFUSAL }); return; }
         if (approval[2] === "approve") { await runtime.approve(id); json(response, 200, { ok: true }); return; }
         // This route is reached only by the local dashboard's explicit confirmation
         // dialog. It preserves both state transitions while removing error-prone

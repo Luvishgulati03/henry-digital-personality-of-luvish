@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { Cron } from "croner";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
+import { assertNotVoiceTurn, isVoiceTurn, VOICE_TURN_REFUSAL } from "../guardrails.ts";
 
 export type ReminderStatus = "pending" | "fired" | "cancelled";
 
@@ -31,6 +32,11 @@ export interface Reminder {
   nextFireAt?: string;
   /** Present when kind === "approval.execute": the approval queue item to execute at fire time. */
   approvalId?: string;
+  /**
+   * Created inside a voice turn (HENRY_VOICE_TURN=1). Its prompt runs under the voice rail at fire
+   * time, so a spoken "remind me to approve X" can never approve later on the scheduler's behalf.
+   */
+  voiceTurn?: boolean;
   status: ReminderStatus;
   createdAt: string;
   firedAt?: string;
@@ -58,8 +64,11 @@ export const OSASCRIPT_NOTIFICATION_MAX_CHARS = 180;
 
 export type ReminderNotifier = (message: string, title?: string) => Promise<void>;
 
-/** Runs a reminder's prompt through the agent (t1) and returns the response text; injected so the reminder service stays agent-agnostic. */
-export type PromptRunner = (prompt: string) => Promise<string>;
+/**
+ * Runs a reminder's prompt through the agent (t1) and returns the response text; injected so the
+ * reminder service stays agent-agnostic. `voiceTurn` must reach the provider run (RunOptions.voiceTurn).
+ */
+export type PromptRunner = (prompt: string, options?: { voiceTurn?: boolean }) => Promise<string>;
 
 /** Prompt jobs may return this exact sentinel when a check has nothing to notify. */
 export const PROMPT_NO_NOTIFICATION = "NO_MATCH";
@@ -71,6 +80,11 @@ export const PROMPT_NO_NOTIFICATION = "NO_MATCH";
  * the scheduler only ever executes pre-approved items, never creates or approves them.
  */
 export type ExecuteApprovalFn = (approvalId: string) => Promise<string>;
+
+/** `{ voiceTurn: true }` when this process is serving a voice turn — stamped on every new reminder. */
+function voiceStamp(): { voiceTurn?: true } {
+  return isVoiceTurn() ? { voiceTurn: true } : {};
+}
 
 /** macOS notification, best-effort; console logging always fires as the say-free fallback (and always gets the untruncated text). */
 let terminalNotifierAvailable: boolean | undefined;
@@ -241,6 +255,7 @@ export class ReminderService {
       await this.ensure();
       const item: Reminder = {
         id: randomUUID(), text, kind, dueAt: dueAt.toISOString(), status: "pending", createdAt: new Date().toISOString(),
+        ...voiceStamp(),
       };
       this.items.push(item);
       await this.save();
@@ -261,6 +276,7 @@ export class ReminderService {
       const item: Reminder = {
         id: randomUUID(), text, kind, dueAt: nextFireAt.toISOString(), cron: cronExpression,
         nextFireAt: nextFireAt.toISOString(), status: "pending", createdAt: new Date().toISOString(),
+        ...voiceStamp(),
       };
       this.items.push(item);
       await this.save();
@@ -290,6 +306,7 @@ export class ReminderService {
       const item: Reminder = {
         id: randomUUID(), text, kind, dueAt: nextFireAt, randomDaily,
         nextFireAt, status: "pending", createdAt: new Date().toISOString(),
+        ...voiceStamp(),
       };
       this.items.push(item);
       await this.save();
@@ -306,6 +323,8 @@ export class ReminderService {
    * is a friendly display name for notifications/listing; defaults to the approval id.
    */
   async createApprovalExecute(approvalId: string, dueAt: Date, title?: string): Promise<Reminder> {
+    // A scheduled send is an outbound action; a voice turn may never arm one.
+    assertNotVoiceTurn();
     return this.mutate(async () => {
       await this.ensure();
       const item: Reminder = {
@@ -433,12 +452,14 @@ export class ReminderService {
       let approvalError: string | undefined;
       if (reminder.kind === "prompt") {
         try {
-          body = runPrompt ? (await runPrompt(reminder.text)).trim() || "(the agent returned an empty response)" : "(no prompt runner configured; unable to run this reminder's prompt)";
+          body = runPrompt ? (await runPrompt(reminder.text, reminder.voiceTurn ? { voiceTurn: true } : undefined)).trim() || "(the agent returned an empty response)" : "(no prompt runner configured; unable to run this reminder's prompt)";
         } catch (error) {
           body = `(prompt reminder failed: ${error instanceof Error ? error.message : String(error)})`;
         }
       } else if (reminder.kind === "approval.execute") {
         if (!reminder.approvalId) approvalError = `reminder ${reminder.id} has no approvalId`;
+        // Creation refuses inside a voice turn; this catches one written to the file some other way.
+        else if (reminder.voiceTurn) approvalError = VOICE_TURN_REFUSAL;
         else if (!executeApproval) approvalError = "no executeApproval handler configured";
         else {
           try { await executeApproval(reminder.approvalId); }

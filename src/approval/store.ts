@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ApprovalItem } from "../types.ts";
+import { assertNotVoiceTurn } from "../guardrails.ts";
 
 /** How long a mutation waits for another process's lock before giving up. */
 const LOCK_WAIT_MS = 10_000;
@@ -130,6 +131,9 @@ export class ApprovalStore {
   }
 
   async setStatus(id: string, status: ApprovalItem["status"], result?: string): Promise<ApprovalItem> {
+    // Voice rail: approving (or moving to executing) is refused inside a voice turn.
+    // Rejecting, and recording an in-flight execution's outcome, stay allowed.
+    if (status === "approved" || status === "executing") assertNotVoiceTurn();
     return this.mutate(async () => {
       await this.ensure();
       const item = this.items.find((candidate) => candidate.id === id);
@@ -146,6 +150,7 @@ export class ApprovalStore {
 
   /** Atomically claim an explicitly approved action for execution. */
   async claimForExecution(id: string): Promise<ApprovalItem> {
+    assertNotVoiceTurn();
     return this.mutate(async () => {
       await this.ensure();
       const item = this.items.find((candidate) => candidate.id === id);

@@ -26,6 +26,14 @@ import { ProviderRunner, type RunOptions } from "../providers/runner.ts";
 import { redactSecrets } from "../util/env.ts";
 import { OUTBOUND_EMAIL_APPROVAL_GUARDRAIL } from "../guardrails.ts";
 import { hotCache } from "../cache.ts";
+import { voicePromptBlock, type VoiceTurn } from "../voice/policy.ts";
+
+/**
+ * RunOptions plus the agent-only voice context. `voice` itself stays here (it shapes the prompt);
+ * the runner receives only `voiceTurn: true`, which puts HENRY_VOICE_TURN=1 on the provider child,
+ * plus `readOnly: true` unless `voice.allowWrites` is on.
+ */
+export type AgentRunOptions = RunOptions & { voice?: VoiceTurn };
 
 async function readText(path: string): Promise<string> {
   try {
@@ -54,7 +62,10 @@ export class HenryAgent {
    * reduction: a resumed provider session already holds those static blocks, so
    * it receives a safety header + dynamic context + the request.
    */
-  async buildPrompt(prompt: string, runId: string, fresh = true, provider: ProviderName = "claude"): Promise<string> {
+  async buildPrompt(prompt: string, runId: string, fresh = true, provider: ProviderName = "claude", voice?: VoiceTurn): Promise<string> {
+    // A voice turn restates its contract EVERY turn (fresh or resumed, any tier): whether a
+    // message was spoken is per-turn, so session history must never carry it.
+    const voiceBlock = voice ? voicePromptBlock(voice) : "";
     // Trivial chatter (t0) gets a pocket prompt: tiny persona line + 2 memories for
     // continuity, none of the 14KB capability/soul sheets. A greeting was shipping
     // the full deck to haiku for no reason (2026-08-08 "hi took 100s" investigation —
@@ -65,6 +76,7 @@ export class HenryAgent {
       return [
         "You are Henry, Luvish's terminal-first personal AI agent. Call him Luvish. Warm, kind, lightly playful. BE CONCISE: answer directly, then stop. Never send anything outbound without his explicit approval.",
         miniContext,
+        voiceBlock,
         "\n--- Luvish's request ---\n",
         prompt,
       ].filter(Boolean).join("\n");
@@ -199,6 +211,7 @@ export class HenryAgent {
     const dynamicTail = [
       "\n--- recalled Engram context ---\n", context,
       ...(knowledgeBlock ? ["\n", knowledgeBlock] : []),
+      ...(voiceBlock ? ["\n", voiceBlock] : []),
       "\n--- Luvish's request ---\n", prompt,
       "\nBE CONCISE: answer directly, then stop. No boilerplate status footers — mention approvals, commits, or staged items ONLY when one actually exists or needs Luvish's decision right now; never say 'nothing staged/no outbound/not committed' as a routine sign-off. Detail only when Luvish asks for it.",
     ];
@@ -207,8 +220,17 @@ export class HenryAgent {
     return [...(fresh ? staticBlocks : slimHeader), ...(pmModeBlock ? [pmModeBlock] : []), ...dynamicTail].join("\n");
   }
 
-  async run(prompt: string, options: RunOptions = {}): Promise<Awaited<ReturnType<ProviderRunner["run"]>>> {
+  async run(prompt: string, agentOptions: AgentRunOptions = {}): Promise<Awaited<ReturnType<ProviderRunner["run"]>>> {
     const runId = randomUUID();
+    const { voice, ...options } = agentOptions;
+    // The voice rail in code: a voice turn's provider child (and all it spawns) cannot approve,
+    // execute, or send — see RunOptions.voiceTurn and src/guardrails.ts.
+    const voiceTurn = voice !== undefined || options.voiceTurn === true;
+    // VOICE SANDBOX (layer 1): a spoken turn runs read-only unless voice.allowWrites is on —
+    // Codex --sandbox read-only / Claude dontAsk read allowlist. The env rail above can be
+    // stripped by a model with a full shell; a read-only sandbox cannot. A caller's own
+    // readOnly: true is never loosened.
+    if (voice !== undefined && voice.allowWrites !== true) options.readOnly = true;
     // Surface sessions (latency §11.5): resumed turns send a slim prompt — the
     // provider session already holds the static soul/persona blocks.
     // Trivial chatter rides t0 (latency §11.5 #5); explicit caller tier always wins.
@@ -226,18 +248,18 @@ export class HenryAgent {
     try {
     const session = surface ? this.runner.acquireSession(surface, options.provider) : undefined;
     const promptStartedAt = Date.now();
-    const fullPrompt = await this.buildPrompt(prompt, runId, session ? session.fresh : true, preferredProvider);
+    const fullPrompt = await this.buildPrompt(prompt, runId, session ? session.fresh : true, preferredProvider, voice);
     let result = await this.runner.run(fullPrompt, {
-      ...options, surface, tier, session, promptBuildMs: Date.now() - promptStartedAt,
+      ...options, surface, tier, session, promptBuildMs: Date.now() - promptStartedAt, ...(voiceTurn ? { voiceTurn } : {}),
       onEvent: (event) => options.onEvent?.(event),
     });
     if (surface && session && !session.fresh && (result as { sessionReset?: boolean }).sessionReset) {
       // Provider evicted the session mid-stream: rebuild fresh once with the full prompt.
       const retrySession = this.runner.acquireSession(surface, options.provider);
       const retryPromptStartedAt = Date.now();
-      const retryPrompt = await this.buildPrompt(prompt, runId, true, preferredProvider);
+      const retryPrompt = await this.buildPrompt(prompt, runId, true, preferredProvider, voice);
       result = await this.runner.run(retryPrompt, {
-        ...options, surface, tier, session: retrySession, promptBuildMs: Date.now() - retryPromptStartedAt,
+        ...options, surface, tier, session: retrySession, promptBuildMs: Date.now() - retryPromptStartedAt, ...(voiceTurn ? { voiceTurn } : {}),
         onEvent: (event) => options.onEvent?.(event),
       });
     }

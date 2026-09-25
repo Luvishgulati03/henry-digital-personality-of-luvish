@@ -93,3 +93,56 @@ Talk: http://127.0.0.1:7337/talk
 ```
 
 (The `/talk` route itself lands in a later phase; this phase only prints the URL it will use.)
+
+## Voice safety
+
+A voice turn is a speech-to-text transcript, not proof of authority: anyone near the
+microphone, or a misheard word, can produce it. Henry treats it with three layers, strongest
+first.
+
+1. **Read-only sandbox (default).** Unless `voice.allowWrites` is on, every voice turn runs
+   with `readOnly: true`, the same mode Luna research uses.
+   - Codex: `codex exec --sandbox read-only` (resumed sessions use `-c sandbox_mode="read-only"`).
+     Shell commands cannot write files, and the sandbox also blocks network sockets, including
+     loopback, so a voice turn cannot `curl` the dashboard at `127.0.0.1:7337`. Codex's built-in
+     web search still works, because it runs outside the shell sandbox.
+   - Claude: `--permission-mode dontAsk --allowedTools Read,Grep,Glob,WebSearch,WebFetch
+     --disallowedTools Bash,Edit,Write,NotebookEdit`. No shell, no file edits; web search and
+     fetch stay available.
+
+   So by voice Henry can answer, look things up, search the web, research, and recall. It
+   cannot edit files, stage drafts or approval items, set reminders, or run anything that
+   writes. Asked to do one of those, it says so in one sentence and offers to do it when you
+   type the request.
+2. **Environment flag.** Every voice turn, read-only or not, runs its provider child with
+   `HENRY_VOICE_TURN=1`. Every approve, claim, execute, and send path refuses under that flag,
+   and sending connector tools (Gmail send, mail MCP servers) are disabled for the turn.
+3. **Chat-route skip.** `/api/chat/send` never runs the typed approval grammar on a voice
+   turn, so "approve 123" said aloud reaches the model as ordinary words. While a *writable*
+   voice turn is in flight, the dashboard's approval routes and typed approval grammar return
+   409. Read-only voice turns don't block your own dashboard approvals, because the sandbox
+   has no network to reach them.
+
+### `voice.allowWrites`
+
+Set `"voice": { "allowWrites": true }` in `data/settings.json`, or export
+`HENRY_VOICE_ALLOW_WRITES=1`, to let voice turns run with Henry's normal writable
+permissions (edit files, stage drafts). `HENRY_VOICE_ALLOW_WRITES=0` forces it off whatever
+the settings say. Default: off.
+
+With `allowWrites` on, layer 1 is gone. What stops a voice turn from approving or sending is
+then:
+
+- the `HENRY_VOICE_TURN` flag, which a model with a full shell can remove
+  (`env -u HENRY_VOICE_TURN ...`), or work around by editing `data/approvals.json` directly or
+  by using its own credentials;
+- the dashboard's 409 in-flight gate, which only covers the dashboard itself;
+- the prompt, which tells Henry that drafts are allowed but approvals and sends never are.
+
+That makes "never approve or send by voice" a prompt-level promise, not a code guarantee,
+whenever `allowWrites` is on. Leave it off unless you accept that trade-off.
+
+In both modes the spoken reply is also filtered before speech. Private mode (`voice.privateMode`
+or `HENRY_VOICE_PRIVATE=1`) replaces it with a neutral status line. With private mode off,
+emails, phone numbers, OTPs, account numbers, and keys are redacted. A read-only turn can still
+*read* local files, so what it shows on screen is governed by the prompt's privacy rules.

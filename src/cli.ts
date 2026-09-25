@@ -14,6 +14,7 @@ import { startReminderTicker, type ReminderTickerHandle } from "./reminders/tick
 import { sendTelegram } from "./notify/telegram.ts";
 import { createInputQueue } from "./repl/input-queue.ts";
 import { executeExplicitApproval } from "./approval/explicit.ts";
+import { assertNotVoiceTurn } from "./guardrails.ts";
 import { trackerSummary } from "./mailwatch/tracker.ts";
 import { dim } from "./tui/ansi.ts";
 import { createRenderer, renderMarkdown } from "./tui/markdown.ts";
@@ -413,7 +414,7 @@ async function main(): Promise<void> {
           redrawPrompt();
           void runtime.notifyOperator(message, title).catch(() => undefined);
         },
-        promptRunner: (prompt) => runtime.agent.run(prompt).then((result) => result.response),
+        promptRunner: (prompt, options) => runtime.agent.run(prompt, options?.voiceTurn ? { voiceTurn: true } : {}).then((result) => result.response),
         executeApproval: (approvalId) => runtime.executeApproval(approvalId),
       });
       await repl(runtime, ticker, (fn) => { redrawPrompt = fn; }, [
@@ -448,7 +449,7 @@ async function main(): Promise<void> {
       startReminderTicker(runtime.reminders, runtime.activity, {
         role: "dashboard",
         notify: runtime.notifyOperator,
-        promptRunner: (prompt) => runtime.agent.run(prompt).then((result) => result.response),
+        promptRunner: (prompt, options) => runtime.agent.run(prompt, options?.voiceTurn ? { voiceTurn: true } : {}).then((result) => result.response),
         executeApproval: (approvalId) => runtime.executeApproval(approvalId),
       });
       announceTelegramPump(pump);
@@ -662,8 +663,10 @@ async function main(): Promise<void> {
     } else if (command === "approve") {
       const sub = args[1] || "list";
       if (sub === "list") print(await runtime.approvals.list());
-      else if (sub === "approve") { if (!args[2]) throw new Error("Usage: henry approve approve <id>"); await runtime.approve(args[2]); console.log(`Approved ${args[2]}`); }
+      // Voice rail: refused before touching the queue (the store refuses again underneath).
+      else if (sub === "approve") { assertNotVoiceTurn(); if (!args[2]) throw new Error("Usage: henry approve approve <id>"); await runtime.approve(args[2]); console.log(`Approved ${args[2]}`); }
       else if (sub === "send" || sub === "execute") {
+        assertNotVoiceTurn();
         if (!args[2]) throw new Error("Usage: henry approve send <id>");
         const item = await runtime.approvals.get(args[2]);
         if (!item) throw new Error("Approval not found");
@@ -772,6 +775,7 @@ async function main(): Promise<void> {
         const every = option("--every");
         const randomDailyValue = option("--random-daily");
         if (executeApprovalId) {
+          assertNotVoiceTurn();
           if (every) throw new Error("henry remind --execute-approval does not support --every — a scheduled send is one-shot, never recurring.");
           if (!at && !inValue) throw new Error('Usage: henry remind --execute-approval <approvalId> --at "YYYY-MM-DD HH:mm" | --in "2h"');
           const dueAt = at ? parseAt(at) : parseIn(inValue!);
@@ -861,6 +865,7 @@ async function main(): Promise<void> {
         print(await runtime.standupPoller.pollOnce());
         print(await runtime.standup.scan(date));
       } else if (sub === "summary") {
+        if (args.includes("--post")) assertNotVoiceTurn();
         await runtime.standupPoller.pollOnce();
         await runtime.standup.scan(date);
         const result = await runtime.standup.summarize(date, { post: args.includes("--post"), session });
@@ -898,6 +903,8 @@ async function main(): Promise<void> {
       } else if (sub === "status") {
         print({ enabled: tweetsEnabled(runtime.config.settingsPath), keysPresent: Boolean(readXCredentials()), window: "13:00-17:00 local, one random minute" });
       } else if (sub === undefined || sub === "draft") {
+        // A bare `tweet` may post live; `tweet draft` never does and stays allowed.
+        if (sub === undefined) assertNotVoiceTurn();
         const service = new TweetService(runtime.config, runtime.activity, runtime.agent.providerRunner, runtime.notifyOperator, runtime.memory);
         const result = await service.run({ trigger: "cli", stageOnly: sub === "draft" });
         if (result.text) console.log(`\n${result.text}\n`);

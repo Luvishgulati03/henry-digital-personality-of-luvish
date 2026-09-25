@@ -106,3 +106,55 @@ export function describeClaudeGmail(capability: ConnectorCapability | undefined)
   const state = capability ? `reported ${capability.status} at ${capability.checkedAt}` : "has never been checked";
   return `Claude's Gmail connector ${state}. Authorize it for headless runs (run \`claude\`, open /mcp, authenticate claude.ai Gmail), then run \`henry provider check\`.`;
 }
+
+/**
+ * Codex's curated Gmail app (plugin `gmail@openai-curated`, `.app.json` → this connector id).
+ * The id is OpenAI's, not per-user, so the override below is portable.
+ */
+export const CODEX_GMAIL_APP_ID = "connector_2128aebfecb84f64a069897515042a44";
+/** The Gmail app's delivering tools (all annotated openWorldHint: true in the Codex tool cache). */
+export const CODEX_GMAIL_SEND_TOOLS = ["gmail.send_email", "gmail.send_draft", "gmail.forward_emails"];
+
+/**
+ * `-c` overrides that make a VOICE-TURN Codex run unable to send, whatever the prompt says.
+ *
+ * - Every Codex app (connector) loses its open-world and destructive tools — `_default` for all
+ *   apps, and the Gmail app explicitly (a per-app table would otherwise shadow `_default`). In the
+ *   Gmail app every sending tool is open-world and every read tool is not, so reads and drafts keep
+ *   working while send/forward/delete are gone. The three send tools are also disabled by name, so
+ *   the rail does not rest on annotations alone.
+ * - Any user-defined MCP server whose name mentions mail is disabled outright: Henry cannot know
+ *   its tool names (e.g. a local gmail MCP exposing send_email), so it fails closed. Only servers
+ *   that actually exist in the user's config.toml are named — Codex rejects an override that
+ *   creates a server table with no transport.
+ * - HENRY_VOICE_TURN=1 is pinned into the shell environment policy, so the model's shell commands
+ *   (and every `henry …` they run) carry the flag even under a restrictive `inherit` setting.
+ */
+export function codexVoiceTurnOverrides(codexConfigToml = ""): string[] {
+  const app = `apps.${CODEX_GMAIL_APP_ID}`;
+  const overrides = [
+    "apps._default.open_world_enabled=false",
+    "apps._default.destructive_enabled=false",
+    `${app}.open_world_enabled=false`,
+    `${app}.destructive_enabled=false`,
+    ...CODEX_GMAIL_SEND_TOOLS.map((tool) => `${app}.tools."${tool}".enabled=false`),
+    ...codexMailServers(codexConfigToml).map((name) => `mcp_servers.${/^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name)}.enabled=false`),
+    'shell_environment_policy.set.HENRY_VOICE_TURN="1"',
+  ];
+  return overrides.flatMap((override) => ["-c", override]);
+}
+
+/** Names of `[mcp_servers.<name>]` tables in a Codex config.toml whose name mentions mail. */
+export function codexMailServers(codexConfigToml: string): string[] {
+  const names = new Set<string>();
+  for (const match of codexConfigToml.matchAll(/^\s*\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]\s*$/gm)) {
+    const name = match[1] ?? match[2];
+    if (name && /mail/i.test(name)) names.add(name);
+  }
+  return [...names];
+}
+
+/** Claude Gmail tools that deliver mail, from the cached headless init proof. Denied on voice turns. */
+export function claudeGmailSendTools(capability: ConnectorCapability | undefined): string[] {
+  return (capability?.tools ?? []).filter((tool) => GMAIL_SEND.test(tool));
+}

@@ -5,6 +5,8 @@ import type { HenryConfig } from "../config.ts";
 import type { ActivityLog } from "../activity.ts";
 import type { ActivityKind, DispatchTier, ProviderEvent, ProviderName, RunResult } from "../types.ts";
 import { safeEnvironment } from "../util/env.ts";
+import { isVoiceTurn, VOICE_TURN_ENV } from "../guardrails.ts";
+import { homedir } from "node:os";
 import path from "node:path";
 import { SessionManager, sessionArgs } from "./session.ts";
 import { AdmissionController, sharedAdmissionController } from "../orchestration/admission.ts";
@@ -12,6 +14,8 @@ import { notifyReminder, type ReminderNotifier } from "../reminders/service.ts";
 import { readSettings } from "../util/settings.ts";
 import {
   CAPABILITY_FILE,
+  claudeGmailSendTools,
+  codexVoiceTurnOverrides,
   describeClaudeGmail,
   gmailToolAccess,
   readCapabilities,
@@ -59,6 +63,14 @@ export interface RunOptions {
   timeoutMs?: number;
   /** Codex structured-output schema. Unsupported providers ignore this option. */
   outputSchemaPath?: string;
+  /**
+   * The run serves a voice-originated turn. The child (and everything it spawns) gets
+   * HENRY_VOICE_TURN=1, which makes every approve/claim/execute/send path refuse in code
+   * (src/guardrails.ts), and the provider's mail connector loses its sending tools. A process
+   * that already carries HENRY_VOICE_TURN=1 treats every run as a voice turn, so the flag
+   * survives grandchild `henry …` commands.
+   */
+  voiceTurn?: boolean;
   onEvent?: (event: ProviderEvent) => void;
 }
 
@@ -123,7 +135,11 @@ export function finalCodexAgentMessage(events: ProviderEvent[]): string | undefi
  */
 export function codexArgs(
   prompt: string,
-  options: { readOnly?: boolean; tier?: DispatchTier; model?: string; t0Model?: string; session?: { id: string; fresh: boolean }; outputSchemaPath?: string } = { readOnly: false },
+  options: {
+    readOnly?: boolean; tier?: DispatchTier; model?: string; t0Model?: string; session?: { id: string; fresh: boolean }; outputSchemaPath?: string;
+    /** Extra `-c key=value` pairs (already flag-paired), e.g. codexVoiceTurnOverrides(). */
+    extraConfig?: string[];
+  } = { readOnly: false },
 ): string[] {
   // `model` is the normal/t1/t2 model. Keep the t0 worker separate so a
   // caller's heavyweight configured model can never accidentally reach a
@@ -138,6 +154,7 @@ export function codexArgs(
     // operator preference from leaking into Henry's interactive latency path.
     ...(isResume ? ["-c", `sandbox_mode="${options.readOnly ? "read-only" : "danger-full-access"}"`] : []),
     "-c", `model_reasoning_effort="${effort}"`,
+    ...(options.extraConfig ?? []),
   ];
   // Sessions imply persistence: drop --ephemeral whenever a surface session is in play.
   // Important CLI detail: `resume` options precede SESSION_ID; arguments after it
@@ -234,11 +251,12 @@ export function buildProviderArgs(
     outputSchemaPath?: string;
     claudeJsonSchema?: string; claudeStreamJson?: boolean;
     claudeAllowedTools?: string[]; claudeDisallowedTools?: string[];
+    codexExtraConfig?: string[];
   },
 ): string[] {
   const route = resolveProviderRoute(provider, options);
   return provider === "codex"
-    ? codexArgs(prompt, { readOnly: options.readOnly, tier: route.tier, model: route.model, t0Model: options.codexT0Model, session: options.session, outputSchemaPath: options.outputSchemaPath })
+    ? codexArgs(prompt, { readOnly: options.readOnly, tier: route.tier, model: route.model, t0Model: options.codexT0Model, session: options.session, outputSchemaPath: options.outputSchemaPath, extraConfig: options.codexExtraConfig })
     : claudeArgs(prompt, {
       readOnly: options.readOnly, tier: route.tier, model: route.model,
       t0Model: options.claudeT0Model, t2Model: options.claudeT2Model, session: options.session,
@@ -339,7 +357,12 @@ export async function execute(
   let firstTextMs: number | null = null;
   const child = spawn(command, args, {
     cwd,
-    env: safeEnvironment(provider, { CI: "1", HENRY_RUN_ID: runId }),
+    env: safeEnvironment(provider, {
+      CI: "1", HENRY_RUN_ID: runId,
+      // The voice rail: set for a voice turn, and re-propagated from a process that already
+      // carries it (safeEnvironment's allowlist would otherwise drop it at the next hop).
+      ...(options.voiceTurn || isVoiceTurn() ? { [VOICE_TURN_ENV]: "1" } : {}),
+    }),
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -588,6 +611,12 @@ export class ProviderRunner {
     return path.join(this.config.dataDir, CAPABILITY_FILE);
   }
 
+  /** The user's Codex config.toml text ("" when absent) — voice turns disable its mail MCP servers. */
+  private readCodexConfig(): string {
+    try { return readFileSync(path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "config.toml"), "utf8"); }
+    catch { return ""; }
+  }
+
   /** Peek/create the session a surfaced run() will use — lets callers slim resumed prompts. */
   acquireSession(surface: string, provider?: ProviderName): { id: string; fresh: boolean; provider: ProviderName } {
     const p = provider || this.config.provider;
@@ -680,6 +709,12 @@ export class ProviderRunner {
     const gmailAccess = options.connector === "gmail" ? (options.readOnly ? "read" as const : "draft" as const) : undefined;
     const claudeGmail = gmailAccess ? readCapabilities(capabilityFile).claude?.gmail : undefined;
     const claudeTools = gmailAccess ? gmailToolAccess(claudeGmail, gmailAccess) : undefined;
+    // VOICE RAIL (connectors): a voice turn's Codex run loses every sending connector tool, and
+    // its Claude run is denied the Gmail send tools its cached init proof lists. The env flag
+    // (execute()) covers Henry's own approve/send paths; this covers the connector itself.
+    const voiceTurn = options.voiceTurn === true || isVoiceTurn();
+    const codexVoiceConfig = voiceTurn ? codexVoiceTurnOverrides(this.readCodexConfig()) : undefined;
+    const claudeVoiceDenied = voiceTurn ? claudeGmailSendTools(readCapabilities(capabilityFile).claude?.gmail) : [];
     const connectorNote = gmailAccess && !claudeTools && candidates.includes("claude") ? describeClaudeGmail(claudeGmail) : undefined;
     const sequence = connectorNote ? candidates.filter((provider) => provider !== "claude") : candidates;
 
@@ -768,8 +803,10 @@ export class ProviderRunner {
           claudeJsonSchema: options.outputSchemaPath ? compactSchema(options.outputSchemaPath) : undefined,
           claudeStreamJson: options.connector !== undefined,
           claudeAllowedTools: claudeTools?.allowed,
-          claudeDisallowedTools: claudeTools?.denied,
-        } : {}),
+          claudeDisallowedTools: claudeTools || claudeVoiceDenied.length
+            ? [...new Set([...(claudeTools?.denied ?? []), ...claudeVoiceDenied])]
+            : undefined,
+        } : { codexExtraConfig: codexVoiceConfig }),
       });
       const route = resolveProviderRoute(provider, {
         tier: options.tier,
@@ -819,7 +856,7 @@ export class ProviderRunner {
       );
       let result: RunResult;
       try {
-        result = await this.executeFn(provider, args, cwd, provider, { ...options, timeoutMs: envelopeMs });
+        result = await this.executeFn(provider, args, cwd, provider, { ...options, voiceTurn, timeoutMs: envelopeMs });
       } finally {
         decision.slot.release();
       }

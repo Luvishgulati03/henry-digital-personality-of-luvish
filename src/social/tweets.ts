@@ -8,6 +8,7 @@ import type { ActivityLog } from "../activity.ts";
 import type { HenryMemory } from "../memory/engram.ts";
 import type { ProviderRunner } from "../providers/runner.ts";
 import { readSettings } from "../util/settings.ts";
+import { assertNotVoiceTurn } from "../guardrails.ts";
 
 /**
  * The daily tech tweet — the ONE standing exception to soul.md's outbound-approval rule
@@ -202,6 +203,7 @@ export class XApiPoster implements TweetPoster {
   ) {}
 
   async post(text: string): Promise<{ id: string }> {
+    assertNotVoiceTurn();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
     try {

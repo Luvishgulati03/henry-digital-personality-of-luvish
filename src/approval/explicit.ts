@@ -1,4 +1,5 @@
 import type { ApprovalItem } from "../types.ts";
+import { assertNotVoiceTurn } from "../guardrails.ts";
 
 type ExplicitApprovalRuntime = {
   approvals: { list(status?: ApprovalItem["status"]): Promise<ApprovalItem[]> };
@@ -25,6 +26,7 @@ export function explicitApprovalTarget(input: string): { id?: string; body?: str
 export async function executeExplicitApproval(runtime: ExplicitApprovalRuntime, input: string): Promise<string | undefined> {
   const target = explicitApprovalTarget(input);
   if (!target) return undefined;
+  assertNotVoiceTurn();
   const pending = await runtime.approvals.list("pending");
   const matches = target.id
     ? pending.filter((candidate) => candidate.id === target.id)
