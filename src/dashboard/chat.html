@@ -133,30 +133,44 @@
 
   /* ---------- header ---------- */
   header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 18px;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px calc(18px + env(safe-area-inset-right)) 10px calc(18px + env(safe-area-inset-left));
     border-bottom: 1px solid var(--border-soft);
     background: color-mix(in srgb, var(--bg) 88%, black);
     flex: 0 0 auto;
+    min-width: 0;
   }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: .2px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: .2px; min-width: 0; overflow: hidden; }
   #toggleside { flex: none; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
-  .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
-  .brand small { color: var(--text-faint); font-weight: 400; }
-  .header-right { display: flex; align-items: center; gap: 10px; }
+  .brand .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .brand small { color: var(--text-faint); font-weight: 400; white-space: nowrap; }
+  .header-right { display: flex; align-items: center; gap: 10px; flex: none; }
   .chip {
     font-size: 11.5px; color: var(--text-dim); border: 1px solid var(--border); border-radius: 999px;
-    padding: 3px 10px; background: var(--surface); font-family: var(--mono);
+    padding: 3px 10px; background: var(--surface); font-family: var(--mono); white-space: nowrap;
   }
   a.chip { display: inline-flex; align-items: center; min-height: 44px; }
   .btn {
     appearance: none; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim);
     border-radius: 10px; padding: 6px 12px; font-size: 13px; cursor: pointer; font-family: var(--sans);
-    min-height: 44px; transition: color .15s, border-color .15s, background .15s;
+    min-height: 44px; transition: color .15s, border-color .15s, background .15s; white-space: nowrap;
   }
   .btn:hover { color: var(--text); border-color: var(--text-faint); }
   .btn:disabled { opacity: .45; cursor: default; }
   a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+
+  /* Icon-only Talk/Dashboard controls: text labels show >=561px; below that the
+     header collapses to icon buttons so the row never wraps or overflows on phones. */
+  .icon-btn .icon { display: none; }
+  @media (max-width: 560px) {
+    header { padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); gap: 6px; }
+    .brand small { display: none; }
+    #provider { display: none; }
+    .header-right { gap: 6px; }
+    .icon-btn { width: 44px; height: 44px; padding: 0; justify-content: center; gap: 0; }
+    .icon-btn .label { display: none; }
+    .icon-btn .icon { display: inline-flex; width: 18px; height: 18px; }
+  }
 
   /* ---------- transcript ---------- */
   #scroller { flex: 1 1 auto; overflow-y: auto; scroll-behavior: smooth; }
@@ -219,6 +233,14 @@
   .codeblock-bar button:hover { color: var(--text); }
   .codeblock pre { padding: 13px 14px; overflow-x: auto; }
   .codeblock code { font-family: var(--mono); font-size: 13px; line-height: 1.55; background: none; border: none; padding: 0; color: #d5f5e3; }
+
+  /* ---------- markdown tables ---------- */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border-soft); border-radius: 10px; }
+  .prose table { border-collapse: collapse; width: 100%; font-size: 14px; font-family: var(--sans); }
+  .prose th, .prose td { padding: 7px 12px; border-bottom: 1px solid var(--border-soft); text-align: left; white-space: nowrap; }
+  .prose thead th { background: var(--surface-2); color: var(--text); font-weight: 650; }
+  .prose tbody tr:last-child td { border-bottom: none; }
+  .prose tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
 
   .thinking { display: flex; align-items: center; gap: 10px; padding-left: 35px; color: var(--text-faint); font-size: 14px; }
   .thinking .pulse { display: inline-flex; gap: 4px; }
@@ -323,10 +345,13 @@
 <header>
   <div class="brand">
     <button class="btn" id="toggleside" title="Show/hide conversations">☰</button>
-    <span class="dot"></span>Henry <small>· chat</small>
+    <span class="dot" id="statusDot" title="Henry"></span>Henry <small>· chat</small>
   </div>
   <div class="header-right">
-    <a href="/talk" class="chip" id="openTalk" title="Talk to Henry hands-free">Talk</a>
+    <a href="/talk" class="chip icon-btn" id="openTalk" title="Talk to Henry hands-free" aria-label="Talk to Henry hands-free">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z"/><path d="M19 11v1a7 7 0 0 1-14 0v-1M12 19v3"/></svg>
+      <span class="label">Talk</span>
+    </a>
     <dialog id="talkModal" aria-label="Talk">
       <div id="talkPanel">
         <button id="talkClose" aria-label="Close talk" title="Close talk">✕</button>
@@ -334,7 +359,10 @@
       </div>
     </dialog>
     <span class="chip" id="provider">…</span>
-    <a class="btn" href="/" title="Mission control">Dashboard</a>
+    <a class="btn icon-btn" href="/" title="Mission control" aria-label="Dashboard">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <span class="label">Dashboard</span>
+    </a>
   </div>
 </header>
 
@@ -374,6 +402,7 @@
   var jump = document.getElementById("jump");
   var newchat = document.getElementById("newchat");
   var providerChip = document.getElementById("provider");
+  var statusDot = document.getElementById("statusDot");
   var sidebar = document.getElementById("sidebar");
   var toggleSide = document.getElementById("toggleside");
   var convList = document.getElementById("convlist");
@@ -401,6 +430,14 @@
   var SEND_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
   var STOP_SVG = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 
+  /* Below 561px the provider chip hides — its value still needs to be reachable, so it
+     rides along on the status dot's tooltip instead of disappearing outright. */
+  function setProviderChip(provider) {
+    activeProvider = provider || "";
+    providerChip.textContent = activeProvider || "?";
+    statusDot.title = "Henry — " + (activeProvider || "provider unknown");
+  }
+
   /* ---------- minimal, escape-first markdown ---------- */
   function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -412,6 +449,57 @@
       .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>")
       .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   }
+  /* ---------- GFM-lite tables ----------
+     Lines are already esc()'d before this runs, so cell text is HTML-safe going in;
+     inline() only adds tags, it never reintroduces raw markup. */
+  function splitTableRow(line) {
+    var t = line.trim();
+    if (t.charAt(0) === "|") t = t.slice(1);
+    if (t.charAt(t.length - 1) === "|") t = t.slice(0, -1);
+    return t.split("|").map(function (c) { return c.trim(); });
+  }
+  function looksLikeTableRow(line) {
+    return typeof line === "string" && line.indexOf("|") !== -1 && line.trim() !== "";
+  }
+  function isTableSeparatorRow(line) {
+    if (!looksLikeTableRow(line)) return false;
+    var cells = splitTableRow(line);
+    if (!cells.length) return false;
+    var sawDash = false;
+    for (var i = 0; i < cells.length; i++) {
+      if (!/^:?-+:?$/.test(cells[i])) return false;
+      if (cells[i].indexOf("-") !== -1) sawDash = true;
+    }
+    return sawDash;
+  }
+  function tableCellAlign(sepCell) {
+    var left = sepCell.charAt(0) === ":", right = sepCell.charAt(sepCell.length - 1) === ":";
+    if (left && right) return "center";
+    if (right) return "right";
+    if (left) return "left";
+    return "";
+  }
+  function looksNumeric(cell) {
+    var t = cell.replace(/<[^>]*>/g, "").trim();
+    return t !== "" && /^[-+]?[\d,]+(\.\d+)?%?$/.test(t);
+  }
+  function renderTable(headerCells, aligns, bodyRows) {
+    function cellStyle(align, raw) {
+      var a = align || (looksNumeric(raw) ? "right" : "");
+      return a ? ' style="text-align:' + a + '"' : "";
+    }
+    var thead = "<tr>" + headerCells.map(function (cell, idx) {
+      return "<th" + cellStyle(aligns[idx], cell) + ">" + inline(cell) + "</th>";
+    }).join("") + "</tr>";
+    var tbody = bodyRows.map(function (row) {
+      return "<tr>" + headerCells.map(function (_, idx) {
+        var cell = row[idx] || "";
+        return "<td" + cellStyle(aligns[idx], cell) + ">" + inline(cell) + "</td>";
+      }).join("") + "</tr>";
+    }).join("");
+    return '<div class="table-wrap"><table><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>';
+  }
+
   function renderMarkdown(src) {
     var fences = [];
     src = src.replace(/```([\w+-]*)\n?([\s\S]*?)(?:```|$)/g, function (_m, lang, code) {
@@ -442,6 +530,18 @@
         flushPara(); flushList(); flushQuote();
         var level = h[1].length;
         html.push("<h" + level + ">" + inline(h[2]) + "</h" + level + ">");
+      } else if (looksLikeTableRow(line) && i + 1 < lines.length && isTableSeparatorRow(lines[i + 1])) {
+        flushPara(); flushList(); flushQuote();
+        var headerCells = splitTableRow(line);
+        var aligns = splitTableRow(lines[i + 1]).map(tableCellAlign);
+        var bodyRows = [];
+        var j = i + 2;
+        while (j < lines.length && looksLikeTableRow(lines[j]) && !isTableSeparatorRow(lines[j])) {
+          bodyRows.push(splitTableRow(lines[j]));
+          j++;
+        }
+        html.push(renderTable(headerCells, aligns, bodyRows));
+        i = j - 1;
       } else if (ul || ol) {
         flushPara(); flushQuote();
         var want = ul ? "ul" : "ol";
@@ -462,6 +562,9 @@
     flushPara(); flushList(); flushQuote();
     return html.join("");
   }
+  /* Exposed only so tests/chat-markdown.test.ts can exercise the renderer through a real
+     browser without duplicating its parsing rules; not part of the page's own UI wiring. */
+  window.__henryRenderMarkdown = renderMarkdown;
   window.__copy = function (btn) {
     var code = btn.closest(".codeblock").querySelector("code").textContent;
     navigator.clipboard.writeText(code).then(function () {
@@ -900,8 +1003,7 @@
       fetch("/api/settings/provider", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: target }),
       }).then(function (r) { return r.json(); }).then(function (data) {
-        activeProvider = (data && data.provider) || target;
-        providerChip.textContent = activeProvider;
+        setProviderChip((data && data.provider) || target);
         renderComposerTop();
         addSystem("Provider is now " + activeProvider + ".");
       }).catch(function (error) { addSystem("⚠ " + (error.message || error)); });
@@ -1162,10 +1264,9 @@
 
   /* ---------- boot ---------- */
   fetch("/api/status").then(function (r) { return r.json(); }).then(function (status) {
-    activeProvider = status.provider || "";
-    providerChip.textContent = activeProvider || "?";
+    setProviderChip(status.provider || "");
     renderComposerTop();
-  }).catch(function () { providerChip.textContent = "offline"; });
+  }).catch(function () { providerChip.textContent = "offline"; statusDot.title = "Henry — offline"; });
 
   fetch("/api/chat/commands").then(function (r) { return r.json(); }).then(function (data) {
     commands = (data && data.commands) || [];

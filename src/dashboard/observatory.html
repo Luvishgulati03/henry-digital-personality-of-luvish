@@ -286,6 +286,10 @@
     #henry-memory-network .hmn-button,
     #henry-memory-network .hmn-tab,
     #henry-memory-network .hmn-icon-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
       border: 1px solid transparent;
       cursor: pointer;
       transition: border-color 180ms ease, background 180ms ease, color 180ms ease, transform 180ms ease;
@@ -362,12 +366,13 @@
     #henry-memory-network .hmn-search input {
       width: 100%;
       min-width: 0;
+      min-height: 44px;
       padding: 8px 0;
       border: 0;
       outline: 0;
       background: transparent;
       color: var(--foreground);
-      font-size: calc(12 * var(--baseline-font));
+      font-size: 16px;
     }
 
     #henry-memory-network .hmn-search input::placeholder {
@@ -375,13 +380,14 @@
     }
 
     #henry-memory-network .hmn-select {
+      min-height: 44px;
       padding: 7px 8px;
       border: 1px solid var(--border);
       border-radius: 8px;
       background: rgba(255, 255, 255, 0.035);
       color: var(--foreground);
       font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-      font-size: calc(9 * var(--baseline-font));
+      font-size: 16px;
       letter-spacing: 0.04em;
     }
 
@@ -983,6 +989,8 @@
     #henry-memory-network .hmn-handoff {
       display: inline-flex;
       align-items: center;
+      justify-content: center;
+      min-height: 44px;
       gap: 8px;
       margin-top: 13px;
       padding: 7px 9px;
@@ -1082,7 +1090,9 @@
       }
 
       #henry-memory-network .hmn-graph-mount {
-        --hmc-height: 510px;
+        /* Shrinks with the viewport instead of pinning a tall fixed height, so the
+           graph fits phone screens and the rest of the page stays reachable. */
+        --hmc-height: clamp(320px, 68vw, 460px);
       }
 
       #henry-memory-network .hmn-pipeline {

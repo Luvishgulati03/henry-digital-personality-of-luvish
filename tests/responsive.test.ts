@@ -52,7 +52,8 @@ async function checkPage(page: Page, label: string): Promise<void> {
     const bad: string[] = [];
     for (const el of els as HTMLElement[]) {
       const type = (el as HTMLInputElement).type;
-      if (type === "checkbox" || type === "radio" || type === "hidden") continue;
+      // Range/checkbox/radio/hidden inputs have no editable text, so iOS never zooms on focus.
+      if (type === "checkbox" || type === "radio" || type === "hidden" || type === "range") continue;
       const style = getComputedStyle(el);
       if (style.display === "none") continue;
       const size = parseFloat(style.fontSize);
@@ -88,6 +89,32 @@ async function checkPage(page: Page, label: string): Promise<void> {
   assert.deepEqual(offenders, [], `${label}: tap targets under 44x44 CSS px`);
 }
 
+/** chat.html's header must stay a single row at every width: no wrap (Henry / chat
+ * subtitle dropping to its own line) and nothing running past the viewport edge. */
+async function checkChatHeader(page: Page, label: string): Promise<void> {
+  const info = await page.evaluate(() => {
+    const header = document.querySelector("header");
+    if (!header) return null;
+    const rect = header.getBoundingClientRect();
+    const kids = Array.from(header.querySelectorAll("*"));
+    let maxRight = 0;
+    for (const el of kids) {
+      const style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      maxRight = Math.max(maxRight, el.getBoundingClientRect().right);
+    }
+    return { height: rect.height, maxRight, innerWidth: window.innerWidth };
+  });
+  assert.ok(info, `${label}: no <header> found`);
+  // 44px tap targets + 10px vertical padding + the 1px border ≈ 65px for one clean row;
+  // a wrapped subtitle or a second row of controls pushes this well past 70px.
+  assert.ok(info!.height <= 70, `${label}: header is more than one row tall (height=${info!.height})`);
+  assert.ok(
+    info!.maxRight <= info!.innerWidth + 1,
+    `${label}: header content overflows the viewport (right=${info!.maxRight} > innerWidth=${info!.innerWidth})`,
+  );
+}
+
 test("responsive: /login, /talk, /chat pass the scripted mobile/tablet checks", { timeout: 120000 }, async (t) => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "henry-responsive-"));
   fs.cpSync(path.join(process.cwd(), "workflows"), path.join(tempRoot, "workflows"), { recursive: true });
@@ -116,10 +143,11 @@ test("responsive: /login, /talk, /chat pass the scripted mobile/tablet checks", 
         hasTouch: true,
         deviceScaleFactor: 2,
       });
-      for (const route of ["/login", "/talk", "/chat"]) {
+      for (const route of ["/login", "/talk", "/chat", "/memory"]) {
         const page = await context.newPage();
         await page.goto(base + route, { waitUntil: "networkidle" });
         await checkPage(page, `${route} @ ${viewport.name}`);
+        if (route === "/chat") await checkChatHeader(page, `${route} @ ${viewport.name}`);
         await page.close();
       }
       await context.close();
