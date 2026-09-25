@@ -39,3 +39,6 @@ soul.md
 personality.md
 context.md
 docs/lx-knowledge-architecture.md
+
+# Claude Code agent worktrees (local only)
+.claude/worktrees/
