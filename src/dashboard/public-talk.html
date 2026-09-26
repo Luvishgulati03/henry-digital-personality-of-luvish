@@ -384,7 +384,7 @@ window.HenryOrb = HenryOrb;
   let speechSince = 0, silenceSince = 0;
   let lastActivityAt = 0, repromptedYet = false, repromptAt = 0;
   let playbackBusy = false;
-  let speaking = false, speakAbort = null, playQueue = [], playingUrl = null, activePlaybackAbort = null;
+  let speaking = false, playingUrl = null, activePlaybackAbort = null;
   let vadMode = 'energy', sileroVad = null;
   let sileroSpeechAt = 0, sileroLong = false, sileroDiscard = false, sileroRunning = false;
   let fillerTimers = [], fillerDone = Promise.resolve(), fillersPlayed = 0;
@@ -501,32 +501,23 @@ window.HenryOrb = HenryOrb;
     await sleep(testing.rearmMs);
   }
 
-  /* ---------- chunked reply playback: application/x-henry-wav-seq ---------- */
+  /* ---------- reply playback: application/x-henry-wav-seq, prefetched ----------
+     Every spoken line is fetched as soon as it is queued, the playing line plus the next
+     SPEECH_PREFETCH, so the next WAV is already in memory when a clip ends and playback moves on
+     from the `ended` event with no round trip. (The server has usually synthesised it already:
+     it queues each sentence for synthesis the moment the stream releases it.) */
+  const SPEECH_PREFETCH = 2;
+  let playGen = 0; // bumped by stopSpeaking: a line that sees a new value was interrupted
   function stopSpeaking() {
-    speakAbort?.abort(); speakAbort = null;
+    playGen++;
     activePlaybackAbort?.(); activePlaybackAbort = null;
-    playQueue = [];
     cancelAnimationFrame(playRaf); orb.setLevel(0);
     playback.onended = playback.onerror = null;
     playback.pause(); playback.removeAttribute('src'); playback.load(); playback.hidden = true;
     if (playingUrl) { URL.revokeObjectURL(playingUrl); playingUrl = null; }
     speaking = false;
   }
-  function playNextFrame() {
-    if (!playQueue.length) return;
-    const blob = playQueue.shift();
-    playingUrl = URL.createObjectURL(blob);
-    playback.src = playingUrl;
-    playback.onended = () => { URL.revokeObjectURL(playingUrl); playingUrl = null; playNextFrame(); };
-    playback.onerror = () => {};
-    playback.play().catch((error) => { if (error.name === 'NotAllowedError') playback.hidden = false; });
-  }
-  function queueFrame(blob) {
-    const wasEmpty = playQueue.length === 0 && !playingUrl;
-    playQueue.push(blob);
-    if (wasEmpty) playNextFrame();
-  }
-  async function readFramed(reader) {
+  async function readFramed(reader, push) {
     let buf = new Uint8Array(0);
     for (;;) {
       const { value, done } = await reader.read();
@@ -539,23 +530,60 @@ window.HenryOrb = HenryOrb;
         if (buf.length < 4 + len) break;
         const frame = buf.slice(4, 4 + len);
         buf = buf.slice(4 + len);
-        queueFrame(new Blob([frame], { type: 'audio/wav' }));
+        push(new Blob([frame], { type: 'audio/wav' }));
       }
       if (done) break;
     }
+  }
+  /** Starts fetching one line's audio into a channel of WAV frames (filled as they arrive). */
+  function fetchSpeech(t, line) {
+    const ch = { frames: [], done: false, wake: null };
+    line.audio = ch;
+    const signal = t.fetchAbort.signal;
+    const push = (blob) => { ch.frames.push(blob); ch.wake?.(); };
+    (async () => {
+      try {
+        for (let attempt = 0; ; attempt++) {
+          const response = await fetch('/api/public/voice/speak', {
+            method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ replyId: line.replyId }), signal,
+          });
+          if (!response.ok) {
+            let data = {}; try { data = await response.json(); } catch {}
+            // "One moment": the speech queue is full for a second. Ask again rather than skip.
+            if (data.error === 'One moment.' && attempt < 3) { await sleep(400 * (attempt + 1)); continue; }
+            return;
+          }
+          const ct = response.headers.get('content-type') || '';
+          if (ct.includes('application/x-henry-wav-seq') && response.body) await readFramed(response.body.getReader(), push);
+          else { const audio = await response.blob(); if (audio.size > 44) push(audio); }
+          return;
+        }
+      } catch {} finally { ch.done = true; ch.wake?.(); }
+    })();
+    return ch;
+  }
+  async function nextFrame(ch) {
+    while (!ch.frames.length && !ch.done) await new Promise((resolve) => { ch.wake = resolve; });
+    ch.wake = null;
+    return ch.frames.shift() || null;
+  }
+  function prefetchSpeech(t) {
+    const ahead = (t.current ? [t.current, ...t.queue] : t.queue).slice(0, 1 + SPEECH_PREFETCH);
+    for (const line of ahead) if (!line.audio) fetchSpeech(t, line);
   }
   /* ---------- reply speech: one queue per turn ----------
      A turn can send more than one spoken line (an acknowledgement, then the answer). Lines play
      in order and never cut each other off; the mic stays off until the turn is finished AND the
      queue is empty (half-duplex); between lines the orb shows Thinking. A press while Henry
      speaks drops the rest of the turn (abortTurn). */
-  function beginTurnSpeech(id, turn) { turnSpeech = { id, turn, queue: [], running: false, done: false, spoke: false }; }
+  function beginTurnSpeech(id, turn) { turnSpeech = { id, turn, queue: [], current: null, running: false, done: false, spoke: false, fetchAbort: new AbortController() }; }
   function turnIsCurrent(t) { return !!t && t === turnSpeech && t.id === sessionId && t.turn === turnCounter; }
   function queueSpeech(turn, line) {
     const t = turnSpeech;
     if (!t || t.turn !== turn) return;
     cancelFillers();
-    if (line && line.replyId && line.text && line.text.trim()) t.queue.push(line);
+    if (line && line.replyId && line.text && line.text.trim()) { t.queue.push(line); prefetchSpeech(t); }
     void drainSpeech(t);
   }
   /** A streamed reply was withdrawn (reset/replace): drop its queued and playing sentences, keep the turn. */
@@ -563,6 +591,7 @@ window.HenryOrb = HenryOrb;
     const t = turnSpeech;
     if (!t || t.turn !== turn) return;
     t.queue.length = 0;
+    t.fetchAbort.abort(); t.fetchAbort = new AbortController();
     if (t.running || speaking) stopSpeaking();
   }
   function finishTurnSpeech(turn) {
@@ -577,9 +606,12 @@ window.HenryOrb = HenryOrb;
     try {
       while (t.queue.length && turnIsCurrent(t)) {
         const line = t.queue.shift();
+        t.current = line;
+        prefetchSpeech(t);
         t.spoke = true;
-        const finished = await speakOnce(line);
-        if (!finished) return; // interrupted: abortTurn already moved on
+        const finished = await speakOnce(t, line);
+        t.current = null;
+        if (!finished) return; // interrupted: abortTurn / dropTurnSpeech already moved on
       }
     } finally { t.running = false; }
     if (!turnIsCurrent(t)) return;
@@ -589,44 +621,30 @@ window.HenryOrb = HenryOrb;
     if (turnIsCurrent(t) && (state === 'speaking' || state === 'thinking')) { turnSpeech = null; enterListening(true); }
   }
   /** Speaks one reply (by the id the server gave it); resolves true when it played to the end, false when interrupted. */
-  async function speakOnce(line) {
+  async function speakOnce(t, line) {
     await fillerDone;
-    stopSpeaking();
+    const gen = playGen;
+    if (!turnIsCurrent(t)) return false;
     ensurePlayMeter();
-    speaking = true; speakAbort = new AbortController();
+    speaking = true;
     setState('speaking', 'Speaking');
     // A streamed sentence leaves the caption alone: it already shows the reply so far.
     if (line.caption !== false) setReply(line.text);
-    try {
-      const response = await fetch('/api/public/voice/speak', {
-        method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ replyId: line.replyId }), signal: speakAbort.signal,
-      });
-      if (!response.ok) { let data = {}; try { data = await response.json(); } catch {} throw new Error(data.error || 'Speech is unavailable.'); }
-      const ct = response.headers.get('content-type') || '';
-      if (ct.includes('application/x-henry-wav-seq') && response.body) await readFramed(response.body.getReader());
-      else { const audio = await response.blob(); if (audio.size > 44) queueFrame(audio); }
-      // Done when nothing is queued or playing. playNextFrame replaces playback.onended for every
-      // clip, so an onended wrapper is lost once a reply has 3+ clips; poll the real state instead.
-      const mine = speakAbort;
-      await new Promise((resolve) => {
-        const check = () => {
-          if (speakAbort !== mine || mine.signal.aborted) return resolve();
-          if (!playQueue.length && !playingUrl && (playback.paused || playback.ended)) { speaking = false; return resolve(); }
-          requestAnimationFrame(check);
-        };
-        check();
-      });
-      return true;
-    } catch (error) {
-      speaking = false;
-      // Interrupted by a press, or the line could not be synthesised: either way the turn goes on.
-      return !(error && error.name === 'AbortError');
+    const ch = line.audio || fetchSpeech(t, line);
+    for (;;) {
+      const blob = await nextFrame(ch);
+      if (gen !== playGen || !turnIsCurrent(t)) return false;
+      if (!blob) break; // played to the end, or the line could not be synthesised: the turn goes on
+      await playSingle(blob);
+      if (gen !== playGen || !turnIsCurrent(t)) return false;
     }
+    speaking = false;
+    return true;
   }
   /** Drops whatever the current turn still had to say or stream. */
   function abortTurn() {
     turnCounter++;
+    try { turnSpeech?.fetchAbort.abort(); } catch {}
     turnSpeech = null;
     try { chatAbort?.abort(); } catch {}
     chatAbort = null;

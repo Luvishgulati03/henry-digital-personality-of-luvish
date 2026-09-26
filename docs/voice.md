@@ -200,6 +200,25 @@ turn, on a 404) creates a fresh "Voice" thread. The embedded overlay never touch
    before synthesis: private mode turns anything into a neutral status line, otherwise emails,
    phones, OTPs, account numbers and keys are redacted. With `chunk: true` the response is
    `application/x-henry-wav-seq`: frames of a 4-byte big-endian length followed by one WAV each.
+   `first: true` (sent for a turn's first line) splits a long first sentence once at a clause
+   boundary (a comma, semicolon, colon or dash) so the first piece is about 60–120 characters
+   and its audio starts sooner; later pieces stay sentence-sized.
+
+### No dead time between sentences
+
+The page fetches each line's audio as soon as the line is queued: the one playing plus the
+next two. When a clip ends, the next WAV is already in memory and plays from the `ended`
+handler with no round trip. On this repo's test Mac the gaps between sentences are tens of
+milliseconds.
+
+All synthesis in the dashboard process goes through one **speech queue**
+(`src/voice/speech-queue.ts`). The Kokoro worker is single-threaded, so the queue runs one
+synthesis at a time. It is FIFO per requester (the owner, the fixed Talk phrases, each public
+visitor) and round-robin across requesters. There is no "already speaking" refusal any more:
+a second request waits its turn. The caps (16 waiting jobs per requester, 48 overall) refuse a
+job immediately with 429 rather than dropping it later, and the page retries a 429 a few
+times before moving on. When the page stops listening (a press, a closed tab), the pieces its
+request was still waiting for leave the queue.
 
 Captions are on by default (you read along); `?captions=0` hides them. The mute button stops
 Henry's voice but keeps captions.
@@ -211,7 +230,7 @@ Henry's voice but keeps captions.
 | `GET /talk` | The Talk page. |
 | `GET /api/voice/status` | `{available, sttEnabled, ttsEnabled, talkEnabled, privateMode, allowWrites, ttsVoice?, ttsSpeed?, reason?}`. |
 | `POST /api/voice/transcribe` | 16 kHz WAV body (max 8 MB) → `{text, transcriptId}`; nothing kept in private mode. |
-| `POST /api/voice/speak` | `{text, chunk?}` → WAV, or the framed sequence; redacted / private-mode line only. |
+| `POST /api/voice/speak` | `{text, chunk?, first?}` → WAV, or the framed sequence; redacted / private-mode line only. Queued, never refused while another line is synthesised. |
 | `GET /api/voice/greeting`, `/reprompt`, `/filler?v=0..N` | Fixed phrases, synthesised once and cached in `data/voice/cache/` (0600), keyed by voice + speed + text so a changed `HENRY_TTS_VOICE`/`HENRY_TTS_SPEED` re-renders instead of replaying an old clip. |
 | `POST /api/voice/talk/session` | `{event:"start"}` / `{event:"end", turns, reason}` → `talk.session.started/ended` activity. |
 | `GET/POST /api/voice/settings` | `privateMode`, `allowWrites`, `talkEnabled`, `retentionDays` (same-origin writes). |

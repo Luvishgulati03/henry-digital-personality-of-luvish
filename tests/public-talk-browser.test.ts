@@ -111,6 +111,56 @@ test("public talk: a streamed reply starts speaking its first sentence before th
   }
 });
 
+test("public talk: the next sentences are fetched while one plays, and the next starts on `ended` with no synthesis wait", { timeout: 120_000 }, async (t) => {
+  // Each synthesis takes 400 ms and each clip plays 700 ms: fetching a sentence only after the
+  // previous one ended would leave a 400 ms+ hole between them.
+  const h = await publicHarness({ ttsDelayMs: 400, ttsAudioMs: 700 });
+  const browser = await launch();
+  if (!browser) { await h.close(); t.skip("Playwright Chromium is not installed"); return; }
+  const errors: string[] = [];
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("https://cdn.jsdelivr.net/**", (route) => route.abort());
+    await page.route("**/vendor/vad/**", (route) => route.abort());
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.addInitScript(() => {
+      const marks: Array<[string, number]> = [];
+      (window as any).__marks = marks;
+      const original = window.fetch;
+      window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input instanceof Request ? input.url : input).includes("/api/public/voice/speak")) marks.push(["speak", performance.now()]);
+        return original(input, init);
+      }) as typeof fetch;
+      for (const name of ["playing", "ended"]) document.addEventListener(name, () => marks.push([name, performance.now()]), true);
+    });
+    h.stream.current = () => ({ events: claudeStream(["Alex Example builds products. ", "Mostly dashboards. ", "Ask me more!"]) });
+    await page.goto(`${h.base}/public/talk`);
+    await page.waitForFunction(() => (window as any).HenryTalk?.testing.voiceStatus != null);
+    await page.getByRole("button", { name: "Tap to talk", exact: true }).click();
+    await waitState(page, "Listening");
+    const greetingMarks = await page.evaluate(() => (window as any).__marks.length);
+    await speakOneUtterance(page);
+    await waitState(page, "Speaking");
+    await waitState(page, "Listening");
+    const marks: Array<[string, number]> = (await page.evaluate(() => (window as any).__marks)).slice(greetingMarks);
+    const speaks = marks.filter(([name]) => name === "speak").map(([, at]) => at);
+    const plays = marks.filter(([name]) => name === "playing").map(([, at]) => at);
+    const ends = marks.filter(([name]) => name === "ended").map(([, at]) => at);
+    assert.equal(speaks.length, 3);
+    assert.equal(plays.length, 3);
+    assert.ok(speaks[2] < ends[0], "the third sentence was requested before the first finished playing");
+    const gaps = plays.slice(1).map((at, index) => at - ends[index]);
+    assert.ok(gaps.every((gap) => gap < 250), `gaps between sentences stay short: ${gaps.map(Math.round).join(", ")} ms`);
+    assert.deepEqual(h.tts.slice(-3), ["Alex Example builds products.", "Mostly dashboards.", "Ask me more!"]);
+    assert.deepEqual(errors, []);
+    await context.close();
+  } finally {
+    await browser.close();
+    await h.close();
+  }
+});
+
 test("public talk: with the CDN unreachable, Silero loads from the local /vendor/vad/ fallback", { timeout: 120_000 }, async (t) => {
   const h = await publicHarness();
   const browser = await launch();

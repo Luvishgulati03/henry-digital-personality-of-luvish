@@ -43,6 +43,8 @@ export interface PublicHarness {
   sends: string[];
   notes: Array<{ content: string; input: Record<string, unknown> | undefined }>;
   tts: string[];
+  /** How long the fake synthesiser takes per call (adjustable mid-test). */
+  ttsDelay: { ms: number };
   stt: number[];
   sweep(): Promise<number>;
   close(): Promise<void>;
@@ -52,7 +54,7 @@ export function packDir(root: string): string {
   return path.join(root, "data", "public-pack", "published");
 }
 
-export async function publicHarness(options: { pack?: boolean; mode?: Partial<PublicModeConfig>; now?: () => number } = {}): Promise<PublicHarness> {
+export async function publicHarness(options: { pack?: boolean; mode?: Partial<PublicModeConfig>; now?: () => number; ttsDelayMs?: number; ttsAudioMs?: number } = {}): Promise<PublicHarness> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "henry-public-e2e-"));
   fs.cpSync(path.join(process.cwd(), "workflows"), path.join(root, "workflows"), { recursive: true });
   process.env.HENRY_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
@@ -91,12 +93,17 @@ export async function publicHarness(options: { pack?: boolean; mode?: Partial<Pu
   const sends: string[] = [];
   const notes: PublicHarness["notes"] = [];
   const tts: string[] = [];
+  const ttsDelay = { ms: options.ttsDelayMs ?? 0 };
   const stt: number[] = [];
   const voice = {
     sttEnabled: () => true,
     ttsEnabled: () => true,
     transcribe: async (audio: Buffer) => { stt.push(audio.length); return { text: "What does Alex Example build?" }; },
-    synthesize: async (text: string) => { tts.push(text); return tone(); },
+    synthesize: async (text: string) => {
+      tts.push(text);
+      if (ttsDelay.ms) await new Promise((resolve) => setTimeout(resolve, ttsDelay.ms));
+      return options.ttsAudioMs ? tone(Math.round(16 * options.ttsAudioMs)) : tone();
+    },
   } as unknown as DashboardVoice;
   const mode: PublicModeConfig = { ...publicModeConfig(runtime.config, {}), ...options.mode };
   let sweep: () => Promise<number> = async () => 0;
@@ -120,7 +127,7 @@ export async function publicHarness(options: { pack?: boolean; mode?: Partial<Pu
   assert.ok(address && typeof address !== "string");
   return {
     base: `http://127.0.0.1:${address.port}`,
-    runtime, runs, reply, stream, log, sends, notes, tts, stt,
+    runtime, runs, reply, stream, log, sends, notes, tts, ttsDelay, stt,
     sweep: () => sweep(),
     async close() {
       await new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); });

@@ -4,7 +4,8 @@ import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { HenryConfig } from "../config.ts";
 import type { ActivityKind } from "../types.ts";
-import { splitSentences, stripForSpeech } from "../voice/speakable.ts";
+import { speechChunks, stripForSpeech } from "../voice/speakable.ts";
+import { SpeechQueue, SpeechQueueFull } from "../voice/speech-queue.ts";
 import { publicModeConfig, type PublicModeConfig } from "./config.ts";
 import { PublishedPackCache } from "./pack.ts";
 import { readPublicPersona } from "./persona.ts";
@@ -154,6 +155,11 @@ function cloudflareClientIp(request: http.IncomingMessage): string | undefined {
  * Visitor-facing lines (Henry's voice, nothing personal).
  * ---------------------------------------------------------------- */
 
+/** Speech requests one visitor may have open at once: the playing sentence plus two prefetched. */
+export const MAX_SPEAK_REQUESTS_PER_VISITOR = 4;
+/** Parts of one reply the speak route keeps queued ahead of the part it is writing. */
+const SPEAK_LOOKAHEAD = 3;
+
 export const PUBLIC_LINES = Object.freeze({
   busy: "I'm in a few conversations at once right now. Give me a minute, then ask me again?",
   rate: "You're quick! Give me a few seconds, then ask again.",
@@ -185,6 +191,11 @@ export interface PublicSurfaceDeps {
   memory: { remember(content: string, input?: { source?: string; tier?: string; importance?: number; metadata?: Record<string, unknown> }): Promise<string> };
   runner: PublicRunner;
   voice: PublicVoice;
+  /**
+   * The process-wide speech queue (src/voice/speech-queue.ts): one synthesis at a time, fair across
+   * visitors and the owner. Defaults to a queue of this surface's own over `voice.synthesize`.
+   */
+  speech?: SpeechQueue;
   /** Cached synthesis of a fixed phrase (the dashboard's prompt cache). */
   synthesizeCached: (text: string) => Promise<Buffer>;
   fillers: readonly string[];
@@ -336,7 +347,19 @@ export function createPublicSurface(deps: PublicSurfaceDeps): PublicSurface {
   const pinger = new OwnerPinger(deps.send, { ownerName, noticeIntervalMs: mode.noticeIntervalMs, pingsPerHour: mode.pingsPerHour }, now);
   const blockedValues = [deps.config.telegramBotToken, deps.config.telegramChatId, deps.config.dashboardToken, env.HENRY_DASH_SECRET, env.HENRY_KOKORO_TOKEN];
   let sttBusy = false;
-  let ttsBusy = false;
+  // Speech: each streamed sentence of a voice reply is queued for synthesis the moment it is
+  // released, so the page's request for it (made while the previous sentence plays) finds the WAV
+  // ready or in flight. Keyed `<visitor>:<sentence or reply id>:<part>`.
+  const speech = deps.speech ?? new SpeechQueue((text, options) => deps.voice.synthesize(text, options));
+  const speechKey = (visitorId: string, id: string, part: number): string => `${visitorId}:${id}:${part}`;
+  const prefetchSpeech = (visitorId: string, id: string, parts: readonly string[]): void => {
+    if (!deps.voice.ttsEnabled()) return;
+    // Over the queue's caps a part is simply not prefetched; the page's request queues it then.
+    parts.forEach((part, index) => { speech.cached(speechKey(visitorId, id, index), visitorId, part, { language: "en" }).catch(() => undefined); });
+  };
+  // Speech requests in flight per visitor: the page asks for the playing sentence and prefetches
+  // the next two, so a few are normal; more than that is not a talk page.
+  const speakRequests = new Map<string, number>();
 
   const record = (kind: ActivityKind, message: string, metadata: Record<string, unknown> = {}): void => {
     void deps.activity.record(kind, message, { public: true, ...metadata }).catch(() => undefined);
@@ -461,6 +484,10 @@ export function createPublicSurface(deps: PublicSurfaceDeps): PublicSurface {
     const started = now();
     let firstSentMs: number | null = null;
     let segmentsSent = 0;
+    // The first sentence SPOKEN (again after a reset) is split at a clause so audio starts sooner.
+    let firstSpoken = true;
+    // A new turn: whatever an earlier turn still had queued for synthesis is no longer wanted.
+    speech.cancel(visitor.id);
     // Streamed sentences. A voice turn gets an id per sentence so the talk page can start speaking
     // the first one at once; the first sentence of a reply pays the speech rate limit, the rest
     // ride on it (once each).
@@ -469,13 +496,16 @@ export function createPublicSurface(deps: PublicSurfaceDeps): PublicSurface {
       let segmentId: string | undefined;
       if (voiceTurn) {
         segmentId = crypto.randomBytes(9).toString("base64url");
-        visitors.recordSegment(visitor, segmentId, text, segmentsSent > 0);
+        const parts = speechChunks(stripForSpeech(text) || text, { firstChunk: firstSpoken });
+        firstSpoken = false;
+        visitors.recordSegment(visitor, segmentId, text, segmentsSent > 0, parts);
+        prefetchSpeech(visitor.id, segmentId, parts);
       }
       segmentsSent += 1;
       write("token", { text, ...(segmentId ? { replyId: segmentId } : {}) });
     };
     const stream = new PublicReplyStream(ownerName, blockedValues, (output) => {
-      if (output.type === "reset") { write("reset", {}); return; }
+      if (output.type === "reset") { speech.cancel(visitor.id); firstSpoken = true; write("reset", {}); return; }
       sendPiece(output.text);
     });
     try {
@@ -514,7 +544,7 @@ export function createPublicSurface(deps: PublicSurfaceDeps): PublicSurface {
         });
         note(response, { ...timings, failed: failure, streamed: segmentsSent });
         // Anything streamed from a discarded answer (e.g. a tool call surfaced late) is withdrawn.
-        if (stream.streamed) write("reset", {});
+        if (stream.streamed) { speech.cancel(visitor.id); write("reset", {}); }
         write("error", { error: PUBLIC_LINES.failed });
         return;
       }
@@ -524,7 +554,13 @@ export function createPublicSurface(deps: PublicSurfaceDeps): PublicSurface {
       const replyId = crypto.randomBytes(9).toString("base64url");
       visitors.recordExchange(visitor, message, guarded.text, replyId);
       if (finish.action === "append") for (const piece of finish.pieces) sendPiece(piece);
-      else write("replace", { text: guarded.text });
+      else {
+        // Withdrawn stream: its queued sentences are dropped, and the replacement (spoken by its
+        // reply id) is queued now.
+        speech.cancel(visitor.id);
+        write("replace", { text: guarded.text });
+      }
+      if (voiceTurn && finish.action !== "append") prefetchSpeech(visitor.id, replyId, speechChunks(stripForSpeech(guarded.text) || guarded.text, { firstChunk: true }));
       record("public.turn", "Public turn answered", {
         provider: turn.provider, model: turn.model ?? null, durationMs: turn.durationMs, firstTextMs: turn.firstTextMs ?? null, firstSentMs,
         chars: guarded.text.length, voice: voiceTurn, blocked: !guarded.ok, streamed: segmentsSent, replaced: finish.action === "replace",
@@ -536,7 +572,7 @@ export function createPublicSurface(deps: PublicSurfaceDeps): PublicSurface {
     } catch (error) {
       record("public.turn", "Public turn threw", { error: (error instanceof Error ? error.message : String(error)).slice(0, 200), failure: "threw" });
       note(response, { failed: "threw", totalMs: now() - started });
-      if (stream.streamed) write("reset", {});
+      if (stream.streamed) { speech.cancel(visitor.id); write("reset", {}); }
       write("error", { error: PUBLIC_LINES.failed });
     } finally {
       release?.();
@@ -615,11 +651,13 @@ export function createPublicSurface(deps: PublicSurfaceDeps): PublicSurface {
     const replyId = typeof input.replyId === "string" ? input.replyId : "";
     const owner = visitors.get(visitorId);
     const segment = replyId ? owner?.segments.get(replyId) : undefined;
-    const text = (replyId ? owner?.replies.get(replyId) : undefined) ?? segment?.text;
-    if (!text) { sendJson(response, 404, { error: "Nothing to say." }); return; }
-    if (ttsBusy) { note(response, { busy: true }); sendJson(response, 429, { error: "One moment." }); return; }
+    const whole = replyId ? owner?.replies.get(replyId) : undefined;
+    const text = whole ?? segment?.text;
+    if (!text || !owner) { sendJson(response, 404, { error: "Nothing to say." }); return; }
+    const inFlight = speakRequests.get(visitorId) ?? 0;
+    if (inFlight >= MAX_SPEAK_REQUESTS_PER_VISITOR) { note(response, { busy: true }); sendJson(response, 429, { error: "One moment." }); return; }
     // A follow-on sentence of a streamed reply is free once (its first sentence paid).
-    const free = segment?.free === true;
+    const free = whole === undefined && segment?.free === true;
     if (free) segment.free = false;
     if (!free && !audioLimiter.take(clientKey(request, tunnelled))) {
       refuse("speech-rate", "Public speech rate-limited");
@@ -627,27 +665,49 @@ export function createPublicSurface(deps: PublicSurfaceDeps): PublicSurface {
       sendJson(response, 429, { error: PUBLIC_LINES.rate });
       return;
     }
-    ttsBusy = true;
+    // The same pieces, under the same keys, that the chat turn queued when it released the text.
+    const parts = whole !== undefined
+      ? speechChunks(stripForSpeech(whole) || whole, { firstChunk: true })
+      : segment?.parts ?? speechChunks(stripForSpeech(text) || text);
+    speakRequests.set(visitorId, inFlight + 1);
     const ttsStarted = now();
+    const prefetched = parts.filter((_, index) => speech.peek(speechKey(visitorId, replyId, index)) !== undefined).length;
+    // Only a few parts are queued ahead of the one being written, so one long reply cannot fill
+    // the visitor's share of the queue; each part is still queued well before it is needed.
+    const pending: Array<Promise<Buffer>> = [];
+    const ensure = (index: number): void => {
+      for (let i = index; i < Math.min(parts.length, index + SPEAK_LOOKAHEAD); i++) {
+        pending[i] ??= speech.cached(speechKey(visitorId, replyId, i), visitorId, parts[i], { language: "en" });
+      }
+    };
+    const head = (): void => {
+      if (!response.headersSent) response.writeHead(200, securityHeaders({ "content-type": "application/x-henry-wav-seq", "cache-control": "no-store" }));
+    };
     try {
-      const spoken = stripForSpeech(text) || text;
-      const pieces = splitSentences(spoken);
-      response.writeHead(200, securityHeaders({ "content-type": "application/x-henry-wav-seq", "cache-control": "no-store" }));
-      for (const piece of pieces.length ? pieces : [spoken]) {
+      for (let index = 0; index < parts.length; index++) {
         if (response.destroyed) break;
-        const audio = await deps.voice.synthesize(piece, { language: "en" });
+        ensure(index);
+        const audio = await pending[index];
+        // Headers wait for the first WAV, so a full queue can still answer 503.
+        head();
         const prefix = Buffer.alloc(4);
         prefix.writeUInt32BE(audio.length, 0);
         response.write(prefix);
         response.write(audio);
       }
-      note(response, { ttsMs: now() - ttsStarted, segment: Boolean(segment) });
+      note(response, { ttsMs: now() - ttsStarted, segment: Boolean(segment), parts: parts.length, prefetched });
+      head();
       response.end();
-    } catch {
-      note(response, { ttsMs: now() - ttsStarted, failed: "tts" });
+    } catch (error) {
+      const full = error instanceof SpeechQueueFull;
+      note(response, { ttsMs: now() - ttsStarted, ...(full ? { busy: true } : { failed: "tts" }) });
       if (response.headersSent) { if (!response.writableEnded) response.end(); }
-      else sendJson(response, 503, { error: "Speech is unavailable." });
-    } finally { ttsBusy = false; }
+      else sendJson(response, 503, { error: full ? "One moment." : "Speech is unavailable." });
+    } finally {
+      for (const promise of pending) promise?.catch(() => undefined);
+      const left = (speakRequests.get(visitorId) ?? 1) - 1;
+      if (left > 0) speakRequests.set(visitorId, left); else speakRequests.delete(visitorId);
+    }
   };
 
   /* ---------------- POST /api/public/client-log ----------------
@@ -748,7 +808,7 @@ export function createPublicSurface(deps: PublicSurfaceDeps): PublicSurface {
       if (route === "POST /api/public/ping") { await ping(request, response, tunnelled, visitorId); return true; }
       if (route === "POST /api/public/reset") {
         const visitor = visitors.get(visitorId);
-        if (visitor && !visitor.busy) visitors.resetConversation(visitor);
+        if (visitor && !visitor.busy) { visitors.resetConversation(visitor); speech.cancel(visitor.id); }
         sendJson(response, 200, { ok: true });
         return true;
       }
