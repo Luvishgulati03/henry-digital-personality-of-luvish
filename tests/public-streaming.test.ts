@@ -125,6 +125,56 @@ test("streaming voice: every sentence gets a speech id; follow-on sentences are 
   } finally { await h.close(); }
 });
 
+test("streaming voice: each sentence is synthesised as it is released; the page's request gets that WAV; requests queue instead of bouncing", async () => {
+  const h = await publicHarness({ ttsDelayMs: 40 });
+  try {
+    const first = "Alex Example is a product manager who builds AI tools for small businesses, and he has spent the last few years shipping voice and chat assistants. ";
+    h.stream.current = () => ({ events: claudeStream([first, "Ask me more."]) });
+    const visit = async (ip: string) => {
+      const cookie = cookieFrom(await fetch(`${h.base}/public/talk`, { headers: tunnel({}, ip) }));
+      const events = await sse(await chat(h.base, "tell me", cookie, { voice: true }, ip));
+      return { cookie, ip, ids: events.filter((event) => event.event === "token").map((event) => String(event.data.replyId)) };
+    };
+    const speak = (who: { cookie: string; ip: string }, replyId: string) => fetch(`${h.base}/api/public/voice/speak`, { method: "POST", headers: { ...tunnel({}, who.ip), ...json, origin: PUBLIC_ORIGIN, cookie: who.cookie }, body: JSON.stringify({ replyId }) });
+    const frameCount = (bytes: Buffer): number => { let n = 0; for (let at = 0; at + 4 <= bytes.length; at += 4 + bytes.readUInt32BE(at)) n++; return n; };
+
+    const a = await visit("203.0.113.7");
+    assert.equal(a.ids.length, 2);
+    // No speak request yet, and the whole reply is already queued: the long first sentence split
+    // at its clause so the first audio is shorter to make.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(h.tts, [
+      "Alex Example is a product manager who builds AI tools for small businesses,",
+      "and he has spent the last few years shipping voice and chat assistants.",
+      "Ask me more.",
+    ]);
+    // The page asks for both sentences at once (playing + prefetch): both served, from the cache.
+    const responses = await Promise.all(a.ids.map((id) => speak(a, id)));
+    assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+    const bodies = await Promise.all(responses.map(async (response) => Buffer.from(await response.arrayBuffer())));
+    assert.deepEqual(bodies.map(frameCount), [2, 1]);
+    assert.equal(h.tts.length, 3, "nothing synthesised twice");
+    const logged = readLogEntries(h.log.file).filter((entry) => entry.route === "POST /api/public/voice/speak");
+    assert.ok(logged.every((entry) => entry.prefetched === entry.parts), "every part was already queued when the page asked");
+
+    // Two visitors at once: the second is queued behind the first, not refused.
+    h.tts.length = 0;
+    const [b, c] = await Promise.all([visit("198.51.100.20"), visit("198.51.100.21")]);
+    const both = await Promise.all([speak(b, b.ids[0]), speak(c, c.ids[0])]);
+    assert.deepEqual(both.map((response) => response.status), [200, 200]);
+    await Promise.all(both.map((response) => response.arrayBuffer()));
+
+    // One visitor may hold at most MAX_SPEAK_REQUESTS_PER_VISITOR speech requests open (these wait
+    // on syntheses still in flight).
+    h.ttsDelay.ms = 300;
+    const d = await visit("198.51.100.22");
+    const burst = await Promise.all(Array.from({ length: 5 }, () => speak(d, d.ids[0])));
+    const statuses = burst.map((response) => response.status).sort();
+    assert.deepEqual(statuses, [200, 200, 200, 200, 429]);
+    await Promise.all(burst.map((response) => response.arrayBuffer()));
+  } finally { await h.close(); }
+});
+
 test("public log: one JSON line per request with timings, a hashed visitor, CF-Ray; never text, IPs, or cookies", async () => {
   const h = await publicHarness();
   try {

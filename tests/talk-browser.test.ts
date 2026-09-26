@@ -186,8 +186,13 @@ test("talk page: press, greeting, a fake-VAD turn with filler + spoken queue, re
     assert.equal(be.chatCalls[0].transcriptId, "t-1");
     assert.equal(be.chatCalls[0].conversationId, "conv_1");
     assert.equal(be.counts.filler, 1, "the gather pause earned exactly one filler");
-    assert.deepEqual(be.speakCalls.map((call) => call.text), ["Looking at Engram now.", "Two updates since Monday."], "spoken lines play in order");
+    // Both lines are fetched at once (the second is prefetched while the first plays), so the
+    // requests may land in either order; the caption below shows they PLAYED in order.
+    const byText = new Map(be.speakCalls.map((call) => [call.text, call]));
+    assert.deepEqual([...byText.keys()].sort(), ["Looking at Engram now.", "Two updates since Monday."]);
     assert.ok(be.speakCalls.every((call) => call.chunk === true));
+    assert.equal(byText.get("Looking at Engram now.")?.first, true, "the turn's first line asks for a short first chunk");
+    assert.equal(byText.get("Two updates since Monday.")?.first, undefined);
     assert.equal(await page.locator("#heard").textContent(), "what's the latest on Engram");
     assert.equal(await page.locator("#reply").textContent(), "Two updates since Monday.");
     assert.equal(await page.locator("#talk").getAttribute("aria-pressed"), "true");

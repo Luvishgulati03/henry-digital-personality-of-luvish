@@ -86,6 +86,46 @@ export function splitSentences(text: string): string[] {
   return pieces.map((piece) => piece.trim()).filter(Boolean);
 }
 
+/** The first spoken chunk of a reply aims for this many characters, so its audio starts sooner. */
+export const FIRST_CHUNK = Object.freeze({ min: 60, max: 120, stretch: 160, floor: 30 });
+
+/**
+ * Splits a long sentence once, at a natural clause boundary (after `,` `;` `:` or around a dash),
+ * so the first piece is about FIRST_CHUNK.min–max characters. Prefers the longest head within
+ * min–max, then the shortest head up to `stretch`, then the longest head of at least `floor`.
+ * A sentence of at most `max` characters, or one with no usable boundary, stays whole.
+ */
+export function splitFirstClause(sentence: string): string[] {
+  const text = sentence.trim();
+  if (text.length <= FIRST_CHUNK.max) return text ? [text] : [];
+  const cuts: number[] = [];
+  for (const match of text.matchAll(/[,;:](?=\s)|\s[—–-](?=\s)/gu)) {
+    // The head keeps a comma/semicolon/colon; a dash starts the tail's pause instead.
+    const end = match[0].trim() === match[0] ? (match.index ?? 0) + 1 : (match.index ?? 0);
+    const tail = text.slice(end).replace(/^[\s—–-]+/u, "").trim();
+    if (tail.length >= 8) cuts.push(end);
+  }
+  const pick = [...cuts].reverse().find((cut) => cut >= FIRST_CHUNK.min && cut <= FIRST_CHUNK.max)
+    ?? cuts.find((cut) => cut > FIRST_CHUNK.max && cut <= FIRST_CHUNK.stretch)
+    ?? [...cuts].reverse().find((cut) => cut >= FIRST_CHUNK.floor && cut < FIRST_CHUNK.min);
+  if (pick === undefined) return [text];
+  const head = text.slice(0, pick).trim();
+  const tail = text.slice(pick).replace(/^[\s—–-]+/u, "").trim();
+  return [head, tail];
+}
+
+/**
+ * The pieces a spoken text is synthesised in: one per sentence, and with `firstChunk` the first
+ * sentence of a reply is split at a clause boundary when long (splitFirstClause). Later pieces
+ * stay sentence-sized: they are synthesised while the earlier ones play.
+ */
+export function speechChunks(text: string, options: { firstChunk?: boolean } = {}): string[] {
+  const sentences = splitSentences(text);
+  const pieces = sentences.length ? sentences : (text.trim() ? [text.trim()] : []);
+  if (!options.firstChunk || !pieces.length) return pieces;
+  return [...splitFirstClause(pieces[0]), ...pieces.slice(1)];
+}
+
 export const REDACTED_SPEECH = "on your screen";
 
 /** ISO dates (2026-09-25) are useful to hear and are not private; everything else numeric-long is masked. */

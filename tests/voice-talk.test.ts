@@ -254,6 +254,39 @@ test("POST /api/voice/speak: chunk framing, redaction before synthesis, private 
   } finally { await h.close(); }
 });
 
+test("POST /api/voice/speak: a second request queues behind the first (no 429), one synthesis at a time; first: true splits a long first sentence", async () => {
+  const h = await harness("henry-talk-tts-queue-");
+  try {
+    let active = 0, maxActive = 0;
+    (h.fake.voice as { synthesize: (text: string) => Promise<Buffer> }).synthesize = async (text: string) => {
+      active++; maxActive = Math.max(maxActive, active);
+      h.fake.tts.push(text);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      active--;
+      return tone();
+    };
+    const speak = (payload: Record<string, unknown>) => fetch(`${h.base}/api/voice/speak`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ language: "en", chunk: true, ...payload }) });
+    const long = "Henry checked the inbox and the calendar for this week, and there is nothing that needs your attention before the Thursday review.";
+    // The page asks for the playing line and prefetches the next while the first still synthesises.
+    const pendingFirst = speak({ text: `${long} Two drafts wait.`, first: true });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const [first, second] = await Promise.all([pendingFirst, speak({ text: "Anything else?" })]);
+    assert.deepEqual([first.status, second.status], [200, 200]);
+    assert.deepEqual([frames(Buffer.from(await first.arrayBuffer())).length, frames(Buffer.from(await second.arrayBuffer())).length], [3, 1]);
+    assert.equal(maxActive, 1, "the worker never sees two syntheses at once");
+    assert.deepEqual(h.fake.tts, [
+      "Henry checked the inbox and the calendar for this week,",
+      "and there is nothing that needs your attention before the Thursday review.",
+      "Two drafts wait.",
+      "Anything else?",
+    ], "the first request's pieces are synthesised before the prefetched line");
+    // Without `first` a long sentence stays whole.
+    h.fake.tts.length = 0;
+    await (await speak({ text: long })).arrayBuffer();
+    assert.deepEqual(h.fake.tts, [long]);
+  } finally { await h.close(); }
+});
+
 test("speakableForRoute: private mode keeps the three neutral lines, replaces everything else", () => {
   const priv = { privateMode: true };
   assert.equal(speakableForRoute(PRIVATE_SPOKEN_WORKING, priv), PRIVATE_SPOKEN_WORKING);

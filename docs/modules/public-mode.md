@@ -127,6 +127,22 @@ error    {error}
 ```
 
 The talk page starts speaking the first sentence while the rest is still being written.
+
+**Speech is made before the page asks for it.** When the stream releases a sentence on a voice
+turn, the server queues it for synthesis at once, in the process-wide speech queue
+(`src/voice/speech-queue.ts`). That queue runs one synthesis at a time on the single Kokoro
+worker, FIFO within a visitor and round-robin across visitors, so one visitor's long reply cannot
+hold another visitor's first sentence. The first sentence spoken in a reply is split once at a
+clause boundary when it runs past 120 characters, so the first audio is shorter to make. The WAV
+is cached in memory for 90 seconds, keyed by visitor, sentence id and part. The page's
+`/api/public/voice/speak` request (sent for the playing sentence and prefetched for the next
+two) returns it at once or waits only for the synthesis already running. A new turn, a `reset`,
+a `replace` or `/api/public/reset` drops that visitor's queued sentences. Caps: at most 4 speech
+requests open per visitor (429 `One moment.` beyond that) and 16 queued pieces per visitor, 48
+overall. A piece over those caps is not prefetched; the page's own request queues it later,
+answering 503 `One moment.` if the queue is still full, and the page retries that a few times.
+The request log's speak lines carry `parts` and `prefetched`, how many of those parts were
+already queued when the page asked.
 A follow-on sentence of a streamed reply may be spoken once without paying the speech
 rate limit (its first sentence already did); replays pay as usual. Text that looks like
 a CLI usage-limit or logged-out notice is held, never streamed.

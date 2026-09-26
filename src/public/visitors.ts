@@ -64,9 +64,10 @@ export interface Visitor {
   /**
    * Streamed sentences of a voice reply, by id, so the talk page can speak the first sentence
    * while the rest is still being written. `free` marks a follow-on sentence of a reply whose
-   * first sentence already paid the speech rate limit; it is free once, then spent.
+   * first sentence already paid the speech rate limit; it is free once, then spent. `parts` are
+   * the pieces it is synthesised in (speechChunks), fixed when it was released.
    */
-  segments: Map<string, { text: string; free: boolean }>;
+  segments: Map<string, { text: string; free: boolean; parts?: string[] }>;
 }
 
 const MAX_QUESTIONS = 30;
@@ -118,8 +119,8 @@ export class VisitorStore {
   }
 
   /** Registers one streamed, already-guarded sentence as speakable by id. */
-  recordSegment(visitor: Visitor, segmentId: string, text: string, free: boolean): void {
-    visitor.segments.set(segmentId, { text, free });
+  recordSegment(visitor: Visitor, segmentId: string, text: string, free: boolean, parts?: string[]): void {
+    visitor.segments.set(segmentId, { text, free, ...(parts ? { parts } : {}) });
     while (visitor.segments.size > MAX_SEGMENTS_KEPT) visitor.segments.delete(visitor.segments.keys().next().value as string);
   }
 

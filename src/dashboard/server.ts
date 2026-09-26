@@ -29,7 +29,8 @@ import type { ActivityEvent, ProviderEvent, ProviderName } from "../types.ts";
 import { classifyIntentTier } from "../agent/intent.ts";
 import { isLongResearchAsk } from "../orchestration/luna.ts";
 import { reflexKind, renderReflex } from "../reflex.ts";
-import { createSpokenFenceFilter, speakableSummary, splitSentences, stripSpokenBlock } from "../voice/speakable.ts";
+import { createSpokenFenceFilter, speakableSummary, speechChunks, stripSpokenBlock } from "../voice/speakable.ts";
+import { SpeechCancelled, SpeechQueue, SpeechQueueFull } from "../voice/speech-queue.ts";
 import {
   PRIVATE_SPOKEN_DONE, PRIVATE_SPOKEN_INPUT, PRIVATE_SPOKEN_WORKING, finalizeSpoken, readVoicePolicy, type VoicePolicy,
 } from "../voice/policy.ts";
@@ -470,8 +471,10 @@ export function ttsPromptCacheHash(text: string, env: NodeJS.ProcessEnv = proces
  * dashboards, or a changed voice, never share a cache entry.
  */
 const ttsPromptCache = new Map<string, Buffer>();
+/** Pieces of one owner speak request kept queued ahead of the piece being written. */
+const OWNER_SPEAK_LOOKAHEAD = 4;
 
-async function synthesizeCachedPrompt(voice: DashboardVoice, dataDir: string, text: string): Promise<Buffer> {
+async function synthesizeCachedPrompt(voice: Pick<DashboardVoice, "synthesize">, dataDir: string, text: string): Promise<Buffer> {
   const { voice: ttsVoice, speed: ttsSpeed } = ttsVoiceFromEnv();
   const key = `${dataDir}\u0000${ttsVoice}\u0000${ttsSpeed}\u0000${text}`;
   const cached = ttsPromptCache.get(key);
@@ -896,7 +899,12 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
   // the service simply reports disabled and every /api/voice route says so cleanly.
   const voice: DashboardVoice = options.voice ?? new LocalVoiceService(voiceConfigFromEnv());
   let sttBusy = false;
-  let ttsBusy = false;
+  // THE SPEECH QUEUE (src/voice/speech-queue.ts): every synthesis in this process (owner Talk, the
+  // fixed Talk phrases, public visitors) runs through it, one at a time, FIFO per requester and
+  // round-robin across them. A request that arrives while another is synthesising waits its turn
+  // instead of being refused, so the Talk pages can ask for the next sentence while one plays.
+  const speech = new SpeechQueue((text, synthesisOptions) => voice.synthesize(text, synthesisOptions as { language?: VoiceLanguage }));
+  const promptVoice: Pick<DashboardVoice, "synthesize"> = { synthesize: (text, synthesisOptions) => speech.run("prompt", text, synthesisOptions) };
   // Opened on first use, so a dashboard that never hears a word never creates the voice DB.
   let transcriptStore: VoiceTranscriptStore | undefined;
   const transcripts = (): VoiceTranscriptStore => {
@@ -918,7 +926,7 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
   if (options.warmVoicePrompts !== false && voice.ttsEnabled()) {
     const phrases: Array<[TalkPromptKind, number]> = [["greeting", 0], ["reprompt", 0], ...TALK_PHRASES.fillers.map((_, i): [TalkPromptKind, number] => ["filler", i])];
     for (const [kind, variant] of phrases) {
-      void synthesizeCachedPrompt(voice, runtime.config.dataDir, talkPromptText(kind, variant)).catch(() => undefined);
+      void synthesizeCachedPrompt(promptVoice, runtime.config.dataDir, talkPromptText(kind, variant)).catch(() => undefined);
     }
   }
   // WRITABLE voice turns (voice.allowWrites on) in flight in THIS process. While > 0, approval
@@ -941,7 +949,8 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
     memory: options.publicSurface?.memory ?? runtime.memory,
     runner: options.publicSurface?.runner ?? runtime.agent.providerRunner,
     voice,
-    synthesizeCached: (text) => synthesizeCachedPrompt(voice, runtime.config.dataDir, text),
+    speech,
+    synthesizeCached: (text) => synthesizeCachedPrompt(promptVoice, runtime.config.dataDir, text),
     fillers: TALK_PHRASES.fillers,
     vendorAsset: vendorVadAsset,
     health: (request, response) => writeHealth(request, response, runtime),
@@ -1351,7 +1360,7 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
         const kind: TalkPromptKind = route === "/api/voice/greeting" ? "greeting" : route === "/api/voice/reprompt" ? "reprompt" : "filler";
         const variant = Math.max(0, Math.min(99, Number.parseInt(url.searchParams.get("v") ?? "0", 10) || 0));
         try {
-          const audio = await synthesizeCachedPrompt(voice, runtime.config.dataDir, talkPromptText(kind, variant));
+          const audio = await synthesizeCachedPrompt(promptVoice, runtime.config.dataDir, talkPromptText(kind, variant));
           response.writeHead(200, { "content-type": "audio/wav", "content-length": audio.length, "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" });
           response.end(audio);
         } catch (error) {
@@ -1446,8 +1455,10 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
       }
       if (request.method === "POST" && route === "/api/voice/speak") {
         if (!voice.ttsEnabled()) { json(response, 503, { error: "Text-to-speech is not set up." }); return; }
-        if (ttsBusy) { json(response, 429, { error: "Henry is already speaking. Please wait." }); return; }
-        ttsBusy = true;
+        // A page that stops listening (a press, a closed tab) drops the parts still waiting.
+        const abort = new AbortController();
+        response.once("close", () => { if (!response.writableFinished) abort.abort(); });
+        const pending: Array<Promise<Buffer>> = [];
         try {
           const input = await body(request);
           const raw = typeof input.text === "string" ? input.text.trim() : "";
@@ -1459,32 +1470,44 @@ export function startDashboard(runtime: HenryRuntime, options: DashboardOptions 
           if (!text) { json(response, 400, { error: "nothing speakable" }); return; }
           let language: VoiceLanguage = "en";
           if (typeof input.language === "string" && ["auto", "hi", "en", "hi-en"].includes(input.language)) language = input.language;
+          const synth = (piece: string): Promise<Buffer> => speech.run("owner", piece, { language, signal: abort.signal });
           if (input.chunk === true) {
             // Chunked speech: one WAV per sentence so playback starts on the first. The body is
             // `application/x-henry-wav-seq`: frames of a 4-byte big-endian length, then that many
-            // bytes of a complete WAV file, until the stream ends.
-            const sentences = splitSentences(text);
-            const pieces = sentences.length ? sentences : [text];
-            response.writeHead(200, { "content-type": "application/x-henry-wav-seq", "cache-control": "no-store", "x-content-type-options": "nosniff" });
-            for (const piece of pieces) {
+            // bytes of a complete WAV file, until the stream ends. `first: true` (the first line
+            // of a turn) splits a long first sentence at a clause so its audio starts sooner. A
+            // few pieces are queued ahead of the one being written, so the next is ready when
+            // this one has played.
+            const pieces = speechChunks(text, { firstChunk: input.first === true });
+            const ensure = (index: number): void => {
+              for (let i = index; i < Math.min(pieces.length, index + OWNER_SPEAK_LOOKAHEAD); i++) pending[i] ??= synth(pieces[i]);
+            };
+            for (let index = 0; index < pieces.length; index++) {
               if (response.destroyed) break;
-              const audio = await voice.synthesize(piece, { language });
+              ensure(index);
+              const audio = await pending[index];
+              // Headers wait for the first WAV, so a refusal can still be a JSON error.
+              if (!response.headersSent) response.writeHead(200, { "content-type": "application/x-henry-wav-seq", "cache-control": "no-store", "x-content-type-options": "nosniff" });
               const prefix = Buffer.alloc(4);
               prefix.writeUInt32BE(audio.length, 0);
               response.write(prefix);
               response.write(audio);
             }
+            if (!response.headersSent) response.writeHead(200, { "content-type": "application/x-henry-wav-seq", "cache-control": "no-store", "x-content-type-options": "nosniff" });
             response.end();
             return;
           }
-          const audio = await voice.synthesize(text, { language });
+          const audio = await synth(text);
           response.writeHead(200, { "content-type": "audio/wav", "content-length": audio.length, "cache-control": "no-store", "x-content-type-options": "nosniff" });
           response.end(audio);
         } catch (error) {
           // Chunked frames may already be on the wire; a JSON error body is no longer possible.
-          if (response.headersSent) { if (!response.writableEnded) response.end(); }
+          if (response.headersSent || error instanceof SpeechCancelled) { if (!response.writableEnded) response.end(); }
+          else if (error instanceof SpeechQueueFull) json(response, 429, { error: "Henry is already speaking. Please wait." });
           else json(response, error instanceof VoiceError && error.code === "timeout" ? 504 : error instanceof Error && error.message === "Invalid JSON body" ? 400 : 503, { error: error instanceof Error ? error.message : "Speech is unavailable." });
-        } finally { ttsBusy = false; }
+        } finally {
+          for (const promise of pending) promise?.catch(() => undefined);
+        }
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/settings/provider") {
