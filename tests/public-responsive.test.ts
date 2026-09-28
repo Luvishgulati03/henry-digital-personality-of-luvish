@@ -60,7 +60,7 @@ test("public landing, chat and talk pass the mobile/tablet checks and link no ad
         await checkPage(page, `${route} @ ${viewport.name}`);
         const hrefs = await page.evaluate(() => Array.from(document.querySelectorAll("a[href]")).map((a) => a.getAttribute("href")));
         for (const href of hrefs) {
-          assert.ok(href === "/login" ? route === "/" : /^\/public\//.test(href ?? ""), `${route} links ${href}`);
+          assert.ok(/^\/public\//.test(href ?? ""), `${route} links ${href}`);
         }
         await page.close();
       }

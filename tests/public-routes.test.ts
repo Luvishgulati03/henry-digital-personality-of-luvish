@@ -133,8 +133,9 @@ test("the local-admin bypass and the dashboard token never apply to a tunnelled 
     assert.equal((await fetch(`${h.base}/api/approvals`, { headers: { ...tunnel(), cookie: visitor.replace("henry_visitor", "henry_sess") } })).status, 401);
     // Unauthenticated "/" through the tunnel is the landing page, not the dashboard.
     const landing = await (await fetch(`${h.base}/`, { headers: { ...tunnel(), accept: "text/html" } })).text();
-    assert.match(landing, /I'm here to learn more/);
-    assert.match(landing, /href="\/login"/);
+    assert.match(landing, /Talk to Henry/);
+    assert.match(landing, /href="\/public\/talk"/);
+    assert.doesNotMatch(landing, /href="\/login"|Sign in with/, "the landing page never offers a sign-in");
   } finally { await h.close(); }
 });
 
