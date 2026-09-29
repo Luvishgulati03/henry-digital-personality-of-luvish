@@ -73,6 +73,19 @@ test("public landing, chat and talk pass the mobile/tablet checks and link no ad
       assert.equal(await chat.isVisible("#pingDialog"), true);
       await checkPage(chat, `/public/chat ping dialog @ ${viewport.name}`);
       await chat.close();
+      // A typed question really reaches Henry and his answer is shown (regression: a shadowed
+      // variable threw before the fetch and every chat ended in "The connection dropped").
+      // Local preview context: a real browser always sends its real Origin, which the tunnel's
+      // exact-origin check (covered by the fetch tests) would refuse for 127.0.0.1.
+      const localContext = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height } });
+      const asker = await localContext.newPage();
+      await asker.goto(h.base + "/public/chat", { waitUntil: "networkidle" });
+      await asker.fill("#message", "What does Alex do?");
+      await asker.click("#send");
+      await asker.waitForFunction(() => /Alex Example builds products\./.test(document.body.innerText), undefined, { timeout: 15_000 });
+      assert.doesNotMatch(await asker.innerText("body"), /connection dropped/i);
+      await asker.close();
+      await localContext.close();
       await context.close();
     }
   } finally {

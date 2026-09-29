@@ -162,14 +162,14 @@
       const reader = response.body.getReader(), decoder = new TextDecoder();
       // The reply streams a sentence at a time (each already through the server's output guard).
       // `reset`/`replace` withdraw what was streamed; `done` carries the final reply, which wins.
-      let buffer = '', answered = false, live = null, text = '';
+      let buffer = '', answered = false, live = null, shown = '';
       const show = (value) => {
-        text = value;
+        shown = value;
         if (!live) { pending.remove(); live = add('henry', ''); }
-        live.textContent = text;
+        live.textContent = shown;
         log.scrollTop = log.scrollHeight;
       };
-      const withdraw = () => { text = ''; if (live) { live.remove(); live = null; log.appendChild(pending); } };
+      const withdraw = () => { shown = ''; if (live) { live.remove(); live = null; log.appendChild(pending); } };
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -182,7 +182,7 @@
           let data; try { data = JSON.parse(raw); } catch { continue; }
           if (answered) continue;
           if (event === 'status' && data.state === 'queued') pending.setAttribute('aria-label', 'Henry will answer in a moment');
-          else if (event === 'token') show(text + (data.text || ''));
+          else if (event === 'token') show(shown + (data.text || ''));
           else if (event === 'reset') withdraw();
           else if (event === 'replace') show(data.text || '');
           else if (event === 'done') { answered = true; show(data.response || ''); }
